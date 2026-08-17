@@ -5,7 +5,7 @@ from fastapi.responses import RedirectResponse
 
 from core import clients as core_clients
 from core.storage import get_conn
-from webapp.deps import require_staff
+from webapp.deps import link, require_staff
 from webapp.templating import render
 
 router = APIRouter(prefix="/clients")
@@ -30,7 +30,7 @@ def create_view(
         client_id = core_clients.create_client(
             conn, name=name.strip(), phone=phone.strip() or None, notes=notes.strip() or None
         )
-    return RedirectResponse(f"/clients/{client_id}", status_code=303)
+    return RedirectResponse(link(request, f"/clients/{client_id}"), status_code=303)
 
 
 @router.get("/{client_id}")
@@ -39,7 +39,7 @@ def detail_view(request: Request, client_id: int, staff=Depends(require_staff)):
         client = core_clients.get_client(conn, client_id)
         devices = core_clients.get_client_devices(conn, client_id)
     if not client:
-        return RedirectResponse("/clients", status_code=303)
+        return RedirectResponse(link(request, "/clients"), status_code=303)
     return render(request, "client_detail.html", staff=staff, client=client, devices=devices)
 
 
@@ -56,4 +56,4 @@ def edit_view(
         core_clients.update_client(
             conn, client_id, name=name.strip(), phone=phone.strip() or None, notes=notes.strip() or None
         )
-    return RedirectResponse(f"/clients/{client_id}", status_code=303)
+    return RedirectResponse(link(request, f"/clients/{client_id}"), status_code=303)

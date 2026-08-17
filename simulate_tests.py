@@ -8,9 +8,18 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(__file__))
+os.environ.setdefault("CRM_SECRET_KEY", "test-secret-not-for-production")
+
+import hashlib
+import hmac
+import json
+import time
+import urllib.parse
 
 from core import auth, clients, inventory
+from core.session_token import make_token, read_token
 from core.storage import get_conn, init_db
+from core.telegram_auth import validate_init_data
 
 PASS = 0
 FAIL = 0
@@ -34,6 +43,13 @@ def scenario_auth(db_path: str) -> None:
         check("staff created", row is not None and row["id"] == staff_id)
         check("correct password verifies", auth.verify_password("s3cr3t-pass", row["password_hash"]))
         check("wrong password rejected", not auth.verify_password("wrong", row["password_hash"]))
+
+        linked = auth.link_staff_telegram(conn, "owner", 1417059280)
+        check("telegram link succeeds for known login", linked)
+        by_tg = auth.get_staff_by_telegram_id(conn, 1417059280)
+        check("staff found by telegram_id", by_tg is not None and by_tg["id"] == staff_id)
+        check("unknown telegram_id finds nobody", auth.get_staff_by_telegram_id(conn, 111) is None)
+        check("linking unknown login fails", not auth.link_staff_telegram(conn, "nope", 42))
 
 
 def scenario_client_and_repair(db_path: str) -> None:
@@ -99,6 +115,43 @@ def scenario_inventory(db_path: str) -> None:
         check("movements logged", len(movements) == 3)
 
 
+def _build_init_data(bot_token: str, user: dict, auth_date: int) -> str:
+    data = {"auth_date": str(auth_date), "user": json.dumps(user, separators=(",", ":"))}
+    check_string = "\n".join(f"{k}={v}" for k, v in sorted(data.items()))
+    secret_key = hmac.new(b"WebAppData", bot_token.encode(), hashlib.sha256).digest()
+    data["hash"] = hmac.new(secret_key, check_string.encode(), hashlib.sha256).hexdigest()
+    return urllib.parse.urlencode(data)
+
+
+def scenario_telegram_auth() -> None:
+    print("scenario: telegram mini app initData validation")
+    bot_token = "123456:FAKE-TOKEN-FOR-TESTS"
+    user = {"id": 999888777, "first_name": "Тест"}
+
+    valid = _build_init_data(bot_token, user, int(time.time()))
+    parsed = validate_init_data(valid, bot_token)
+    check("valid initData accepted", parsed is not None and parsed["id"] == user["id"])
+
+    wrong_secret = validate_init_data(valid, "other:token")
+    check("wrong bot token rejected", wrong_secret is None)
+
+    tampered = valid.replace("999888777", "999888778")
+    check("tampered payload rejected", validate_init_data(tampered, bot_token) is None)
+
+    stale = _build_init_data(bot_token, user, int(time.time()) - 999999)
+    check("stale auth_date rejected", validate_init_data(stale, bot_token) is None)
+
+
+def scenario_session_token() -> None:
+    print("scenario: url-carried session token")
+    token = make_token(42)
+    check("token round-trips to the same staff_id", read_token(token) == 42)
+    check("garbage token rejected", read_token("not-a-real-token") is None)
+    check("empty token rejected", read_token("") is None)
+    tampered = token[:-1] + ("a" if token[-1] != "a" else "b")
+    check("tampered token rejected", read_token(tampered) is None)
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         db_path = os.path.join(tmp, "test.sqlite3")
@@ -106,6 +159,9 @@ def main() -> None:
         scenario_auth(db_path)
         scenario_client_and_repair(db_path)
         scenario_inventory(db_path)
+
+    scenario_telegram_auth()
+    scenario_session_token()
 
     print(f"\nPASS={PASS} FAIL={FAIL}")
     sys.exit(1 if FAIL else 0)

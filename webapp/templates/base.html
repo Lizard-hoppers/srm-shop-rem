@@ -11,19 +11,19 @@
 <header class="topbar">
   <div class="brand">CRM Сервис-центр</div>
   <nav>
-    <a href="/">Дашборд</a>
-    <a href="/clients">Клиенты</a>
-    <a href="/inventory/products">Товары</a>
-    <a href="/inventory/cells">Ячейки</a>
-    <a href="/inventory/movements">Движения склада</a>
-    <a href="/repairs" class="soon">Ремонты</a>
-    <a href="/sales" class="soon">Продажи</a>
-    <a href="/purchases" class="soon">Приход</a>
-    <a href="/reports" class="soon">Отчёты</a>
+    <a href="{{ link('/') }}">Дашборд</a>
+    <a href="{{ link('/clients') }}">Клиенты</a>
+    <a href="{{ link('/inventory/products') }}">Товары</a>
+    <a href="{{ link('/inventory/cells') }}">Ячейки</a>
+    <a href="{{ link('/inventory/movements') }}">Движения склада</a>
+    <a href="{{ link('/repairs') }}" class="soon">Ремонты</a>
+    <a href="{{ link('/sales') }}" class="soon">Продажи</a>
+    <a href="{{ link('/purchases') }}" class="soon">Приход</a>
+    <a href="{{ link('/reports') }}" class="soon">Отчёты</a>
   </nav>
   <div class="user">
     {{ staff.name }} · {{ role_labels.get(staff.role, staff.role) }}
-    <a href="/logout">Выйти</a>
+    <a href="/miniapp">Выйти</a>
   </div>
 </header>
 {% endif %}

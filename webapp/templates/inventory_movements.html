@@ -4,7 +4,7 @@
 <h1>Движения склада</h1>
 
 <div class="movement-forms">
-  <form method="post" action="/inventory/movements/receive" class="edit-form">
+  <form method="post" action="{{ link('/inventory/movements/receive') }}" class="edit-form">
     <h3>Приход (ручной)</h3>
     <label>Товар
       <select name="product_id" required>
@@ -21,7 +21,7 @@
     <button type="submit">Оприходовать</button>
   </form>
 
-  <form method="post" action="/inventory/movements/writeoff" class="edit-form">
+  <form method="post" action="{{ link('/inventory/movements/writeoff') }}" class="edit-form">
     <h3>Списание / корректировка</h3>
     <label>Товар
       <select name="product_id" required>
@@ -38,7 +38,7 @@
     <button type="submit">Списать</button>
   </form>
 
-  <form method="post" action="/inventory/movements/transfer" class="edit-form">
+  <form method="post" action="{{ link('/inventory/movements/transfer') }}" class="edit-form">
     <h3>Перемещение между ячейками</h3>
     <label>Товар
       <select name="product_id" required>

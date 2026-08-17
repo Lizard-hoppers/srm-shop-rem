@@ -3,6 +3,7 @@
 {% block content %}
 <h1>Товары и комплектующие</h1>
 <form method="get" class="search-bar">
+  <input type="hidden" name="t" value="{{ token }}">
   <input type="text" name="q" value="{{ query or '' }}" placeholder="Поиск по названию или SKU">
   <button type="submit">Найти</button>
   {% if low_stock %}<span class="badge">только с низким остатком</span>{% endif %}
@@ -31,7 +32,7 @@
 </table>
 
 <h2>Добавить товар</h2>
-<form method="post" action="/inventory/products" class="edit-form">
+<form method="post" action="{{ link('/inventory/products') }}" class="edit-form">
   <label>Название<input type="text" name="name" required></label>
   <label>SKU<input type="text" name="sku"></label>
   <label>Категория<input type="text" name="category"></label>

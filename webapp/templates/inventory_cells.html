@@ -14,7 +14,7 @@
 </table>
 
 <h2>Добавить ячейку</h2>
-<form method="post" action="/inventory/cells" class="inline-form">
+<form method="post" action="{{ link('/inventory/cells') }}" class="inline-form">
   <input type="text" name="code" placeholder="Код ячейки, напр. A1-03" required>
   <input type="text" name="zone" placeholder="Зона/стеллаж">
   <input type="text" name="note" placeholder="Заметка">

@@ -3,15 +3,15 @@
 {% block content %}
 <h1>Дашборд</h1>
 <div class="cards">
-  <a class="card" href="/clients">
+  <a class="card" href="{{ link('/clients') }}">
     <div class="card-num">{{ clients_count }}</div>
     <div class="card-label">клиентов в базе</div>
   </a>
-  <a class="card" href="/inventory/products">
+  <a class="card" href="{{ link('/inventory/products') }}">
     <div class="card-num">{{ products_count }}</div>
     <div class="card-label">товарных позиций</div>
   </a>
-  <a class="card {% if low_stock_count %}card-warn{% endif %}" href="/inventory/products?low_stock=1">
+  <a class="card {% if low_stock_count %}card-warn{% endif %}" href="{{ link('/inventory/products?low_stock=1') }}">
     <div class="card-num">{{ low_stock_count }}</div>
     <div class="card-label">позиций с низким остатком</div>
   </a>

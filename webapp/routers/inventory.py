@@ -6,7 +6,7 @@ from fastapi.responses import RedirectResponse
 from core import inventory as core_inventory
 from core.inventory import InsufficientStockError
 from core.storage import get_conn
-from webapp.deps import require_staff
+from webapp.deps import link, require_staff
 from webapp.templating import render
 
 router = APIRouter(prefix="/inventory")
@@ -46,7 +46,7 @@ def products_create(
             min_qty=min_qty,
             price=price,
         )
-    return RedirectResponse("/inventory/products", status_code=303)
+    return RedirectResponse(link(request, "/inventory/products"), status_code=303)
 
 
 @router.get("/cells")
@@ -66,7 +66,7 @@ def cells_create(
 ):
     with get_conn() as conn:
         core_inventory.create_cell(conn, code=code.strip(), zone=zone.strip() or None, note=note.strip() or None)
-    return RedirectResponse("/inventory/cells", status_code=303)
+    return RedirectResponse(link(request, "/inventory/cells"), status_code=303)
 
 
 def _movements_context(conn):
@@ -95,7 +95,7 @@ def movements_receive(
 ):
     with get_conn() as conn:
         core_inventory.receive_stock(conn, product_id, cell_id, qty, staff["id"], comment=comment.strip() or None)
-    return RedirectResponse("/inventory/movements", status_code=303)
+    return RedirectResponse(link(request, "/inventory/movements"), status_code=303)
 
 
 @router.post("/movements/writeoff")
@@ -113,7 +113,7 @@ def movements_writeoff(
         except InsufficientStockError as exc:
             ctx = _movements_context(conn)
             return render(request, "inventory_movements.html", staff=staff, error=str(exc), **ctx)
-    return RedirectResponse("/inventory/movements", status_code=303)
+    return RedirectResponse(link(request, "/inventory/movements"), status_code=303)
 
 
 @router.post("/movements/transfer")
@@ -131,4 +131,4 @@ def movements_transfer(
         except InsufficientStockError as exc:
             ctx = _movements_context(conn)
             return render(request, "inventory_movements.html", staff=staff, error=str(exc), **ctx)
-    return RedirectResponse("/inventory/movements", status_code=303)
+    return RedirectResponse(link(request, "/inventory/movements"), status_code=303)

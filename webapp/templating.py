@@ -3,7 +3,7 @@ import os
 from fastapi import Request
 from fastapi.templating import Jinja2Templates
 
-from webapp.deps import ROLE_LABELS, current_staff
+from webapp.deps import ROLE_LABELS, current_staff, link, request_token
 
 REASON_LABELS = {
     "receipt": "Приход",
@@ -21,4 +21,6 @@ templates.env.globals["reason_labels"] = REASON_LABELS
 def render(request: Request, name: str, **ctx):
     ctx.setdefault("staff", current_staff(request))
     ctx["request"] = request
+    ctx["token"] = request_token(request)
+    ctx["link"] = lambda path: link(request, path)
     return templates.TemplateResponse(name, ctx)

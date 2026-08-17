@@ -3,6 +3,7 @@
 {% block content %}
 <h1>Клиенты</h1>
 <form method="get" class="search-bar">
+  <input type="hidden" name="t" value="{{ token }}">
   <input type="text" name="q" value="{{ query or '' }}" placeholder="Поиск по имени или телефону">
   <button type="submit">Найти</button>
 </form>
@@ -11,7 +12,7 @@
   <thead><tr><th>Имя</th><th>Телефон</th><th>Источник</th><th>Добавлен</th></tr></thead>
   <tbody>
     {% for c in clients %}
-    <tr onclick="location.href='/clients/{{ c.id }}'" class="clickable">
+    <tr onclick="location.href='{{ link('/clients/' ~ c.id) }}'" class="clickable">
       <td>{{ c.name }}</td>
       <td>{{ c.phone or '—' }}</td>
       <td>{{ 'Онлайн' if c.source == 'online' else 'Офлайн' }}</td>
@@ -24,7 +25,7 @@
 </table>
 
 <h2>Добавить клиента</h2>
-<form method="post" action="/clients" class="inline-form">
+<form method="post" action="{{ link('/clients') }}" class="inline-form">
   <input type="text" name="name" placeholder="Имя" required>
   <input type="text" name="phone" placeholder="Телефон">
   <input type="text" name="notes" placeholder="Заметка">
