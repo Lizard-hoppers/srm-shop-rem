@@ -10,6 +10,12 @@
   {% if client.notes %}<p class="meta">{{ client.notes }}</p>{% endif %}
 </div>
 
+<div class="panel-box" style="margin-top: 16px; text-align: center;">
+  <h3>Карта клиента № {{ client.id }}</h3>
+  <img src="{{ link('/clients/' ~ client.id ~ '/qr.png') }}" alt="QR клиента" style="width: 160px; height: 160px; border-radius: 10px; background: #fff; padding: 8px;">
+  <p class="meta">Сканируйте в разделе «Клиенты» → «Сканировать QR», чтобы сразу открыть карточку.</p>
+</div>
+
 <h2>История обращений — {{ repair_history|length }}</h2>
 <table class="table">
   <thead><tr><th>Устройство</th><th>Статус</th><th>Мастер</th><th>Принят</th></tr></thead>

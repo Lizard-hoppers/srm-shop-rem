@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Form, Request
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, Response
 
 from core import clients as core_clients
+from core import qr as core_qr
 from core import repairs as core_repairs
 from core import sales as core_sales
 from core.storage import get_conn
@@ -40,6 +41,17 @@ def create_view(
     return RedirectResponse(link(request, f"/clients/{client_id}"), status_code=303)
 
 
+@router.get("/find")
+def find_view(request: Request, code: str = "", staff=Depends(require_staff)):
+    client_id = core_qr.parse_client_code(code)
+    with get_conn() as conn:
+        client = core_clients.get_client(conn, client_id) if client_id else None
+        if client:
+            return RedirectResponse(link(request, f"/clients/{client_id}"), status_code=303)
+        rows = core_clients.list_clients(conn)
+    return render(request, "clients_list.html", staff=staff, clients=rows, query=None, error="QR-код не распознан — клиент не найден.")
+
+
 @router.get("/{client_id}")
 def detail_view(request: Request, client_id: int, staff=Depends(require_staff)):
     with get_conn() as conn:
@@ -52,6 +64,12 @@ def detail_view(request: Request, client_id: int, staff=Depends(require_staff)):
         request, "client_detail.html", staff=staff, client=client,
         repair_history=repair_history, sales_history=sales_history,
     )
+
+
+@router.get("/{client_id}/qr.png")
+def qr_view(request: Request, client_id: int, staff=Depends(require_staff)):
+    png = core_qr.generate_png(core_qr.client_code(client_id))
+    return Response(content=png, media_type="image/png")
 
 
 @router.post("/{client_id}/edit")

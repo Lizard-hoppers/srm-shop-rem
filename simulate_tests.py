@@ -23,7 +23,7 @@ import urllib.parse
 
 import jinja2
 
-from core import auth, clients, inventory, purchases, repairs, sales
+from core import auth, clients, inventory, purchases, qr, repairs, sales
 from core.session_token import make_token, read_token
 from core.storage import get_conn, init_db
 from core.telegram_auth import validate_init_data
@@ -195,6 +195,33 @@ def scenario_client_history(db_path: str) -> None:
         check("client purchase history recorded", len(sale_history) == 1 and sale_history[0]["id"] == sale_id)
 
 
+def scenario_client_qr(db_path: str) -> None:
+    print("scenario: client loyalty QR codes (self-registration by phone, scan-to-find)")
+    with get_conn(db_path) as conn:
+        client_id = clients.create_client(conn, "Оксана", phone="+380675554433", source="offline")
+
+        code = qr.client_code(client_id)
+        check("code has the expected prefix", code == f"CRMCID:{client_id}")
+        check("code round-trips back to the client id", qr.parse_client_code(code) == client_id)
+        check("garbage text does not parse as a code", qr.parse_client_code("not a qr code") is None)
+        check("bare digits without the prefix are rejected", qr.parse_client_code("42") is None)
+
+        png = qr.generate_png(code)
+        check("QR PNG has a real PNG header", png[:8] == b"\x89PNG\r\n\x1a\n")
+        check("QR PNG is a plausible image size", len(png) > 200)
+
+        # A bot contact-share sends the phone without a leading '+'; a
+        # staff-typed "+380675554433" and a bot-shared "380675554433" must
+        # resolve to the same client, not create a duplicate.
+        same_client_id = clients.get_or_create_by_phone(conn, "Оксана", "380675554433", source="online")
+        check("phone without leading + still matches the same client", same_client_id == client_id)
+
+        clients.link_telegram(conn, client_id, 555000111)
+        found = clients.get_by_telegram_id(conn, 555000111)
+        check("client resolvable by telegram_id after bot registration", found is not None and found["id"] == client_id)
+        check("unknown telegram_id finds no client", clients.get_by_telegram_id(conn, 999) is None)
+
+
 def scenario_purchases(db_path: str) -> None:
     print("scenario: goods receipt (приход)")
     with get_conn(db_path) as conn:
@@ -352,6 +379,22 @@ def scenario_webapp_forms(db_path: str) -> None:
         check("missing supplier name: no raw 422", resp.status_code != 422)
         check("missing supplier name: friendly error shown", "Введите название поставщика" in resp.text)
 
+        # Client loyalty QR: image endpoint + scan-to-find lookup.
+        client_resp = client.post(f"/clients?t={token}", data={"name": "QR Клиент", "phone": "+380990001122"})
+        # TestClient follows the 303 by default, so the final URL (not headers) has the new id.
+        client_id = int(str(client_resp.url).split("/clients/")[1].split("?")[0])
+
+        resp = client.get(f"/clients/{client_id}/qr.png?t={token}")
+        check("qr.png returns 200", resp.status_code == 200)
+        check("qr.png has image content-type", resp.headers.get("content-type", "").startswith("image/"))
+        check("qr.png body is a real PNG", resp.content[:8] == b"\x89PNG\r\n\x1a\n")
+
+        resp = client.get(f"/clients/find?t={token}&code=CRMCID:{client_id}")
+        check("scanning a valid client code redirects to that client", f"/clients/{client_id}" in str(resp.url))
+
+        resp = client.get(f"/clients/find?t={token}&code=garbage-not-a-code")
+        check("scanning an unknown code: no raw error, friendly message", resp.status_code != 422 and "не распознан" in resp.text)
+
 
 def main() -> None:
     with tempfile.TemporaryDirectory() as tmp:
@@ -362,6 +405,7 @@ def main() -> None:
         scenario_inventory(db_path)
         scenario_repairs_pipeline(db_path)
         scenario_client_history(db_path)
+        scenario_client_qr(db_path)
         scenario_purchases(db_path)
         scenario_sales(db_path)
 

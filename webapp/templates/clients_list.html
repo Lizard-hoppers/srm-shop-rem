@@ -3,6 +3,11 @@
 {% block title %}Клиенты{% endblock %}
 {% block content %}
 <a class="back-link" href="{{ link('/more') }}">{{ icons.icon('back', 16) }} Ещё</a>
+
+<div class="btn-row">
+  <button type="button" id="scanQrBtn" onclick="scanClientQr()" style="display:none;">📷 Сканировать QR</button>
+</div>
+
 <form method="get" class="search-bar">
   <input type="hidden" name="t" value="{{ token }}">
   <input type="text" name="q" value="{{ query or '' }}" placeholder="Поиск по имени или телефону">
@@ -32,4 +37,21 @@
   <input type="text" name="notes" placeholder="Заметка">
   <button type="submit">Добавить</button>
 </form>
+
+<script>
+(function () {
+  var tg = window.Telegram ? window.Telegram.WebApp : null;
+  var btn = document.getElementById("scanQrBtn");
+  if (tg && tg.isVersionAtLeast && tg.isVersionAtLeast("6.4")) {
+    btn.style.display = "inline-block";
+  }
+  window.scanClientQr = function () {
+    if (!tg) return;
+    tg.showScanQrPopup({ text: "Наведите камеру на QR-код клиента" }, function (text) {
+      tg.closeScanQrPopup();
+      window.location.href = "/clients/find?t={{ token }}&code=" + encodeURIComponent(text);
+    });
+  };
+})();
+</script>
 {% endblock %}
