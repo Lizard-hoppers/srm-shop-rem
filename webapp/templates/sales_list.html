@@ -4,18 +4,19 @@
 {% if error %}<div class="flash flash-error">{{ error }}</div>{% endif %}
 
 <table class="table">
-  <thead><tr><th>Клиент</th><th>Канал</th><th>Сумма</th><th>Продавец</th><th>Дата</th></tr></thead>
+  <thead><tr><th>Клиент</th><th>Канал</th><th>Сумма</th><th>Гарантия</th><th>Продавец</th><th>Дата</th></tr></thead>
   <tbody>
     {% for s in sales %}
     <tr onclick="location.href='{{ link('/sales/' ~ s.id) }}'" class="clickable">
       <td>{{ s.client_name or 'Без клиента' }}</td>
       <td><span class="pill pill-{{ s.channel }}">{{ 'Онлайн' if s.channel == 'online' else 'Офлайн' }}</span></td>
       <td>{{ s.total }}</td>
+      <td>{{ s.warranty_until or '—' }}</td>
       <td>{{ s.staff_name or '—' }}</td>
       <td>{{ s.created_at }}</td>
     </tr>
     {% else %}
-    <tr><td colspan="5">Продаж пока нет.</td></tr>
+    <tr><td colspan="6">Продаж пока нет.</td></tr>
     {% endfor %}
   </tbody>
 </table>
@@ -30,6 +31,7 @@
       <option value="online">Онлайн</option>
     </select>
   </label>
+  <label>Гарантия до (необязательно)<input type="date" name="warranty_until"></label>
 
   {% for i in item_rows %}
   <div style="display:flex; gap:6px; flex-wrap:wrap; padding-top:8px; border-top: 1px solid var(--border);">

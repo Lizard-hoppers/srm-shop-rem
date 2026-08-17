@@ -181,6 +181,7 @@ def init_db(db_path: str = DB_PATH) -> None:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript(SCHEMA)
         _ensure_column(conn, "goods_receipt_items", "cell_id", "cell_id INTEGER REFERENCES storage_cells(id)")
+        _ensure_column(conn, "sales_orders", "warranty_until", "warranty_until TEXT")
         device_catalog.seed(conn)
         conn.commit()
     finally:

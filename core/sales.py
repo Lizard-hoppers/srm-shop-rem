@@ -15,14 +15,15 @@ def create_sale(
     channel: str,
     staff_id: int,
     items: list[tuple[int, int, int]],
+    warranty_until: str | None = None,
 ) -> int:
     """items: list of (product_id, qty, price)."""
     if not items:
         raise ValueError("нужна хотя бы одна позиция в продаже")
 
     order_id = conn.execute(
-        "INSERT INTO sales_orders (client_id, channel, status, staff_id) VALUES (?, ?, 'completed', ?)",
-        (client_id, channel, staff_id),
+        "INSERT INTO sales_orders (client_id, channel, status, staff_id, warranty_until) VALUES (?, ?, 'completed', ?, ?)",
+        (client_id, channel, staff_id, warranty_until),
     ).lastrowid
 
     for product_id, qty, price in items:

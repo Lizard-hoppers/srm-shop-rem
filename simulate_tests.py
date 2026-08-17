@@ -289,6 +289,14 @@ def scenario_sales(db_path: str) -> None:
             raised = True
         check("sale beyond stock raises InsufficientStockError", raised)
 
+        warranty_order_id = sales.create_sale(conn, None, "offline", staff_id, [(product_id, 1, 500)], warranty_until="2027-08-17")
+        sale = sales.get_sale(conn, warranty_order_id)
+        check("warranty_until is stored on the sale", sale["warranty_until"] == "2027-08-17")
+
+        no_warranty_id = sales.create_sale(conn, None, "offline", staff_id, [(product_id, 1, 500)])
+        sale2 = sales.get_sale(conn, no_warranty_id)
+        check("warranty_until defaults to null when not given", sale2["warranty_until"] is None)
+
 
 def _build_init_data(bot_token: str, user: dict, auth_date: int) -> str:
     data = {"auth_date": str(auth_date), "user": json.dumps(user, separators=(",", ":"))}
@@ -437,6 +445,20 @@ def scenario_webapp_forms(db_path: str) -> None:
             learned = device_catalog.list_all(conn)
         check("a brand-new device typed on intake is remembered in the catalog",
               any(r["brand"] == "НовыйБренд" and r["model"] == "СуперМодель X" for r in learned))
+
+        # Sale warranty: staff picks the date themselves at checkout.
+        client.post(f"/inventory/products?t={token}", data={"name": "Гарантийный товар", "sku": "WARR-1", "unit": "шт", "min_qty": "0"})
+        client.post(f"/inventory/cells?t={token}", data={"code": "WARR-CELL"})
+        with get_conn(db_path) as conn:
+            wproduct_id = conn.execute("SELECT id FROM products WHERE sku = 'WARR-1'").fetchone()["id"]
+            wcell_id = conn.execute("SELECT id FROM storage_cells WHERE code = 'WARR-CELL'").fetchone()["id"]
+        client.post(f"/inventory/movements/receive?t={token}", data={"product_id": str(wproduct_id), "cell_id": str(wcell_id), "qty": "5"})
+
+        sale_resp = client.post(f"/sales?t={token}", data={
+            "channel": "offline", "warranty_until": "2027-08-17",
+            "product_id_0": str(wproduct_id), "qty_0": "1", "price_0": "1000",
+        })
+        check("sale with warranty page shows the chosen date", "2027-08-17" in sale_resp.text)
 
 
 def main() -> None:

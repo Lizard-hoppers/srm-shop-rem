@@ -30,6 +30,7 @@ async def create_view(request: Request, staff=Depends(require_staff)):
     client_name = (form.get("client_name") or "").strip()
     client_phone = (form.get("client_phone") or "").strip()
     channel = form.get("channel", "offline")
+    warranty_until = (form.get("warranty_until") or "").strip() or None
 
     items = []
     for i in range(ITEM_ROWS):
@@ -46,7 +47,7 @@ async def create_view(request: Request, staff=Depends(require_staff)):
     with get_conn() as conn:
         client_id = core_clients.get_or_create_by_phone(conn, client_name, client_phone, source=channel) if client_phone else None
         try:
-            order_id = core_sales.create_sale(conn, client_id, channel, staff["id"], items)
+            order_id = core_sales.create_sale(conn, client_id, channel, staff["id"], items, warranty_until)
         except InsufficientStockError as exc:
             sales = core_sales.list_sales(conn)
             products = core_inventory.list_products(conn)
