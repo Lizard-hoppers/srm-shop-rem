@@ -13,7 +13,7 @@
       <p>{{ repair.device_type }} {{ repair.brand or '' }} {{ repair.model or '' }}</p>
       <p class="meta">Серийный №: {{ repair.serial_number or '—' }}</p>
       <p class="meta">Неисправность: {{ repair.defect_description or '—' }}</p>
-      <p class="meta">Канал: <span class="pill pill-{{ repair.channel }}">{{ 'Онлайн' if repair.channel == 'online' else 'Офлайн' }}</span> · Принят {{ repair.created_at }}</p>
+      <p class="meta">Канал: <span class="pill pill-{{ repair.channel }}">{{ 'Онлайн' if repair.channel == 'online' else 'Офлайн' }}</span> · Принят {{ repair.created_at | kyiv }}</p>
     </div>
 
     <div class="panel-box" style="margin-top: 16px;">
@@ -45,7 +45,7 @@
       <form method="post" action="{{ link('/repairs/' ~ repair.id ~ '/price') }}" class="edit-form">
         <label>Оценка стоимости<input type="number" name="price_estimate" value="{{ repair.price_estimate or '' }}"></label>
         <label>Итоговая цена<input type="number" name="price_final" value="{{ repair.price_final or '' }}"></label>
-        <label>Гарантия до (ГГГГ-ММ-ДД)<input type="text" name="warranty_until" value="{{ repair.warranty_until or '' }}" placeholder="2026-12-31"></label>
+        <label>Гарантия до<input type="date" name="warranty_until" value="{{ repair.warranty_until or '' }}"></label>
         <button type="submit">Сохранить</button>
       </form>
     </div>
@@ -59,7 +59,7 @@
         <thead><tr><th>Деталь</th><th>Кол-во</th><th>Когда</th></tr></thead>
         <tbody>
           {% for p in parts %}
-          <tr><td>{{ p.product_name }}</td><td>{{ p.qty }}</td><td>{{ p.created_at }}</td></tr>
+          <tr><td>{{ p.product_name }}</td><td>{{ p.qty }}</td><td>{{ p.created_at | kyiv }}</td></tr>
           {% else %}
           <tr><td colspan="3">Детали не списывались.</td></tr>
           {% endfor %}
@@ -84,7 +84,7 @@
         <li>
           <span class="pill pill-{{ h.status }}">{{ status_labels[h.status] }}</span>
           {{ h.comment or '' }}
-          <div class="t-when">{{ h.changed_at }} · {{ h.staff_name or 'система' }}</div>
+          <div class="t-when">{{ h.changed_at | kyiv }} · {{ h.staff_name or 'система' }}</div>
         </li>
         {% endfor %}
       </ul>

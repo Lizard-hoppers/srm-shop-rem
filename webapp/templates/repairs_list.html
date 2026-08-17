@@ -18,7 +18,7 @@
       <td><span class="pill pill-{{ r.status }}">{{ status_labels[r.status] }}</span></td>
       <td>{{ r.master_name or '—' }}</td>
       <td><span class="pill pill-{{ r.channel }}">{{ 'Онлайн' if r.channel == 'online' else 'Офлайн' }}</span></td>
-      <td>{{ r.created_at }}</td>
+      <td>{{ r.created_at | kyiv }}</td>
     </tr>
     {% else %}
     <tr><td colspan="6">Ремонтов пока нет.</td></tr>

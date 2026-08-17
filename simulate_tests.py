@@ -23,7 +23,7 @@ import urllib.parse
 
 import jinja2
 
-from core import auth, clients, device_catalog, inventory, purchases, qr, repairs, sales
+from core import auth, clients, device_catalog, inventory, purchases, qr, repairs, sales, timefmt
 from core.session_token import make_token, read_token
 from core.storage import get_conn, init_db
 from core.telegram_auth import validate_init_data
@@ -306,6 +306,21 @@ def _build_init_data(bot_token: str, user: dict, auth_date: int) -> str:
     return urllib.parse.urlencode(data)
 
 
+def scenario_timefmt() -> None:
+    print("scenario: timestamps display as дд.мм.гггг in Kyiv time, not raw UTC")
+    # August: Kyiv is UTC+3 (EEST/summer time) — 10:00 UTC is 13:00 Kyiv.
+    check("UTC->Kyiv conversion during summer time (+3)", timefmt.kyiv_datetime("2026-08-17 10:00:00") == "17.08.2026 13:00")
+    # January: Kyiv is UTC+2 (EET/winter time) — 22:30 UTC on the 31st rolls to 00:30 Kyiv on the 1st.
+    check("UTC->Kyiv conversion during winter time (+2), crossing midnight", timefmt.kyiv_datetime("2026-01-31 22:30:00") == "01.02.2026 00:30")
+    check("kyiv_datetime handles missing value", timefmt.kyiv_datetime(None) == "—")
+    check("kyiv_datetime handles empty string", timefmt.kyiv_datetime("") == "—")
+    check("kyiv_datetime passes through unparseable garbage instead of crashing", timefmt.kyiv_datetime("not-a-date") == "not-a-date")
+
+    check("ru_date reformats a plain date (no timezone shift)", timefmt.ru_date("2026-12-31") == "31.12.2026")
+    check("ru_date handles missing value", timefmt.ru_date(None) == "—")
+    check("ru_date passes through unparseable garbage instead of crashing", timefmt.ru_date("garbage") == "garbage")
+
+
 def scenario_telegram_auth() -> None:
     print("scenario: telegram mini app initData validation")
     bot_token = "123456:FAKE-TOKEN-FOR-TESTS"
@@ -458,7 +473,7 @@ def scenario_webapp_forms(db_path: str) -> None:
             "channel": "offline", "warranty_until": "2027-08-17",
             "product_id_0": str(wproduct_id), "qty_0": "1", "price_0": "1000",
         })
-        check("sale with warranty page shows the chosen date", "2027-08-17" in sale_resp.text)
+        check("sale with warranty page shows the chosen date in дд.мм.гггг format", "17.08.2027" in sale_resp.text)
 
 
 def main() -> None:
@@ -475,6 +490,7 @@ def main() -> None:
         scenario_purchases(db_path)
         scenario_sales(db_path)
 
+    scenario_timefmt()
     scenario_telegram_auth()
     scenario_session_token()
     scenario_miniapp_boot_template()

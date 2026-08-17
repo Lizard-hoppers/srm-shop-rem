@@ -67,7 +67,7 @@
   <tbody>
     {% for m in movements %}
     <tr>
-      <td>{{ m.created_at }}</td>
+      <td>{{ m.created_at | kyiv }}</td>
       <td>{{ m.product_name }}</td>
       <td>{{ reason_labels.get(m.reason, m.reason) }}</td>
       <td>{{ m.from_cell_code or '—' }}</td>

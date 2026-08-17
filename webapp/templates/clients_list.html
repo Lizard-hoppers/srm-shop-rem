@@ -22,7 +22,7 @@
       <td>{{ c.name }}</td>
       <td>{% if c.phone %}<a href="tel:{{ c.phone }}" onclick="event.stopPropagation()">{{ c.phone }}</a>{% else %}—{% endif %}</td>
       <td>{{ 'Онлайн' if c.source == 'online' else 'Офлайн' }}</td>
-      <td>{{ c.created_at }}</td>
+      <td>{{ c.created_at | kyiv }}</td>
     </tr>
     {% else %}
     <tr><td colspan="4">Клиентов пока нет.</td></tr>

@@ -12,7 +12,7 @@
       <td>{{ r.supplier_name or '—' }}</td>
       <td>{{ r.invoice_no or '—' }}</td>
       <td>{{ r.staff_name or '—' }}</td>
-      <td>{{ r.created_at }}</td>
+      <td>{{ r.created_at | kyiv }}</td>
     </tr>
     {% else %}
     <tr><td colspan="4">Приходов пока нет.</td></tr>

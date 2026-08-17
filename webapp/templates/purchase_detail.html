@@ -3,7 +3,7 @@
 {% block title %}Приход #{{ receipt.id }}{% endblock %}
 {% block content %}
 <a class="back-link" href="{{ link('/purchases') }}">{{ icons.icon('back', 16) }} Приход</a>
-<p class="meta">Поставщик: {{ receipt.supplier_name or '—' }} · Накладная: {{ receipt.invoice_no or '—' }} · Принял: {{ receipt.staff_name or '—' }} · {{ receipt.created_at }}</p>
+<p class="meta">Поставщик: {{ receipt.supplier_name or '—' }} · Накладная: {{ receipt.invoice_no or '—' }} · Принял: {{ receipt.staff_name or '—' }} · {{ receipt.created_at | kyiv }}</p>
 
 <table class="table">
   <thead><tr><th>Товар</th><th>Ячейка</th><th>Кол-во</th><th>Цена закупки</th></tr></thead>

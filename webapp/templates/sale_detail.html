@@ -3,8 +3,8 @@
 {% block title %}Продажа #{{ sale.id }}{% endblock %}
 {% block content %}
 <a class="back-link" href="{{ link('/sales') }}">{{ icons.icon('back', 16) }} Продажи</a>
-<p class="meta">Клиент: {{ sale.client_name or 'Без клиента' }} · Канал: {{ 'Онлайн' if sale.channel == 'online' else 'Офлайн' }} · Продавец: {{ sale.staff_name or '—' }} · {{ sale.created_at }}</p>
-{% if sale.warranty_until %}<p class="badge">Гарантия до {{ sale.warranty_until }}</p>{% endif %}
+<p class="meta">Клиент: {{ sale.client_name or 'Без клиента' }} · Канал: {{ 'Онлайн' if sale.channel == 'online' else 'Офлайн' }} · Продавец: {{ sale.staff_name or '—' }} · {{ sale.created_at | kyiv }}</p>
+{% if sale.warranty_until %}<p class="badge">Гарантия до {{ sale.warranty_until | rudate }}</p>{% endif %}
 
 <table class="table">
   <thead><tr><th>Товар</th><th>Кол-во</th><th>Цена</th><th>Сумма</th></tr></thead>

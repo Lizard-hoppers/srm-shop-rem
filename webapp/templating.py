@@ -5,6 +5,7 @@ from fastapi import Request
 from fastapi.templating import Jinja2Templates
 
 from core.repairs import STATUS_LABELS
+from core.timefmt import kyiv_datetime, ru_date
 from webapp.deps import ROLE_LABELS, current_staff, link, request_token
 
 REASON_LABELS = {
@@ -19,6 +20,8 @@ templates = Jinja2Templates(directory=os.path.join(os.path.dirname(__file__), "t
 templates.env.globals["role_labels"] = ROLE_LABELS
 templates.env.globals["reason_labels"] = REASON_LABELS
 templates.env.globals["status_labels"] = STATUS_LABELS
+templates.env.filters["kyiv"] = kyiv_datetime
+templates.env.filters["rudate"] = ru_date
 
 # Telegram's WebView caches static/* by ETag and can keep serving a stale
 # copy after a deploy; tying every static asset URL to this process's start

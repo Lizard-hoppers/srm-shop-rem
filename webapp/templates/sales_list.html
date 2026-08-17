@@ -11,9 +11,9 @@
       <td>{{ s.client_name or 'Без клиента' }}</td>
       <td><span class="pill pill-{{ s.channel }}">{{ 'Онлайн' if s.channel == 'online' else 'Офлайн' }}</span></td>
       <td>{{ s.total }}</td>
-      <td>{{ s.warranty_until or '—' }}</td>
+      <td>{{ s.warranty_until | rudate }}</td>
       <td>{{ s.staff_name or '—' }}</td>
-      <td>{{ s.created_at }}</td>
+      <td>{{ s.created_at | kyiv }}</td>
     </tr>
     {% else %}
     <tr><td colspan="6">Продаж пока нет.</td></tr>
