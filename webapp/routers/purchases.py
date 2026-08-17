@@ -28,7 +28,18 @@ def list_view(request: Request, staff=Depends(require_staff)):
 
 
 @router.post("/suppliers")
-def create_supplier_view(request: Request, name: str = Form(...), contact: str = Form(""), staff=Depends(require_staff)):
+def create_supplier_view(request: Request, name: str = Form(""), contact: str = Form(""), staff=Depends(require_staff)):
+    if not name.strip():
+        with get_conn() as conn:
+            receipts = core_purchases.list_receipts(conn)
+            suppliers = core_purchases.list_suppliers(conn)
+            products = core_inventory.list_products(conn)
+            cells = core_inventory.list_cells(conn)
+        return render(
+            request, "purchases_list.html", staff=staff, receipts=receipts, suppliers=suppliers,
+            products=products, cells=cells, item_rows=range(ITEM_ROWS), error="Введите название поставщика.",
+        )
+
     with get_conn() as conn:
         core_purchases.create_supplier(conn, name.strip(), contact.strip() or None)
     return RedirectResponse(link(request, "/purchases"), status_code=303)

@@ -9,6 +9,11 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(__file__))
 os.environ.setdefault("CRM_SECRET_KEY", "test-secret-not-for-production")
+# webapp.main's startup hook calls core.storage.init_db() with no override,
+# so it always targets whatever CRM_DB_PATH resolved to at process start —
+# point that at a throwaway file too, before core.storage is ever imported.
+_WEBAPP_TEST_DB = os.path.join(tempfile.gettempdir(), "crm_simulate_tests_webapp.sqlite3")
+os.environ.setdefault("CRM_DB_PATH", _WEBAPP_TEST_DB)
 
 import hashlib
 import hmac
@@ -22,6 +27,7 @@ from core import auth, clients, inventory, purchases, repairs, sales
 from core.session_token import make_token, read_token
 from core.storage import get_conn, init_db
 from core.telegram_auth import validate_init_data
+from fastapi.testclient import TestClient
 
 PASS = 0
 FAIL = 0
@@ -291,6 +297,62 @@ def scenario_miniapp_boot_template() -> None:
     check("error response shows the error message", "не привязан" in with_error)
 
 
+def scenario_webapp_forms(db_path: str) -> None:
+    """Real HTTP requests against the FastAPI app, not just core functions.
+    Regression guard for 17.08.2026: several forms declared required fields
+    as typed `int | None = Form(...)`/`str = Form(...)`; a browser that
+    submits one of them blank or omitted made FastAPI raise a raw 422 JSON
+    error instead of the app's normal Russian-language error page. Every
+    "required" field on a user-facing form must degrade to a friendly
+    re-rendered page, never a bare framework error."""
+    print("scenario: web forms never leak a raw 422 to the user")
+    if os.path.exists(db_path):
+        os.remove(db_path)
+    init_db(db_path)
+    with get_conn(db_path) as conn:
+        staff_id = auth.create_staff(conn, "webtest", "pass", "Веб Тест", "owner")
+    token = make_token(staff_id)
+
+    import webapp.main  # noqa: F401 -- import after CRM_DB_PATH is set for this test
+
+    with TestClient(webapp.main.app) as client:
+        # The exact bug: client_phone missing entirely from the POST body.
+        resp = client.post(f"/repairs?t={token}", data={
+            "client_name": "Тест", "device_type": "Смартфон", "channel": "offline",
+        })
+        check("missing client_phone: no raw 422", resp.status_code != 422)
+        check("missing client_phone: friendly error shown", "Заполните имя" in resp.text)
+
+        # master_id/price_estimate submitted empty (exactly what an unset <select>/<input> sends).
+        resp = client.post(f"/repairs?t={token}", data={
+            "client_name": "Реальный Клиент", "client_phone": "+380501234567",
+            "device_type": "Ноутбук", "channel": "offline", "master_id": "", "price_estimate": "",
+        })
+        check("empty master_id/price_estimate: repair created (303)", resp.status_code == 303 or (resp.history and resp.history[0].status_code == 303))
+
+        resp = client.post(f"/clients?t={token}", data={"name": "", "phone": "+380501111111"})
+        check("missing client name: no raw 422", resp.status_code != 422)
+        check("missing client name: friendly error shown", "Введите имя клиента" in resp.text)
+
+        resp = client.post(f"/inventory/products?t={token}", data={"name": "", "price": ""})
+        check("missing product name: no raw 422", resp.status_code != 422)
+        check("missing product name: friendly error shown", "Введите название товара" in resp.text)
+
+        resp = client.post(f"/inventory/products?t={token}", data={"name": "Тест товар", "price": ""})
+        check("product with empty optional price: created (303)", resp.status_code == 303 or (resp.history and resp.history[0].status_code == 303))
+
+        resp = client.post(f"/inventory/cells?t={token}", data={"code": ""})
+        check("missing cell code: no raw 422", resp.status_code != 422)
+        check("missing cell code: friendly error shown", "Введите код ячейки" in resp.text)
+
+        resp = client.post(f"/inventory/movements/receive?t={token}", data={"product_id": "", "cell_id": "", "qty": ""})
+        check("missing movement fields: no raw 422", resp.status_code != 422)
+
+        resp = client.post(f"/purchases/suppliers?t={token}", data={"name": ""})
+        check("missing supplier name: no raw 422", resp.status_code != 422)
+        check("missing supplier name: friendly error shown", "Введите название поставщика" in resp.text)
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         db_path = os.path.join(tmp, "test.sqlite3")
@@ -306,6 +368,9 @@ def main() -> None:
     scenario_telegram_auth()
     scenario_session_token()
     scenario_miniapp_boot_template()
+    scenario_webapp_forms(_WEBAPP_TEST_DB)
+    if os.path.exists(_WEBAPP_TEST_DB):
+        os.remove(_WEBAPP_TEST_DB)
 
     print(f"\nPASS={PASS} FAIL={FAIL}")
     sys.exit(1 if FAIL else 0)

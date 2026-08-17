@@ -18,20 +18,25 @@ router = APIRouter(prefix="/repairs")
 @router.get("")
 def list_view(request: Request, status: str | None = None, staff=Depends(require_staff)):
     with get_conn() as conn:
-        rows = core_repairs.list_repairs(conn, status=status)
-        masters = core_auth.list_staff(conn)
-    return render(
-        request, "repairs_list.html", staff=staff, repairs=rows, status=status, masters=masters,
-        statuses=core_repairs.STATUSES,
-    )
+        ctx = _list_context(conn, status)
+    return render(request, "repairs_list.html", staff=staff, **ctx)
+
+
+def _list_context(conn, status: str | None) -> dict:
+    return {
+        "repairs": core_repairs.list_repairs(conn, status=status),
+        "status": status,
+        "masters": core_auth.list_staff(conn),
+        "statuses": core_repairs.STATUSES,
+    }
 
 
 @router.post("")
 def create_view(
     request: Request,
-    client_name: str = Form(...),
-    client_phone: str = Form(...),
-    device_type: str = Form(...),
+    client_name: str = Form(""),
+    client_phone: str = Form(""),
+    device_type: str = Form(""),
     brand: str = Form(""),
     model: str = Form(""),
     serial_number: str = Form(""),
@@ -41,6 +46,16 @@ def create_view(
     price_estimate: str = Form(""),
     staff=Depends(require_staff),
 ):
+    # Required fields arrive as plain strings (not typed Form(...)) so a form
+    # submitted with one of them blank/missing never hits FastAPI's raw 422
+    # — it re-renders the same page with a plain-Russian error instead.
+    if not client_name.strip() or not client_phone.strip() or not device_type.strip():
+        with get_conn() as conn:
+            ctx = _list_context(conn, None)
+        return render(
+            request, "repairs_list.html", staff=staff, error="Заполните имя, телефон клиента и тип устройства.", **ctx
+        )
+
     with get_conn() as conn:
         client_id = core_clients.get_or_create_by_phone(conn, client_name, client_phone, source=channel)
         order_id = core_repairs.create_repair(
@@ -104,14 +119,18 @@ def price_view(
 @router.post("/{order_id}/parts")
 def add_part_view(
     request: Request, order_id: int,
-    product_id: int = Form(...), cell_id: int = Form(...), qty: int = Form(...),
+    product_id: str = Form(""), cell_id: str = Form(""), qty: str = Form(""),
     staff=Depends(require_staff),
 ):
     with get_conn() as conn:
+        pid, cid, q = optional_int(product_id), optional_int(cell_id), optional_int(qty)
+        if not pid or not cid or not q:
+            ctx = _detail_context(conn, order_id)
+            return render(request, "repair_detail.html", staff=staff, error="Выберите товар, ячейку и количество.", **ctx)
         try:
             core_inventory.record_movement(
-                conn, product_id, qty, "repair_use", staff["id"],
-                from_cell_id=cell_id, ref_type="repair_order", ref_id=order_id,
+                conn, pid, q, "repair_use", staff["id"],
+                from_cell_id=cid, ref_type="repair_order", ref_id=order_id,
             )
         except InsufficientStockError as exc:
             ctx = _detail_context(conn, order_id)

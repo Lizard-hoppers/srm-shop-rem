@@ -23,11 +23,16 @@ def list_view(request: Request, q: str | None = None, staff=Depends(require_staf
 @router.post("")
 def create_view(
     request: Request,
-    name: str = Form(...),
+    name: str = Form(""),
     phone: str = Form(""),
     notes: str = Form(""),
     staff=Depends(require_staff),
 ):
+    if not name.strip():
+        with get_conn() as conn:
+            rows = core_clients.list_clients(conn)
+        return render(request, "clients_list.html", staff=staff, clients=rows, query=None, error="Введите имя клиента.")
+
     with get_conn() as conn:
         client_id = core_clients.create_client(
             conn, name=name.strip(), phone=phone.strip() or None, notes=notes.strip() or None
@@ -53,12 +58,20 @@ def detail_view(request: Request, client_id: int, staff=Depends(require_staff)):
 def edit_view(
     request: Request,
     client_id: int,
-    name: str = Form(...),
+    name: str = Form(""),
     phone: str = Form(""),
     notes: str = Form(""),
     staff=Depends(require_staff),
 ):
     with get_conn() as conn:
+        if not name.strip():
+            client = core_clients.get_client(conn, client_id)
+            repair_history = core_repairs.list_repairs_by_client(conn, client_id)
+            sales_history = core_sales.list_sales_by_client(conn, client_id)
+            return render(
+                request, "client_detail.html", staff=staff, client=client,
+                repair_history=repair_history, sales_history=sales_history, error="Введите имя клиента.",
+            )
         core_clients.update_client(
             conn, client_id, name=name.strip(), phone=phone.strip() or None, notes=notes.strip() or None
         )
