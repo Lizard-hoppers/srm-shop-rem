@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Дашборд{% endblock %}
+{% block content %}
+<h1>Дашборд</h1>
+<div class="cards">
+  <a class="card" href="/clients">
+    <div class="card-num">{{ clients_count }}</div>
+    <div class="card-label">клиентов в базе</div>
+  </a>
+  <a class="card" href="/inventory/products">
+    <div class="card-num">{{ products_count }}</div>
+    <div class="card-label">товарных позиций</div>
+  </a>
+  <a class="card {% if low_stock_count %}card-warn{% endif %}" href="/inventory/products?low_stock=1">
+    <div class="card-num">{{ low_stock_count }}</div>
+    <div class="card-label">позиций с низким остатком</div>
+  </a>
+</div>
+
+<div class="phase-note">
+  <h2>В разработке</h2>
+  <p>Ремонты, приход комплектующих, продажи (POS) и отчётность подключаются
+  следующими фазами по плану проекта. Сейчас в системе работают: клиенты и
+  учёт склада по ячейкам.</p>
+</div>
+{% endblock %}

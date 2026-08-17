@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}Товары{% endblock %}
+{% block content %}
+<h1>Товары и комплектующие</h1>
+<form method="get" class="search-bar">
+  <input type="text" name="q" value="{{ query or '' }}" placeholder="Поиск по названию или SKU">
+  <button type="submit">Найти</button>
+  {% if low_stock %}<span class="badge">только с низким остатком</span>{% endif %}
+</form>
+
+<table class="table">
+  <thead><tr><th>Название</th><th>SKU</th><th>Категория</th><th>Остаток</th><th>Мин.</th><th>Назначение</th></tr></thead>
+  <tbody>
+    {% for p in products %}
+    <tr class="{% if p.total_qty <= p.min_qty %}row-warn{% endif %}">
+      <td>{{ p.name }}</td>
+      <td>{{ p.sku or '—' }}</td>
+      <td>{{ p.category or '—' }}</td>
+      <td>{{ p.total_qty }} {{ p.unit }}</td>
+      <td>{{ p.min_qty }}</td>
+      <td>
+        {% if p.is_repair_part %}деталь для ремонта{% endif %}
+        {% if p.is_repair_part and p.is_sellable %} / {% endif %}
+        {% if p.is_sellable %}товар на продажу{% endif %}
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="6">Товаров пока нет.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<h2>Добавить товар</h2>
+<form method="post" action="/inventory/products" class="edit-form">
+  <label>Название<input type="text" name="name" required></label>
+  <label>SKU<input type="text" name="sku"></label>
+  <label>Категория<input type="text" name="category"></label>
+  <label>Единица<input type="text" name="unit" value="шт"></label>
+  <label>Мин. остаток (сигнал дефицита)<input type="number" name="min_qty" value="0"></label>
+  <label>Цена продажи<input type="number" name="price"></label>
+  <label><input type="checkbox" name="is_repair_part" checked> Деталь для ремонта</label>
+  <label><input type="checkbox" name="is_sellable" checked> Товар на продажу</label>
+  <button type="submit">Добавить</button>
+</form>
+{% endblock %}

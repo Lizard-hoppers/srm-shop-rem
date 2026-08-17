@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Ячейки{% endblock %}
+{% block content %}
+<h1>Ячейки хранения</h1>
+<table class="table">
+  <thead><tr><th>Код</th><th>Зона/стеллаж</th><th>Заметка</th></tr></thead>
+  <tbody>
+    {% for c in cells %}
+    <tr><td>{{ c.code }}</td><td>{{ c.zone or '—' }}</td><td>{{ c.note or '' }}</td></tr>
+    {% else %}
+    <tr><td colspan="3">Ячеек пока нет.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<h2>Добавить ячейку</h2>
+<form method="post" action="/inventory/cells" class="inline-form">
+  <input type="text" name="code" placeholder="Код ячейки, напр. A1-03" required>
+  <input type="text" name="zone" placeholder="Зона/стеллаж">
+  <input type="text" name="note" placeholder="Заметка">
+  <button type="submit">Добавить</button>
+</form>
+{% endblock %}

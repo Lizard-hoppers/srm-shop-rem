@@ -1,0 +1,115 @@
+"""Scenario tests (manifest p.9). Run against a throwaway SQLite file, never
+against a live crm.sqlite3. Usage: python simulate_tests.py
+"""
+from __future__ import annotations
+
+import os
+import sys
+import tempfile
+
+sys.path.insert(0, os.path.dirname(__file__))
+
+from core import auth, clients, inventory
+from core.storage import get_conn, init_db
+
+PASS = 0
+FAIL = 0
+
+
+def check(label: str, condition: bool) -> None:
+    global PASS, FAIL
+    if condition:
+        PASS += 1
+        print(f"  ok   {label}")
+    else:
+        FAIL += 1
+        print(f"  FAIL {label}")
+
+
+def scenario_auth(db_path: str) -> None:
+    print("scenario: staff auth")
+    with get_conn(db_path) as conn:
+        staff_id = auth.create_staff(conn, "owner", "s3cr3t-pass", "Владелец", "owner")
+        row = auth.get_staff_by_login(conn, "owner")
+        check("staff created", row is not None and row["id"] == staff_id)
+        check("correct password verifies", auth.verify_password("s3cr3t-pass", row["password_hash"]))
+        check("wrong password rejected", not auth.verify_password("wrong", row["password_hash"]))
+
+
+def scenario_client_and_repair(db_path: str) -> None:
+    print("scenario: client -> device -> repair order")
+    with get_conn(db_path) as conn:
+        client_id = clients.create_client(conn, "Иван Иванов", phone="+380500000000", source="offline")
+        client = clients.get_client(conn, client_id)
+        check("client created", client is not None and client["name"] == "Иван Иванов")
+
+        device_id = conn.execute(
+            "INSERT INTO devices (client_id, device_type, brand, model, defect_description) "
+            "VALUES (?, 'смартфон', 'Samsung', 'A54', 'не включается')",
+            (client_id,),
+        ).lastrowid
+        order_id = conn.execute(
+            "INSERT INTO repair_orders (device_id, client_id, status, channel) VALUES (?, ?, 'new', 'offline')",
+            (device_id, client_id),
+        ).lastrowid
+        conn.execute(
+            "INSERT INTO repair_status_history (order_id, status, comment) VALUES (?, 'new', 'принят на диагностику')",
+            (order_id,),
+        )
+        devices = clients.get_client_devices(conn, client_id)
+        check("device linked to client", len(devices) == 1 and devices[0]["id"] == device_id)
+
+        history = conn.execute(
+            "SELECT * FROM repair_status_history WHERE order_id = ?", (order_id,)
+        ).fetchall()
+        check("status history recorded", len(history) == 1)
+
+
+def scenario_inventory(db_path: str) -> None:
+    print("scenario: products, cells, stock movements")
+    with get_conn(db_path) as conn:
+        staff_id = auth.create_staff(conn, "storekeeper1", "pass", "Кладовщик", "storekeeper")
+        product_id = inventory.create_product(
+            conn, "Дисплей Samsung A54", "SKU-A54-DSP", "Дисплеи", "шт", True, False, min_qty=2, price=None
+        )
+        cell_a = inventory.create_cell(conn, "A1-01", "Стеллаж A", None)
+        cell_b = inventory.create_cell(conn, "A1-02", "Стеллаж A", None)
+
+        inventory.receive_stock(conn, product_id, cell_a, 5, staff_id, comment="приход от поставщика")
+        check("stock after receipt", inventory.product_total_qty(conn, product_id) == 5)
+
+        inventory.transfer_stock(conn, product_id, cell_a, cell_b, 2, staff_id)
+        by_cell = {r["cell_id"]: r["qty"] for r in inventory.product_stock_by_cell(conn, product_id)}
+        check("transfer moved qty between cells", by_cell.get(cell_a) == 3 and by_cell.get(cell_b) == 2)
+
+        inventory.write_off_stock(conn, product_id, cell_b, 1, staff_id, comment="брак")
+        check("write-off reduces stock", inventory.product_total_qty(conn, product_id) == 4)
+
+        low = inventory.low_stock_report(conn)
+        check("low stock not triggered yet (4 > min 2)", all(r["id"] != product_id for r in low))
+
+        raised = False
+        try:
+            inventory.write_off_stock(conn, product_id, cell_b, 999, staff_id, comment="перебор")
+        except inventory.InsufficientStockError:
+            raised = True
+        check("overdraw raises InsufficientStockError", raised)
+
+        movements = inventory.list_movements(conn)
+        check("movements logged", len(movements) == 3)
+
+
+def main() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = os.path.join(tmp, "test.sqlite3")
+        init_db(db_path)
+        scenario_auth(db_path)
+        scenario_client_and_repair(db_path)
+        scenario_inventory(db_path)
+
+    print(f"\nPASS={PASS} FAIL={FAIL}")
+    sys.exit(1 if FAIL else 0)
+
+
+if __name__ == "__main__":
+    main()

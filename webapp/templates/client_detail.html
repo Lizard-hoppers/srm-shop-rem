@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}{{ client.name }}{% endblock %}
+{% block content %}
+<p><a href="/clients">&larr; К списку клиентов</a></p>
+<h1>{{ client.name }}</h1>
+
+<form method="post" action="/clients/{{ client.id }}/edit" class="edit-form">
+  <label>Имя<input type="text" name="name" value="{{ client.name }}" required></label>
+  <label>Телефон<input type="text" name="phone" value="{{ client.phone or '' }}"></label>
+  <label>Заметки<textarea name="notes">{{ client.notes or '' }}</textarea></label>
+  <button type="submit">Сохранить</button>
+</form>
+
+<p class="meta">Источник: {{ 'Онлайн' if client.source == 'online' else 'Офлайн' }} · В базе с {{ client.created_at }}</p>
+
+<h2>Устройства</h2>
+<table class="table">
+  <thead><tr><th>Тип</th><th>Бренд/модель</th><th>Серийный №</th><th>Добавлено</th></tr></thead>
+  <tbody>
+    {% for d in devices %}
+    <tr>
+      <td>{{ d.device_type }}</td>
+      <td>{{ d.brand or '' }} {{ d.model or '' }}</td>
+      <td>{{ d.serial_number or '—' }}</td>
+      <td>{{ d.created_at }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="4">Устройств пока нет — появятся в фазе «Ремонты».</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

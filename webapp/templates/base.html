@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}CRM{% endblock %} — Сервис-центр</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+{% if staff %}
+<header class="topbar">
+  <div class="brand">CRM Сервис-центр</div>
+  <nav>
+    <a href="/">Дашборд</a>
+    <a href="/clients">Клиенты</a>
+    <a href="/inventory/products">Товары</a>
+    <a href="/inventory/cells">Ячейки</a>
+    <a href="/inventory/movements">Движения склада</a>
+    <a href="/repairs" class="soon">Ремонты</a>
+    <a href="/sales" class="soon">Продажи</a>
+    <a href="/purchases" class="soon">Приход</a>
+    <a href="/reports" class="soon">Отчёты</a>
+  </nav>
+  <div class="user">
+    {{ staff.name }} · {{ role_labels.get(staff.role, staff.role) }}
+    <a href="/logout">Выйти</a>
+  </div>
+</header>
+{% endif %}
+<main class="container">
+  {% if error %}<div class="flash flash-error">{{ error }}</div>{% endif %}
+  {% if success %}<div class="flash flash-success">{{ success }}</div>{% endif %}
+  {% block content %}{% endblock %}
+</main>
+</body>
+</html>

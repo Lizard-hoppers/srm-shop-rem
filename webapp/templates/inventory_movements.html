@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block title %}Движения склада{% endblock %}
+{% block content %}
+<h1>Движения склада</h1>
+
+<div class="movement-forms">
+  <form method="post" action="/inventory/movements/receive" class="edit-form">
+    <h3>Приход (ручной)</h3>
+    <label>Товар
+      <select name="product_id" required>
+        {% for p in products %}<option value="{{ p.id }}">{{ p.name }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Ячейка
+      <select name="cell_id" required>
+        {% for c in cells %}<option value="{{ c.id }}">{{ c.code }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Количество<input type="number" name="qty" min="1" required></label>
+    <label>Комментарий<input type="text" name="comment"></label>
+    <button type="submit">Оприходовать</button>
+  </form>
+
+  <form method="post" action="/inventory/movements/writeoff" class="edit-form">
+    <h3>Списание / корректировка</h3>
+    <label>Товар
+      <select name="product_id" required>
+        {% for p in products %}<option value="{{ p.id }}">{{ p.name }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Ячейка
+      <select name="cell_id" required>
+        {% for c in cells %}<option value="{{ c.id }}">{{ c.code }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Количество<input type="number" name="qty" min="1" required></label>
+    <label>Комментарий<input type="text" name="comment" required></label>
+    <button type="submit">Списать</button>
+  </form>
+
+  <form method="post" action="/inventory/movements/transfer" class="edit-form">
+    <h3>Перемещение между ячейками</h3>
+    <label>Товар
+      <select name="product_id" required>
+        {% for p in products %}<option value="{{ p.id }}">{{ p.name }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Откуда
+      <select name="from_cell_id" required>
+        {% for c in cells %}<option value="{{ c.id }}">{{ c.code }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Куда
+      <select name="to_cell_id" required>
+        {% for c in cells %}<option value="{{ c.id }}">{{ c.code }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Количество<input type="number" name="qty" min="1" required></label>
+    <button type="submit">Переместить</button>
+  </form>
+</div>
+
+<h2>История движений</h2>
+<table class="table">
+  <thead><tr><th>Когда</th><th>Товар</th><th>Причина</th><th>Откуда</th><th>Куда</th><th>Кол-во</th><th>Комментарий</th></tr></thead>
+  <tbody>
+    {% for m in movements %}
+    <tr>
+      <td>{{ m.created_at }}</td>
+      <td>{{ m.product_name }}</td>
+      <td>{{ reason_labels.get(m.reason, m.reason) }}</td>
+      <td>{{ m.from_cell_code or '—' }}</td>
+      <td>{{ m.to_cell_code or '—' }}</td>
+      <td>{{ m.qty }}</td>
+      <td>{{ m.comment or '' }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="7">Движений пока нет.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}
