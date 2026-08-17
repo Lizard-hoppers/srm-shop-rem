@@ -86,3 +86,13 @@ button:hover { opacity: 0.9; }
 
 .badge { font-size: 12px; color: var(--muted); background: var(--warn-bg); padding: 3px 8px; border-radius: 10px; }
 .meta { color: var(--muted); font-size: 13px; }
+
+@media (max-width: 640px) {
+  .topbar { flex-wrap: wrap; gap: 8px; padding: 10px 12px; }
+  .topbar nav { order: 3; width: 100%; overflow-x: auto; gap: 12px; padding-bottom: 2px; -webkit-overflow-scrolling: touch; }
+  .topbar nav a { white-space: nowrap; }
+  .container { padding: 14px; }
+  .cards { flex-direction: column; }
+  .movement-forms { flex-direction: column; gap: 12px; }
+  .table { font-size: 13px; display: block; overflow-x: auto; white-space: nowrap; }
+}

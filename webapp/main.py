@@ -7,7 +7,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from starlette.staticfiles import StaticFiles
 
 from core.storage import init_db
-from webapp.routers import auth, clients, dashboard, inventory
+from webapp.routers import auth, clients, dashboard, inventory, miniapp
 
 SECRET_KEY = os.environ.get("CRM_SECRET_KEY")
 if not SECRET_KEY:
@@ -21,6 +21,7 @@ app.include_router(auth.router)
 app.include_router(dashboard.router)
 app.include_router(clients.router)
 app.include_router(inventory.router)
+app.include_router(miniapp.router)
 
 
 @app.on_event("startup")

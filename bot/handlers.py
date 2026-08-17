@@ -2,32 +2,18 @@ from __future__ import annotations
 
 from aiogram import Router
 from aiogram.filters import CommandStart
-from aiogram.types import Message
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message, WebAppInfo
 
-from core import clients as core_clients
-from core.storage import get_conn
+from bot.config import MINIAPP_URL
 
 router = Router()
 
-WELCOME = (
-    "Здравствуйте! Это бот сервис-центра.\n\n"
-    "Сейчас через бота можно только оставить свои контакты — проверка статуса "
-    "ремонта и каталог товаров подключатся в одной из следующих фаз проекта.\n\n"
-    "Если у вас уже есть ремонт в работе, статус уточните у мастера напрямую."
-)
+WELCOME = "Здравствуйте! Нажмите кнопку ниже, чтобы открыть CRM сервис-центра."
 
 
 @router.message(CommandStart())
 async def start(message: Message) -> None:
-    with get_conn() as conn:
-        existing = conn.execute(
-            "SELECT id FROM clients WHERE telegram_id = ?", (message.from_user.id,)
-        ).fetchone()
-        if not existing:
-            core_clients.create_client(
-                conn,
-                name=message.from_user.full_name,
-                telegram_id=message.from_user.id,
-                source="online",
-            )
-    await message.answer(WELCOME)
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="Открыть CRM", web_app=WebAppInfo(url=MINIAPP_URL))]]
+    )
+    await message.answer(WELCOME, reply_markup=keyboard)
