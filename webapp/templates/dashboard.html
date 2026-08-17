@@ -1,29 +1,42 @@
 {% extends "base.html" %}
-{% block title %}Дашборд{% endblock %}
+{% import "_icons.html" as icons %}
+{% block title %}Главная{% endblock %}
 {% block content %}
-<h1>Дашборд</h1>
 <div class="cards">
   <a class="card" href="{{ link('/repairs') }}">
-    <div class="card-num">{{ open_repairs_count }}</div>
-    <div class="card-label">ремонтов в работе</div>
+    <div class="card-icon">{{ icons.icon('tool', 18) }}</div>
+    <div>
+      <div class="card-num">{{ open_repairs_count }}</div>
+      <div class="card-label">ремонтов в работе</div>
+    </div>
   </a>
   <a class="card" href="{{ link('/sales') }}">
-    <div class="card-num">{{ sales_count }}</div>
-    <div class="card-label">продаж всего</div>
+    <div class="card-icon">{{ icons.icon('cart', 18) }}</div>
+    <div>
+      <div class="card-num">{{ sales_count }}</div>
+      <div class="card-label">продаж всего</div>
+    </div>
   </a>
   <a class="card {% if low_stock_count %}card-warn{% endif %}" href="{{ link('/inventory/products?low_stock=1') }}">
-    <div class="card-num">{{ low_stock_count }}</div>
-    <div class="card-label">позиций с низким остатком</div>
+    <div class="card-icon">{{ icons.icon('box', 18) }}</div>
+    <div>
+      <div class="card-num">{{ low_stock_count }}</div>
+      <div class="card-label">низкий остаток</div>
+    </div>
   </a>
-</div>
-<div class="cards">
   <a class="card" href="{{ link('/clients') }}">
-    <div class="card-num">{{ clients_count }}</div>
-    <div class="card-label">клиентов в базе</div>
+    <div class="card-icon">{{ icons.icon('users', 18) }}</div>
+    <div>
+      <div class="card-num">{{ clients_count }}</div>
+      <div class="card-label">клиентов в базе</div>
+    </div>
   </a>
   <a class="card" href="{{ link('/inventory/products') }}">
-    <div class="card-num">{{ products_count }}</div>
-    <div class="card-label">товарных позиций</div>
+    <div class="card-icon">{{ icons.icon('archive', 18) }}</div>
+    <div>
+      <div class="card-num">{{ products_count }}</div>
+      <div class="card-label">товарных позиций</div>
+    </div>
   </a>
 </div>
 {% endblock %}

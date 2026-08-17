@@ -1,7 +1,8 @@
 {% extends "base.html" %}
+{% import "_icons.html" as icons %}
 {% block title %}Приход{% endblock %}
 {% block content %}
-<h1>Приход комплектующих</h1>
+<a class="back-link" href="{{ link('/warehouse') }}">{{ icons.icon('back', 16) }} Склад</a>
 
 <table class="table">
   <thead><tr><th>Поставщик</th><th>Накладная</th><th>Кто принял</th><th>Дата</th></tr></thead>

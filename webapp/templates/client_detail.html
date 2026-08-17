@@ -1,8 +1,8 @@
 {% extends "base.html" %}
+{% import "_icons.html" as icons %}
 {% block title %}{{ client.name }}{% endblock %}
 {% block content %}
-<p><a href="{{ link('/clients') }}">&larr; К списку клиентов</a></p>
-<h1>{{ client.name }}</h1>
+<a class="back-link" href="{{ link('/clients') }}">{{ icons.icon('back', 16) }} Клиенты</a>
 
 <form method="post" action="{{ link('/clients/' ~ client.id ~ '/edit') }}" class="edit-form">
   <label>Имя<input type="text" name="name" value="{{ client.name }}" required></label>
@@ -25,7 +25,7 @@
       <td>{{ d.created_at }}</td>
     </tr>
     {% else %}
-    <tr><td colspan="4">Устройств пока нет — появятся в фазе «Ремонты».</td></tr>
+    <tr><td colspan="4">Устройств пока нет.</td></tr>
     {% endfor %}
   </tbody>
 </table>

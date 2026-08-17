@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% import "_icons.html" as icons %}
+{% block title %}Ещё{% endblock %}
+{% block content %}
+<div class="card profile-card">
+  <div class="profile-avatar">{{ (staff.name or '?')[0]|upper }}</div>
+  <div>
+    <div class="profile-name">{{ staff.name }}</div>
+    <div class="profile-role">{{ role_labels.get(staff.role, staff.role) }}</div>
+  </div>
+</div>
+
+<div class="nav-list">
+  <a class="card nav-card" href="{{ link('/clients') }}">
+    <div class="card-icon">{{ icons.icon('users', 18) }}</div>
+    <div class="nav-card-body">
+      <div class="nav-card-title">Клиенты</div>
+      <div class="nav-card-sub">База клиентов магазина</div>
+    </div>
+    <div class="chevron">{{ icons.icon('chevron', 18) }}</div>
+  </a>
+  <a class="card nav-card" href="{{ link('/reports') }}">
+    <div class="card-icon">{{ icons.icon('chart', 18) }}</div>
+    <div class="nav-card-body">
+      <div class="nav-card-title">Отчёты</div>
+      <div class="nav-card-sub">Ремонты, продажи, склад</div>
+    </div>
+    <div class="chevron">{{ icons.icon('chevron', 18) }}</div>
+  </a>
+</div>
+
+<div class="btn-row" style="margin-top: 24px;">
+  <a href="/miniapp"><button type="button" class="secondary">{{ icons.icon('logout', 16) }} Выйти</button></a>
+</div>
+{% endblock %}

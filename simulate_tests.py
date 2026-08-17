@@ -229,7 +229,12 @@ def scenario_session_token() -> None:
     check("token round-trips to the same staff_id", read_token(token) == 42)
     check("garbage token rejected", read_token("not-a-real-token") is None)
     check("empty token rejected", read_token("") is None)
-    tampered = token[:-1] + ("a" if token[-1] != "a" else "b")
+    # Flip a character in the middle of the signature, not the last one: the
+    # last base64 char can encode spare bits that decoding discards, so two
+    # different last characters can occasionally decode to the same bytes.
+    mid = len(token) // 2
+    flipped = "a" if token[mid] != "a" else "b"
+    tampered = token[:mid] + flipped + token[mid + 1:]
     check("tampered token rejected", read_token(tampered) is None)
 
 

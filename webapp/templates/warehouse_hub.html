@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% import "_icons.html" as icons %}
+{% block title %}Склад{% endblock %}
+{% block content %}
+<div class="nav-list">
+  <a class="card nav-card" href="{{ link('/inventory/products') }}">
+    <div class="card-icon">{{ icons.icon('archive', 18) }}</div>
+    <div class="nav-card-body">
+      <div class="nav-card-title">Товары</div>
+      <div class="nav-card-sub">Каталог товаров и комплектующих, остатки</div>
+    </div>
+    <div class="chevron">{{ icons.icon('chevron', 18) }}</div>
+  </a>
+  <a class="card nav-card" href="{{ link('/inventory/cells') }}">
+    <div class="card-icon">{{ icons.icon('box', 18) }}</div>
+    <div class="nav-card-body">
+      <div class="nav-card-title">Ячейки</div>
+      <div class="nav-card-sub">Места хранения на складе</div>
+    </div>
+    <div class="chevron">{{ icons.icon('chevron', 18) }}</div>
+  </a>
+  <a class="card nav-card" href="{{ link('/purchases') }}">
+    <div class="card-icon">{{ icons.icon('truck', 18) }}</div>
+    <div class="nav-card-body">
+      <div class="nav-card-title">Приход</div>
+      <div class="nav-card-sub">Поставщики и накладные</div>
+    </div>
+    <div class="chevron">{{ icons.icon('chevron', 18) }}</div>
+  </a>
+  <a class="card nav-card" href="{{ link('/inventory/movements') }}">
+    <div class="card-icon">{{ icons.icon('repeat', 18) }}</div>
+    <div class="nav-card-body">
+      <div class="nav-card-title">Движения склада</div>
+      <div class="nav-card-sub">Приход, списание, перемещение между ячейками</div>
+    </div>
+    <div class="chevron">{{ icons.icon('chevron', 18) }}</div>
+  </a>
+</div>
+{% endblock %}

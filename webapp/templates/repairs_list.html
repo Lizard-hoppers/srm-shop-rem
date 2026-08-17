@@ -1,12 +1,10 @@
 {% extends "base.html" %}
 {% block title %}Ремонты{% endblock %}
 {% block content %}
-<h1>Ремонты</h1>
-
-<div class="btn-row">
-  <a href="{{ link('/repairs') }}"><button type="button" class="secondary" {% if not status %}style="border-color: var(--accent); color: var(--accent);"{% endif %}>Все</button></a>
+<div class="section-btns">
+  <a href="{{ link('/repairs') }}"><button type="button" class="secondary" {% if not status %}style="border-color: var(--accent); color: var(--accent-2);"{% endif %}>Все</button></a>
   {% for s in statuses %}
-  <a href="{{ link('/repairs?status=' ~ s) }}"><button type="button" class="secondary" {% if status == s %}style="border-color: var(--accent); color: var(--accent);"{% endif %}>{{ status_labels[s] }}</button></a>
+  <a href="{{ link('/repairs?status=' ~ s) }}"><button type="button" class="secondary" {% if status == s %}style="border-color: var(--accent); color: var(--accent-2);"{% endif %}>{{ status_labels[s] }}</button></a>
   {% endfor %}
 </div>
 
@@ -17,7 +15,7 @@
     <tr onclick="location.href='{{ link('/repairs/' ~ r.id) }}'" class="clickable">
       <td>{{ r.client_name }}</td>
       <td>{{ r.device_type }} {{ r.brand or '' }} {{ r.model or '' }}</td>
-      <td><span class="pill pill-{{ r.status }}">{{ r.status }}</span></td>
+      <td><span class="pill pill-{{ r.status }}">{{ status_labels[r.status] }}</span></td>
       <td>{{ r.master_name or '—' }}</td>
       <td><span class="pill pill-{{ r.channel }}">{{ 'Онлайн' if r.channel == 'online' else 'Офлайн' }}</span></td>
       <td>{{ r.created_at }}</td>

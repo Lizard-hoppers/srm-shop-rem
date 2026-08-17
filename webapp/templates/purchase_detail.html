@@ -1,8 +1,8 @@
 {% extends "base.html" %}
+{% import "_icons.html" as icons %}
 {% block title %}Приход #{{ receipt.id }}{% endblock %}
 {% block content %}
-<p><a href="{{ link('/purchases') }}">&larr; К списку приходов</a></p>
-<h1>Приход #{{ receipt.id }}</h1>
+<a class="back-link" href="{{ link('/purchases') }}">{{ icons.icon('back', 16) }} Приход</a>
 <p class="meta">Поставщик: {{ receipt.supplier_name or '—' }} · Накладная: {{ receipt.invoice_no or '—' }} · Принял: {{ receipt.staff_name or '—' }} · {{ receipt.created_at }}</p>
 
 <table class="table">

@@ -1,8 +1,9 @@
 {% extends "base.html" %}
+{% import "_icons.html" as icons %}
 {% block title %}Ремонт #{{ repair.id }}{% endblock %}
 {% block content %}
-<p><a href="{{ link('/repairs') }}">&larr; К списку ремонтов</a></p>
-<h1>Ремонт #{{ repair.id }} <span class="pill pill-{{ repair.status }}">{{ status_labels[repair.status] }}</span></h1>
+<a class="back-link" href="{{ link('/repairs') }}">{{ icons.icon('back', 16) }} Ремонты</a>
+<div style="margin-bottom: 14px;"><span class="pill pill-{{ repair.status }}">{{ status_labels[repair.status] }}</span></div>
 
 <div class="grid-2">
   <div>

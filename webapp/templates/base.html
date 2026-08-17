@@ -4,27 +4,18 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>{% block title %}CRM{% endblock %} — Сервис-центр</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
+{% import "_icons.html" as icons %}
 {% if staff %}
-<header class="topbar">
-  <div class="brand">CRM Сервис-центр</div>
-  <nav>
-    <a href="{{ link('/') }}">Дашборд</a>
-    <a href="{{ link('/repairs') }}">Ремонты</a>
-    <a href="{{ link('/sales') }}">Продажи</a>
-    <a href="{{ link('/purchases') }}">Приход</a>
-    <a href="{{ link('/clients') }}">Клиенты</a>
-    <a href="{{ link('/inventory/products') }}">Товары</a>
-    <a href="{{ link('/inventory/cells') }}">Ячейки</a>
-    <a href="{{ link('/inventory/movements') }}">Движения склада</a>
-    <a href="{{ link('/reports') }}">Отчёты</a>
-  </nav>
-  <div class="user">
-    {{ staff.name }} · {{ role_labels.get(staff.role, staff.role) }}
-    <a href="/miniapp">Выйти</a>
-  </div>
+{% set path = request.url.path %}
+<header class="appbar">
+  <div class="appbar-title">{% block header_title %}{{ self.title() }}{% endblock %}</div>
+  <a class="avatar" href="{{ link('/more') }}" title="{{ staff.name }}">{{ (staff.name or '?')[0]|upper }}</a>
 </header>
 {% endif %}
 <main class="container">
@@ -32,5 +23,24 @@
   {% if success %}<div class="flash flash-success">{{ success }}</div>{% endif %}
   {% block content %}{% endblock %}
 </main>
+{% if staff %}
+<nav class="tabbar">
+  <a href="{{ link('/') }}" class="{{ 'active' if path == '/' else '' }}">
+    {{ icons.icon('home') }}<span>Главная</span>
+  </a>
+  <a href="{{ link('/repairs') }}" class="{{ 'active' if path.startswith('/repairs') else '' }}">
+    {{ icons.icon('tool') }}<span>Ремонты</span>
+  </a>
+  <a href="{{ link('/sales') }}" class="{{ 'active' if path.startswith('/sales') else '' }}">
+    {{ icons.icon('cart') }}<span>Продажи</span>
+  </a>
+  <a href="{{ link('/warehouse') }}" class="{{ 'active' if path.startswith('/warehouse') or path.startswith('/inventory') or path.startswith('/purchases') else '' }}">
+    {{ icons.icon('box') }}<span>Склад</span>
+  </a>
+  <a href="{{ link('/more') }}" class="{{ 'active' if path.startswith('/more') or path.startswith('/clients') or path.startswith('/reports') else '' }}">
+    {{ icons.icon('more') }}<span>Ещё</span>
+  </a>
+</nav>
+{% endif %}
 </body>
 </html>
