@@ -179,6 +179,30 @@ select {
 }
 select::-ms-expand { display: none; }
 option { background: var(--panel-alt); color: var(--text); }
+
+/* ---- custom select (see select-enhance.js) ---- */
+.csel { position: relative; }
+.csel-native { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.csel-trigger {
+  width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  text-align: left; font-family: inherit; font-size: 14.5px;
+  background: var(--panel-alt); color: var(--text); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); padding: 10px 12px; cursor: pointer;
+}
+.csel-trigger::after {
+  content: ""; width: 16px; height: 16px; flex-shrink: 0;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238b93a1' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'/></svg>");
+  background-repeat: no-repeat; background-size: contain;
+}
+.csel-panel {
+  display: none; position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 30;
+  background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-lg); max-height: 240px; overflow-y: auto; padding: 4px;
+}
+.csel-panel.open { display: block; }
+.csel-item { padding: 9px 10px; border-radius: 8px; font-size: 14px; cursor: pointer; color: var(--text); }
+.csel-item.active { color: var(--accent-2); font-weight: 600; }
+.csel-item:hover, .csel-item:active { background: var(--panel-hover); }
 button {
   background: linear-gradient(135deg, var(--accent), #6b7fe8); color: var(--accent-text);
   border: none; cursor: pointer; padding: 11px 18px; font-weight: 700;

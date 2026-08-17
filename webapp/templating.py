@@ -1,4 +1,5 @@
 import os
+import time
 
 from fastapi import Request
 from fastapi.templating import Jinja2Templates
@@ -19,11 +20,10 @@ templates.env.globals["role_labels"] = ROLE_LABELS
 templates.env.globals["reason_labels"] = REASON_LABELS
 templates.env.globals["status_labels"] = STATUS_LABELS
 
-# Telegram's WebView caches /static/style.css by ETag and can keep serving a
-# stale copy after a deploy; tying the URL to the file's mtime forces a fresh
-# fetch every time the CSS actually changes, no manual cache-busting needed.
-_STYLE_CSS_PATH = os.path.join(os.path.dirname(__file__), "static", "style.css")
-templates.env.globals["asset_version"] = str(int(os.path.getmtime(_STYLE_CSS_PATH)))
+# Telegram's WebView caches static/* by ETag and can keep serving a stale
+# copy after a deploy; tying every static asset URL to this process's start
+# time forces a fresh fetch after every deploy+restart, whatever changed.
+templates.env.globals["asset_version"] = str(int(time.time()))
 
 
 def render(request: Request, name: str, **ctx):
