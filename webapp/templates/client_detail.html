@@ -4,29 +4,51 @@
 {% block content %}
 <a class="back-link" href="{{ link('/clients') }}">{{ icons.icon('back', 16) }} Клиенты</a>
 
+<div class="panel-box">
+  <h3>{{ client.name }}</h3>
+  <p class="meta">{{ client.phone or 'Без телефона' }} · {{ 'Онлайн' if client.source == 'online' else 'Офлайн' }} · в базе с {{ client.created_at }}</p>
+  {% if client.notes %}<p class="meta">{{ client.notes }}</p>{% endif %}
+</div>
+
+<h2>История обращений — {{ repair_history|length }}</h2>
+<table class="table">
+  <thead><tr><th>Устройство</th><th>Статус</th><th>Мастер</th><th>Принят</th></tr></thead>
+  <tbody>
+    {% for r in repair_history %}
+    <tr onclick="location.href='{{ link('/repairs/' ~ r.id) }}'" class="clickable">
+      <td>{{ r.device_type }} {{ r.brand or '' }} {{ r.model or '' }}{% if r.serial_number %} <span class="meta">· {{ r.serial_number }}</span>{% endif %}</td>
+      <td><span class="pill pill-{{ r.status }}">{{ status_labels[r.status] }}</span></td>
+      <td>{{ r.master_name or '—' }}</td>
+      <td>{{ r.created_at }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="4">Пока не приносил устройства в ремонт.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+{% if sales_history %}
+<h2>Покупки — {{ sales_history|length }}</h2>
+<table class="table">
+  <thead><tr><th>Канал</th><th>Сумма</th><th>Продавец</th><th>Дата</th></tr></thead>
+  <tbody>
+    {% for s in sales_history %}
+    <tr onclick="location.href='{{ link('/sales/' ~ s.id) }}'" class="clickable">
+      <td><span class="pill pill-{{ s.channel }}">{{ 'Онлайн' if s.channel == 'online' else 'Офлайн' }}</span></td>
+      <td>{{ s.total }}</td>
+      <td>{{ s.staff_name or '—' }}</td>
+      <td>{{ s.created_at }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<h2>Данные клиента</h2>
 <form method="post" action="{{ link('/clients/' ~ client.id ~ '/edit') }}" class="edit-form">
   <label>Имя<input type="text" name="name" value="{{ client.name }}" required></label>
   <label>Телефон<input type="text" name="phone" value="{{ client.phone or '' }}"></label>
   <label>Заметки<textarea name="notes">{{ client.notes or '' }}</textarea></label>
   <button type="submit">Сохранить</button>
 </form>
-
-<p class="meta">Источник: {{ 'Онлайн' if client.source == 'online' else 'Офлайн' }} · В базе с {{ client.created_at }}</p>
-
-<h2>Устройства</h2>
-<table class="table">
-  <thead><tr><th>Тип</th><th>Бренд/модель</th><th>Серийный №</th><th>Добавлено</th></tr></thead>
-  <tbody>
-    {% for d in devices %}
-    <tr>
-      <td>{{ d.device_type }}</td>
-      <td>{{ d.brand or '' }} {{ d.model or '' }}</td>
-      <td>{{ d.serial_number or '—' }}</td>
-      <td>{{ d.created_at }}</td>
-    </tr>
-    {% else %}
-    <tr><td colspan="4">Устройств пока нет.</td></tr>
-    {% endfor %}
-  </tbody>
-</table>
 {% endblock %}

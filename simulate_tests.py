@@ -157,6 +157,38 @@ def scenario_repairs_pipeline(db_path: str) -> None:
         check("status history has 4 entries", len(history) == 4)
 
 
+def scenario_client_history(db_path: str) -> None:
+    print("scenario: client card shows every device brought in, across separate visits")
+    with get_conn(db_path) as conn:
+        staff_id = auth.create_staff(conn, "admin2", "pass", "Админ 2", "admin")
+        product_id = inventory.create_product(conn, "Чехол", "SKU-CASE", "Аксессуары", "шт", False, True, min_qty=0, price=300)
+        cell_id = inventory.create_cell(conn, "E1-01", None, None)
+        inventory.receive_stock(conn, product_id, cell_id, 5, staff_id)
+
+        # Same client (matched by phone), two different phones brought in on separate visits.
+        client_id_1 = clients.get_or_create_by_phone(conn, "Ирина Коваль", "+380631112200", source="offline")
+        order_1 = repairs.create_repair(
+            conn, client_id_1, "смартфон", "Apple", "iPhone 12", None, "разбит экран",
+            "offline", None, 2000, staff_id,
+        )
+        client_id_2 = clients.get_or_create_by_phone(conn, "Ирина Коваль", "+380631112200", source="offline")
+        order_2 = repairs.create_repair(
+            conn, client_id_2, "планшет", "Apple", "iPad", None, "не заряжается",
+            "offline", None, 1200, staff_id,
+        )
+        check("second visit reused the same client (matched by phone)", client_id_1 == client_id_2)
+
+        sale_id = sales.create_sale(conn, client_id_1, "offline", staff_id, [(product_id, 1, 300)])
+
+        history = repairs.list_repairs_by_client(conn, client_id_1)
+        check("client history has both repair visits", len(history) == 2)
+        check("history includes the iPhone visit", any(h["id"] == order_1 for h in history))
+        check("history includes the iPad visit", any(h["id"] == order_2 for h in history))
+
+        sale_history = sales.list_sales_by_client(conn, client_id_1)
+        check("client purchase history recorded", len(sale_history) == 1 and sale_history[0]["id"] == sale_id)
+
+
 def scenario_purchases(db_path: str) -> None:
     print("scenario: goods receipt (приход)")
     with get_conn(db_path) as conn:
@@ -267,6 +299,7 @@ def main() -> None:
         scenario_client_and_repair(db_path)
         scenario_inventory(db_path)
         scenario_repairs_pipeline(db_path)
+        scenario_client_history(db_path)
         scenario_purchases(db_path)
         scenario_sales(db_path)
 

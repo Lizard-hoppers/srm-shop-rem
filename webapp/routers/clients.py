@@ -4,6 +4,8 @@ from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import RedirectResponse
 
 from core import clients as core_clients
+from core import repairs as core_repairs
+from core import sales as core_sales
 from core.storage import get_conn
 from webapp.deps import link, require_staff
 from webapp.templating import render
@@ -37,10 +39,14 @@ def create_view(
 def detail_view(request: Request, client_id: int, staff=Depends(require_staff)):
     with get_conn() as conn:
         client = core_clients.get_client(conn, client_id)
-        devices = core_clients.get_client_devices(conn, client_id)
-    if not client:
-        return RedirectResponse(link(request, "/clients"), status_code=303)
-    return render(request, "client_detail.html", staff=staff, client=client, devices=devices)
+        if not client:
+            return RedirectResponse(link(request, "/clients"), status_code=303)
+        repair_history = core_repairs.list_repairs_by_client(conn, client_id)
+        sales_history = core_sales.list_sales_by_client(conn, client_id)
+    return render(
+        request, "client_detail.html", staff=staff, client=client,
+        repair_history=repair_history, sales_history=sales_history,
+    )
 
 
 @router.post("/{client_id}/edit")

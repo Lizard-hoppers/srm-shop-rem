@@ -40,6 +40,20 @@ def list_repairs(
     return conn.execute(query, params).fetchall()
 
 
+def list_repairs_by_client(conn: sqlite3.Connection, client_id: int) -> list[sqlite3.Row]:
+    """Every device/visit this client has ever brought in — the client card's history."""
+    return conn.execute(
+        """SELECT repair_orders.*, devices.device_type, devices.brand, devices.model,
+                  devices.serial_number, devices.defect_description, staff.name AS master_name
+           FROM repair_orders
+           JOIN devices ON devices.id = repair_orders.device_id
+           LEFT JOIN staff ON staff.id = repair_orders.master_id
+           WHERE repair_orders.client_id = ?
+           ORDER BY repair_orders.created_at DESC""",
+        (client_id,),
+    ).fetchall()
+
+
 def get_repair(conn: sqlite3.Connection, order_id: int) -> sqlite3.Row | None:
     return conn.execute(
         """SELECT repair_orders.*, clients.name AS client_name, clients.phone AS client_phone,

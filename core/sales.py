@@ -54,6 +54,18 @@ def list_sales(conn: sqlite3.Connection, limit: int = 100) -> list[sqlite3.Row]:
     ).fetchall()
 
 
+def list_sales_by_client(conn: sqlite3.Connection, client_id: int) -> list[sqlite3.Row]:
+    return conn.execute(
+        """SELECT sales_orders.*, staff.name AS staff_name,
+                  (SELECT COALESCE(SUM(qty * price), 0) FROM sales_order_items WHERE order_id = sales_orders.id) AS total
+           FROM sales_orders
+           LEFT JOIN staff ON staff.id = sales_orders.staff_id
+           WHERE sales_orders.client_id = ?
+           ORDER BY sales_orders.created_at DESC""",
+        (client_id,),
+    ).fetchall()
+
+
 def get_sale(conn: sqlite3.Connection, order_id: int) -> sqlite3.Row | None:
     return conn.execute(
         """SELECT sales_orders.*, clients.name AS client_name, staff.name AS staff_name
