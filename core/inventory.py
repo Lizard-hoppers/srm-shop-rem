@@ -178,6 +178,16 @@ def transfer_stock(conn, product_id: int, from_cell_id: int, to_cell_id: int, qt
     )
 
 
+def pick_cell_with_stock(conn: sqlite3.Connection, product_id: int, qty: int) -> int | None:
+    """Find a cell holding at least qty of product_id, for callers that don't
+    need the cashier/master to pick a specific cell (sales, repair part use)."""
+    row = conn.execute(
+        "SELECT cell_id FROM stock WHERE product_id = ? AND qty >= ? ORDER BY qty DESC LIMIT 1",
+        (product_id, qty),
+    ).fetchone()
+    return row["cell_id"] if row else None
+
+
 def list_movements(conn: sqlite3.Connection, limit: int = 100) -> list[sqlite3.Row]:
     return conn.execute(
         """SELECT stock_movements.*, products.name AS product_name,

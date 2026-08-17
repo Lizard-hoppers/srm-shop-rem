@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}Продажи{% endblock %}
+{% block content %}
+<h1>Продажи</h1>
+{% if error %}<div class="flash flash-error">{{ error }}</div>{% endif %}
+
+<table class="table">
+  <thead><tr><th>Клиент</th><th>Канал</th><th>Сумма</th><th>Продавец</th><th>Дата</th></tr></thead>
+  <tbody>
+    {% for s in sales %}
+    <tr onclick="location.href='{{ link('/sales/' ~ s.id) }}'" class="clickable">
+      <td>{{ s.client_name or 'Без клиента' }}</td>
+      <td><span class="pill pill-{{ s.channel }}">{{ 'Онлайн' if s.channel == 'online' else 'Офлайн' }}</span></td>
+      <td>{{ s.total }}</td>
+      <td>{{ s.staff_name or '—' }}</td>
+      <td>{{ s.created_at }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="5">Продаж пока нет.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<h2>Новая продажа</h2>
+<form method="post" action="{{ link('/sales') }}" class="edit-form">
+  <label>Имя клиента (необязательно)<input type="text" name="client_name"></label>
+  <label>Телефон клиента (необязательно)<input type="text" name="client_phone"></label>
+  <label>Канал
+    <select name="channel">
+      <option value="offline">Офлайн (в точке)</option>
+      <option value="online">Онлайн</option>
+    </select>
+  </label>
+
+  {% for i in item_rows %}
+  <div style="display:flex; gap:6px; flex-wrap:wrap; padding-top:8px; border-top: 1px solid var(--border);">
+    <select name="product_id_{{ i }}" style="flex:2;">
+      <option value="">— товар —</option>
+      {% for p in products %}<option value="{{ p.id }}">{{ p.name }} {% if p.price %}({{ p.price }}){% endif %}</option>{% endfor %}
+    </select>
+    <input type="number" name="qty_{{ i }}" placeholder="Кол-во" style="width:80px;">
+    <input type="number" name="price_{{ i }}" placeholder="Цена за шт" style="width:110px;">
+  </div>
+  {% endfor %}
+  <button type="submit">Оформить продажу</button>
+</form>
+{% endblock %}

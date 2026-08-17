@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}Продажа #{{ sale.id }}{% endblock %}
+{% block content %}
+<p><a href="{{ link('/sales') }}">&larr; К списку продаж</a></p>
+<h1>Продажа #{{ sale.id }}</h1>
+<p class="meta">Клиент: {{ sale.client_name or 'Без клиента' }} · Канал: {{ 'Онлайн' if sale.channel == 'online' else 'Офлайн' }} · Продавец: {{ sale.staff_name or '—' }} · {{ sale.created_at }}</p>
+
+<table class="table">
+  <thead><tr><th>Товар</th><th>Кол-во</th><th>Цена</th><th>Сумма</th></tr></thead>
+  <tbody>
+    {% for i in items %}
+    <tr>
+      <td>{{ i.product_name }}</td>
+      <td>{{ i.qty }}</td>
+      <td>{{ i.price }}</td>
+      <td>{{ i.qty * i.price }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

@@ -46,6 +46,10 @@ def create_staff(conn: sqlite3.Connection, login: str, password: str, name: str,
     return cur.lastrowid
 
 
+def list_staff(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute("SELECT * FROM staff WHERE active = 1 ORDER BY name").fetchall()
+
+
 def get_staff_by_telegram_id(conn: sqlite3.Connection, telegram_id: int) -> sqlite3.Row | None:
     return conn.execute(
         "SELECT * FROM staff WHERE telegram_id = ? AND active = 1", (telegram_id,)

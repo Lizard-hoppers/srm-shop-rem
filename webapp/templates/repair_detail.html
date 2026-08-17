@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% block title %}Ремонт #{{ repair.id }}{% endblock %}
+{% block content %}
+<p><a href="{{ link('/repairs') }}">&larr; К списку ремонтов</a></p>
+<h1>Ремонт #{{ repair.id }} <span class="pill pill-{{ repair.status }}">{{ status_labels[repair.status] }}</span></h1>
+
+<div class="grid-2">
+  <div>
+    <div class="panel-box">
+      <h3>Клиент и устройство</h3>
+      <p><a href="{{ link('/clients/' ~ repair.client_id) }}">{{ repair.client_name }}</a> · {{ repair.client_phone or '—' }}</p>
+      <p>{{ repair.device_type }} {{ repair.brand or '' }} {{ repair.model or '' }}</p>
+      <p class="meta">Серийный №: {{ repair.serial_number or '—' }}</p>
+      <p class="meta">Неисправность: {{ repair.defect_description or '—' }}</p>
+      <p class="meta">Канал: <span class="pill pill-{{ repair.channel }}">{{ 'Онлайн' if repair.channel == 'online' else 'Офлайн' }}</span> · Принят {{ repair.created_at }}</p>
+    </div>
+
+    <div class="panel-box" style="margin-top: 16px;">
+      <h3>Статус</h3>
+      <form method="post" action="{{ link('/repairs/' ~ repair.id ~ '/status') }}" class="edit-form">
+        <label>Новый статус
+          <select name="status">
+            {% for s in statuses %}<option value="{{ s }}" {% if s == repair.status %}selected{% endif %}>{{ status_labels[s] }}</option>{% endfor %}
+          </select>
+        </label>
+        <label>Комментарий<input type="text" name="comment"></label>
+        <button type="submit">Обновить статус</button>
+      </form>
+    </div>
+
+    <div class="panel-box" style="margin-top: 16px;">
+      <h3>Мастер</h3>
+      <form method="post" action="{{ link('/repairs/' ~ repair.id ~ '/assign') }}" class="inline-form">
+        <select name="master_id">
+          <option value="">Не назначен</option>
+          {% for m in masters %}<option value="{{ m.id }}" {% if repair.master_id == m.id %}selected{% endif %}>{{ m.name }}</option>{% endfor %}
+        </select>
+        <button type="submit">Назначить</button>
+      </form>
+    </div>
+
+    <div class="panel-box" style="margin-top: 16px;">
+      <h3>Цена и гарантия</h3>
+      <form method="post" action="{{ link('/repairs/' ~ repair.id ~ '/price') }}" class="edit-form">
+        <label>Оценка стоимости<input type="number" name="price_estimate" value="{{ repair.price_estimate or '' }}"></label>
+        <label>Итоговая цена<input type="number" name="price_final" value="{{ repair.price_final or '' }}"></label>
+        <label>Гарантия до (ГГГГ-ММ-ДД)<input type="text" name="warranty_until" value="{{ repair.warranty_until or '' }}" placeholder="2026-12-31"></label>
+        <button type="submit">Сохранить</button>
+      </form>
+    </div>
+  </div>
+
+  <div>
+    <div class="panel-box">
+      <h3>Использованные детали</h3>
+      {% if error %}<div class="flash flash-error">{{ error }}</div>{% endif %}
+      <table class="table">
+        <thead><tr><th>Деталь</th><th>Кол-во</th><th>Когда</th></tr></thead>
+        <tbody>
+          {% for p in parts %}
+          <tr><td>{{ p.product_name }}</td><td>{{ p.qty }}</td><td>{{ p.created_at }}</td></tr>
+          {% else %}
+          <tr><td colspan="3">Детали не списывались.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      <form method="post" action="{{ link('/repairs/' ~ repair.id ~ '/parts') }}" class="inline-form" style="margin-top: 10px;">
+        <select name="product_id" required>
+          {% for p in products %}<option value="{{ p.id }}">{{ p.name }}</option>{% endfor %}
+        </select>
+        <select name="cell_id" required>
+          {% for c in cells %}<option value="{{ c.id }}">{{ c.code }}</option>{% endfor %}
+        </select>
+        <input type="number" name="qty" min="1" value="1" required style="width: 70px;">
+        <button type="submit">Списать</button>
+      </form>
+    </div>
+
+    <div class="panel-box" style="margin-top: 16px;">
+      <h3>История</h3>
+      <ul class="timeline">
+        {% for h in history %}
+        <li>
+          <span class="pill pill-{{ h.status }}">{{ status_labels[h.status] }}</span>
+          {{ h.comment or '' }}
+          <div class="t-when">{{ h.changed_at }} · {{ h.staff_name or 'система' }}</div>
+        </li>
+        {% endfor %}
+      </ul>
+    </div>
+  </div>
+</div>
+{% endblock %}

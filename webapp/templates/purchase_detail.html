@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}Приход #{{ receipt.id }}{% endblock %}
+{% block content %}
+<p><a href="{{ link('/purchases') }}">&larr; К списку приходов</a></p>
+<h1>Приход #{{ receipt.id }}</h1>
+<p class="meta">Поставщик: {{ receipt.supplier_name or '—' }} · Накладная: {{ receipt.invoice_no or '—' }} · Принял: {{ receipt.staff_name or '—' }} · {{ receipt.created_at }}</p>
+
+<table class="table">
+  <thead><tr><th>Товар</th><th>Ячейка</th><th>Кол-во</th><th>Цена закупки</th></tr></thead>
+  <tbody>
+    {% for i in items %}
+    <tr>
+      <td>{{ i.product_name }}</td>
+      <td>{{ i.cell_code or '—' }}</td>
+      <td>{{ i.qty }}</td>
+      <td>{{ i.unit_cost or '—' }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

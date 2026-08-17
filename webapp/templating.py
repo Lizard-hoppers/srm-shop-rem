@@ -3,6 +3,7 @@ import os
 from fastapi import Request
 from fastapi.templating import Jinja2Templates
 
+from core.repairs import STATUS_LABELS
 from webapp.deps import ROLE_LABELS, current_staff, link, request_token
 
 REASON_LABELS = {
@@ -16,6 +17,7 @@ REASON_LABELS = {
 templates = Jinja2Templates(directory=os.path.join(os.path.dirname(__file__), "templates"))
 templates.env.globals["role_labels"] = ROLE_LABELS
 templates.env.globals["reason_labels"] = REASON_LABELS
+templates.env.globals["status_labels"] = STATUS_LABELS
 
 
 def render(request: Request, name: str, **ctx):

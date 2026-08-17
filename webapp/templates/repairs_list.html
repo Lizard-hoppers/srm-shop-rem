@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}Ремонты{% endblock %}
+{% block content %}
+<h1>Ремонты</h1>
+
+<div class="btn-row">
+  <a href="{{ link('/repairs') }}"><button type="button" class="secondary" {% if not status %}style="border-color: var(--accent); color: var(--accent);"{% endif %}>Все</button></a>
+  {% for s in statuses %}
+  <a href="{{ link('/repairs?status=' ~ s) }}"><button type="button" class="secondary" {% if status == s %}style="border-color: var(--accent); color: var(--accent);"{% endif %}>{{ status_labels[s] }}</button></a>
+  {% endfor %}
+</div>
+
+<table class="table">
+  <thead><tr><th>Клиент</th><th>Устройство</th><th>Статус</th><th>Мастер</th><th>Канал</th><th>Создан</th></tr></thead>
+  <tbody>
+    {% for r in repairs %}
+    <tr onclick="location.href='{{ link('/repairs/' ~ r.id) }}'" class="clickable">
+      <td>{{ r.client_name }}</td>
+      <td>{{ r.device_type }} {{ r.brand or '' }} {{ r.model or '' }}</td>
+      <td><span class="pill pill-{{ r.status }}">{{ r.status }}</span></td>
+      <td>{{ r.master_name or '—' }}</td>
+      <td><span class="pill pill-{{ r.channel }}">{{ 'Онлайн' if r.channel == 'online' else 'Офлайн' }}</span></td>
+      <td>{{ r.created_at }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="6">Ремонтов пока нет.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<h2>Принять устройство в ремонт</h2>
+<form method="post" action="{{ link('/repairs') }}" class="edit-form">
+  <label>Имя клиента<input type="text" name="client_name" required></label>
+  <label>Телефон клиента<input type="text" name="client_phone" required></label>
+  <label>Тип устройства<input type="text" name="device_type" placeholder="Смартфон, ноутбук…" required></label>
+  <label>Бренд<input type="text" name="brand"></label>
+  <label>Модель<input type="text" name="model"></label>
+  <label>Серийный №/IMEI<input type="text" name="serial_number"></label>
+  <label>Описание неисправности<textarea name="defect_description"></textarea></label>
+  <label>Канал
+    <select name="channel">
+      <option value="offline">Офлайн (в точке)</option>
+      <option value="online">Онлайн</option>
+    </select>
+  </label>
+  <label>Мастер
+    <select name="master_id">
+      <option value="">Не назначен</option>
+      {% for m in masters %}<option value="{{ m.id }}">{{ m.name }}</option>{% endfor %}
+    </select>
+  </label>
+  <label>Оценка стоимости<input type="number" name="price_estimate"></label>
+  <button type="submit">Принять</button>
+</form>
+{% endblock %}

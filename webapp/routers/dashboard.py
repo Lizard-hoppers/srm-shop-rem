@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Request
 
-from core.inventory import list_products, low_stock_report
 from core.clients import list_clients
+from core.inventory import list_products, low_stock_report
+from core.repairs import list_repairs
+from core.sales import list_sales
 from core.storage import get_conn
 from webapp.deps import require_staff
 from webapp.templating import render
@@ -17,6 +19,8 @@ def dashboard(request: Request, staff=Depends(require_staff)):
         clients_count = len(list_clients(conn))
         products_count = len(list_products(conn))
         low_stock_count = len(low_stock_report(conn))
+        open_repairs_count = len([r for r in list_repairs(conn) if r["status"] not in ("issued", "cancelled")])
+        sales_today_count = len(list_sales(conn, limit=1000))
     return render(
         request,
         "dashboard.html",
@@ -24,24 +28,6 @@ def dashboard(request: Request, staff=Depends(require_staff)):
         clients_count=clients_count,
         products_count=products_count,
         low_stock_count=low_stock_count,
+        open_repairs_count=open_repairs_count,
+        sales_count=sales_today_count,
     )
-
-
-@router.get("/repairs")
-def repairs_placeholder(request: Request, staff=Depends(require_staff)):
-    return render(request, "placeholder.html", staff=staff, title="Ремонты")
-
-
-@router.get("/sales")
-def sales_placeholder(request: Request, staff=Depends(require_staff)):
-    return render(request, "placeholder.html", staff=staff, title="Продажи")
-
-
-@router.get("/purchases")
-def purchases_placeholder(request: Request, staff=Depends(require_staff)):
-    return render(request, "placeholder.html", staff=staff, title="Приход комплектующих")
-
-
-@router.get("/reports")
-def reports_placeholder(request: Request, staff=Depends(require_staff)):
-    return render(request, "placeholder.html", staff=staff, title="Отчёты")

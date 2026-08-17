@@ -50,3 +50,12 @@ def get_client_devices(conn: sqlite3.Connection, client_id: int) -> list[sqlite3
     return conn.execute(
         "SELECT * FROM devices WHERE client_id = ? ORDER BY created_at DESC", (client_id,)
     ).fetchall()
+
+
+def get_or_create_by_phone(conn: sqlite3.Connection, name: str, phone: str, source: str = "offline") -> int:
+    """Reuse an existing client matched by phone, or register a new one on the spot."""
+    phone = phone.strip()
+    existing = conn.execute("SELECT id FROM clients WHERE phone = ?", (phone,)).fetchone()
+    if existing:
+        return existing["id"]
+    return create_client(conn, name=name.strip(), phone=phone, source=source)

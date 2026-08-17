@@ -2,7 +2,7 @@
 <html lang="ru">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>{% block title %}CRM{% endblock %} — Сервис-центр</title>
 <link rel="stylesheet" href="/static/style.css">
 </head>
@@ -12,14 +12,14 @@
   <div class="brand">CRM Сервис-центр</div>
   <nav>
     <a href="{{ link('/') }}">Дашборд</a>
+    <a href="{{ link('/repairs') }}">Ремонты</a>
+    <a href="{{ link('/sales') }}">Продажи</a>
+    <a href="{{ link('/purchases') }}">Приход</a>
     <a href="{{ link('/clients') }}">Клиенты</a>
     <a href="{{ link('/inventory/products') }}">Товары</a>
     <a href="{{ link('/inventory/cells') }}">Ячейки</a>
     <a href="{{ link('/inventory/movements') }}">Движения склада</a>
-    <a href="{{ link('/repairs') }}" class="soon">Ремонты</a>
-    <a href="{{ link('/sales') }}" class="soon">Продажи</a>
-    <a href="{{ link('/purchases') }}" class="soon">Приход</a>
-    <a href="{{ link('/reports') }}" class="soon">Отчёты</a>
+    <a href="{{ link('/reports') }}">Отчёты</a>
   </nav>
   <div class="user">
     {{ staff.name }} · {{ role_labels.get(staff.role, staff.role) }}

@@ -16,7 +16,7 @@ import json
 import time
 import urllib.parse
 
-from core import auth, clients, inventory
+from core import auth, clients, inventory, purchases, repairs, sales
 from core.session_token import make_token, read_token
 from core.storage import get_conn, init_db
 from core.telegram_auth import validate_init_data
@@ -115,6 +115,87 @@ def scenario_inventory(db_path: str) -> None:
         check("movements logged", len(movements) == 3)
 
 
+def scenario_repairs_pipeline(db_path: str) -> None:
+    print("scenario: repairs pipeline (intake -> assign -> parts -> status -> issued)")
+    with get_conn(db_path) as conn:
+        master_id = auth.create_staff(conn, "master1", "pass", "Мастер Олег", "master")
+        staff_id = auth.create_staff(conn, "admin1", "pass", "Админ", "admin")
+        client_id = clients.create_client(conn, "Пётр Петров", phone="+380671112233", source="offline")
+        product_id = inventory.create_product(conn, "Батарея A54", "SKU-BAT", "Батареи", "шт", True, False, min_qty=1, price=None)
+        cell_id = inventory.create_cell(conn, "B1-01", None, None)
+        inventory.receive_stock(conn, product_id, cell_id, 3, staff_id)
+
+        order_id = repairs.create_repair(
+            conn, client_id, "смартфон", "Samsung", "A54", "IMEI123", "не держит заряд",
+            "offline", None, 1500, staff_id,
+        )
+        repair = repairs.get_repair(conn, order_id)
+        check("repair created with status new", repair["status"] == "new")
+
+        repairs.assign_master(conn, order_id, master_id)
+        repair = repairs.get_repair(conn, order_id)
+        check("master assigned", repair["master_id"] == master_id)
+
+        repairs.update_status(conn, order_id, "in_progress", staff_id)
+        repair = repairs.get_repair(conn, order_id)
+        check("status moved to in_progress and started_at stamped", repair["status"] == "in_progress" and repair["started_at"] is not None)
+
+        inventory.record_movement(conn, product_id, 1, "repair_use", staff_id, from_cell_id=cell_id, ref_type="repair_order", ref_id=order_id)
+        check("part usage deducted stock", inventory.product_total_qty(conn, product_id) == 2)
+        parts = repairs.get_used_parts(conn, order_id)
+        check("part usage recorded against repair", len(parts) == 1 and parts[0]["qty"] == 1)
+
+        repairs.update_status(conn, order_id, "ready", staff_id)
+        repairs.set_price(conn, order_id, price_estimate=1500, price_final=1400)
+        repairs.update_status(conn, order_id, "issued", staff_id, comment="выдан клиенту")
+        repair = repairs.get_repair(conn, order_id)
+        check("repair issued with timestamp and final price", repair["status"] == "issued" and repair["issued_at"] is not None and repair["price_final"] == 1400)
+
+        history = repairs.get_status_history(conn, order_id)
+        check("status history has 4 entries", len(history) == 4)
+
+
+def scenario_purchases(db_path: str) -> None:
+    print("scenario: goods receipt (приход)")
+    with get_conn(db_path) as conn:
+        staff_id = auth.create_staff(conn, "storekeeper2", "pass", "Кладовщик 2", "storekeeper")
+        supplier_id = purchases.create_supplier(conn, "ООО Компонент", "+380440000000")
+        product_id = inventory.create_product(conn, "Шлейф зарядки", "SKU-CHG", "Шлейфы", "шт", True, False, min_qty=1, price=None)
+        cell_id = inventory.create_cell(conn, "C1-01", None, None)
+
+        receipt_id = purchases.create_receipt(
+            conn, supplier_id, "INV-001", staff_id, [(product_id, cell_id, 10, 250)]
+        )
+        check("stock increased by received qty", inventory.product_total_qty(conn, product_id) == 10)
+        items = purchases.get_receipt_items(conn, receipt_id)
+        check("receipt item recorded with cost", len(items) == 1 and items[0]["unit_cost"] == 250)
+        movements = [m for m in inventory.list_movements(conn) if m["ref_type"] == "goods_receipt"]
+        check("receipt linked to a stock movement", len(movements) == 1 and movements[0]["ref_id"] == receipt_id)
+
+
+def scenario_sales(db_path: str) -> None:
+    print("scenario: offline sale deducts stock from a cell with enough qty")
+    with get_conn(db_path) as conn:
+        staff_id = auth.create_staff(conn, "cashier1", "pass", "Кассир", "admin")
+        product_id = inventory.create_product(conn, "Наушники", "SKU-EAR", "Аксессуары", "шт", False, True, min_qty=0, price=500)
+        cell_a = inventory.create_cell(conn, "D1-01", None, None)
+        cell_b = inventory.create_cell(conn, "D1-02", None, None)
+        inventory.receive_stock(conn, product_id, cell_a, 2, staff_id)
+        inventory.receive_stock(conn, product_id, cell_b, 5, staff_id)
+
+        order_id = sales.create_sale(conn, None, "offline", staff_id, [(product_id, 4, 500)])
+        check("sale deducted 4 units total", inventory.product_total_qty(conn, product_id) == 3)
+        items = sales.get_sale_items(conn, order_id)
+        check("sale item recorded", len(items) == 1 and items[0]["qty"] == 4)
+
+        raised = False
+        try:
+            sales.create_sale(conn, None, "offline", staff_id, [(product_id, 999, 500)])
+        except inventory.InsufficientStockError:
+            raised = True
+        check("sale beyond stock raises InsufficientStockError", raised)
+
+
 def _build_init_data(bot_token: str, user: dict, auth_date: int) -> str:
     data = {"auth_date": str(auth_date), "user": json.dumps(user, separators=(",", ":"))}
     check_string = "\n".join(f"{k}={v}" for k, v in sorted(data.items()))
@@ -159,6 +240,9 @@ def main() -> None:
         scenario_auth(db_path)
         scenario_client_and_repair(db_path)
         scenario_inventory(db_path)
+        scenario_repairs_pipeline(db_path)
+        scenario_purchases(db_path)
+        scenario_sales(db_path)
 
     scenario_telegram_auth()
     scenario_session_token()

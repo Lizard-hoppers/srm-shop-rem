@@ -170,6 +170,7 @@ def init_db(db_path: str = DB_PATH) -> None:
     try:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript(SCHEMA)
+        _ensure_column(conn, "goods_receipt_items", "cell_id", "cell_id INTEGER REFERENCES storage_cells(id)")
         conn.commit()
     finally:
         conn.close()

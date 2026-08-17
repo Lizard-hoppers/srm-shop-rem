@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block title %}Отчёты{% endblock %}
+{% block content %}
+<h1>Отчёты</h1>
+
+<div class="stat-row">
+  <div class="stat">
+    <div class="stat-num">{{ revenue }}</div>
+    <div class="stat-label">выручка по выданным ремонтам</div>
+  </div>
+  <div class="stat">
+    <div class="stat-num">{{ avg_days if avg_days is not none else '—' }}</div>
+    <div class="stat-label">среднее время ремонта, дн.</div>
+  </div>
+  <div class="stat">
+    <div class="stat-num">{{ low_stock|length }}</div>
+    <div class="stat-label">позиций с дефицитом на складе</div>
+  </div>
+</div>
+
+<h2>Ремонты по статусам</h2>
+<table class="table">
+  <thead><tr><th>Статус</th><th>Кол-во</th></tr></thead>
+  <tbody>
+    {% for r in by_status %}
+    <tr><td><span class="pill pill-{{ r.status }}">{{ status_labels.get(r.status, r.status) }}</span></td><td>{{ r.n }}</td></tr>
+    {% else %}
+    <tr><td colspan="2">Данных пока нет.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<h2>Выработка мастеров</h2>
+<table class="table">
+  <thead><tr><th>Мастер</th><th>Всего ремонтов</th><th>Выдано</th></tr></thead>
+  <tbody>
+    {% for m in by_master %}
+    <tr><td>{{ m.master_name }}</td><td>{{ m.total }}</td><td>{{ m.issued }}</td></tr>
+    {% else %}
+    <tr><td colspan="3">Данных пока нет.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<h2>Продажи по каналам</h2>
+<table class="table">
+  <thead><tr><th>Канал</th><th>Заказов</th><th>Выручка</th></tr></thead>
+  <tbody>
+    {% for c in by_channel %}
+    <tr><td><span class="pill pill-{{ c.channel }}">{{ 'Онлайн' if c.channel == 'online' else 'Офлайн' }}</span></td><td>{{ c.orders }}</td><td>{{ c.revenue }}</td></tr>
+    {% else %}
+    <tr><td colspan="3">Данных пока нет.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<h2>Дефицит на складе</h2>
+<table class="table">
+  <thead><tr><th>Товар</th><th>Остаток</th><th>Мин.</th></tr></thead>
+  <tbody>
+    {% for p in low_stock %}
+    <tr class="row-warn"><td>{{ p.name }}</td><td>{{ p.total_qty }}</td><td>{{ p.min_qty }}</td></tr>
+    {% else %}
+    <tr><td colspan="3">Дефицита нет.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}
