@@ -44,13 +44,3 @@ def create_staff(conn: sqlite3.Connection, login: str, password: str, name: str,
         (login, hash_password(password), name, role),
     )
     return cur.lastrowid
-
-
-def get_staff_by_telegram_id(conn: sqlite3.Connection, telegram_id: int) -> sqlite3.Row | None:
-    return conn.execute(
-        "SELECT * FROM staff WHERE telegram_id = ? AND active = 1", (telegram_id,)
-    ).fetchone()
-
-
-def link_staff_telegram(conn: sqlite3.Connection, staff_id: int, telegram_id: int) -> None:
-    conn.execute("UPDATE staff SET telegram_id = ? WHERE id = ?", (telegram_id, staff_id))

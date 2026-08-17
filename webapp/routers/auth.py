@@ -18,11 +18,14 @@ def login_form(request: Request):
 
 
 @router.post("/login")
-def login_submit(request: Request, login: str = Form(...), password: str = Form(...)):
+def login_submit(
+    request: Request, login: str = Form(...), password: str = Form(...), source: str = Form("web")
+):
+    template = "miniapp.html" if source == "miniapp" else "login.html"
     with get_conn() as conn:
         staff = core_auth.get_staff_by_login(conn, login.strip())
     if not staff or not core_auth.verify_password(password, staff["password_hash"]):
-        return render(request, "login.html", staff=None, error="Неверный логин или пароль")
+        return render(request, template, staff=None, error="Неверный логин или пароль")
     request.session["staff_id"] = staff["id"]
     return RedirectResponse("/", status_code=302)
 

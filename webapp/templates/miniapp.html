@@ -8,72 +8,21 @@
 <link rel="stylesheet" href="/static/style.css">
 <style>
   body { display: flex; align-items: center; justify-content: center; min-height: 100vh; }
-  .boot-box { max-width: 340px; width: 100%; padding: 20px; text-align: center; }
-  .boot-status { color: var(--muted); font-size: 14px; margin: 16px 0; }
-  #linkForm { display: none; flex-direction: column; gap: 10px; text-align: left; }
-  #linkForm label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
 </style>
 </head>
 <body>
-<div class="boot-box">
-  <h1>CRM Сервис-центр</h1>
-  <div class="boot-status" id="status">Подключаемся через Telegram…</div>
-  <form id="linkForm">
-    <div class="flash flash-error" id="linkError" style="display:none"></div>
-    <label>Логин<input type="text" name="login" required></label>
+<div class="login-box">
+  <h1>CRM Сервис-центра</h1>
+  {% if error %}<div class="flash flash-error">{{ error }}</div>{% endif %}
+  <form method="post" action="/login">
+    <input type="hidden" name="source" value="miniapp">
+    <label>Логин<input type="text" name="login" autofocus required></label>
     <label>Пароль<input type="password" name="password" required></label>
-    <button type="submit">Войти и привязать аккаунт</button>
+    <button type="submit">Войти</button>
   </form>
 </div>
 <script>
-const tg = window.Telegram ? window.Telegram.WebApp : null;
-if (tg) { tg.ready(); tg.expand(); }
-const initData = tg ? tg.initData : "";
-const statusEl = document.getElementById("status");
-const formEl = document.getElementById("linkForm");
-const errEl = document.getElementById("linkError");
-
-async function tryAuth() {
-  if (!initData) {
-    statusEl.textContent = "Открой это приложение через кнопку бота в Telegram.";
-    return;
-  }
-  const res = await fetch("/miniapp/auth", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ initData }),
-  });
-  const data = await res.json();
-  if (data.status === "ok") {
-    window.location.href = "/";
-  } else if (data.status === "link_required") {
-    statusEl.textContent = "Этот Telegram-аккаунт ещё не привязан. Войдите один раз логином и паролем:";
-    formEl.style.display = "flex";
-  } else {
-    statusEl.textContent = data.message || "Ошибка подключения.";
-  }
-}
-
-formEl.addEventListener("submit", async (e) => {
-  e.preventDefault();
-  errEl.style.display = "none";
-  const login = formEl.login.value;
-  const password = formEl.password.value;
-  const res = await fetch("/miniapp/link", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ initData, login, password }),
-  });
-  const data = await res.json();
-  if (data.status === "ok") {
-    window.location.href = "/";
-  } else {
-    errEl.textContent = data.message || "Не удалось войти.";
-    errEl.style.display = "block";
-  }
-});
-
-tryAuth();
+if (window.Telegram && window.Telegram.WebApp) { window.Telegram.WebApp.ready(); window.Telegram.WebApp.expand(); }
 </script>
 </body>
 </html>

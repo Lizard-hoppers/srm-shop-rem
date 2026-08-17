@@ -14,7 +14,13 @@ if not SECRET_KEY:
     raise RuntimeError("CRM_SECRET_KEY env var is required (session signing key)")
 
 app = FastAPI(title="Electronics CRM")
-app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY, session_cookie="crm_session")
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=SECRET_KEY,
+    session_cookie="crm_session",
+    same_site="lax",
+    https_only=True,
+)
 app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static")), name="static")
 
 app.include_router(auth.router)
