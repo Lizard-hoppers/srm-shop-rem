@@ -6,7 +6,7 @@
 
 <div class="panel-box">
   <h3>{{ client.name }}</h3>
-  <p class="meta">{{ client.phone or 'Без телефона' }} · {{ 'Онлайн' if client.source == 'online' else 'Офлайн' }} · в базе с {{ client.created_at }}</p>
+  <p class="meta">{% if client.phone %}<a href="tel:{{ client.phone }}">{{ client.phone }}</a>{% else %}Без телефона{% endif %} · {{ 'Онлайн' if client.source == 'online' else 'Офлайн' }} · в базе с {{ client.created_at }}</p>
   {% if client.notes %}<p class="meta">{{ client.notes }}</p>{% endif %}
 </div>
 

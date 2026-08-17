@@ -20,7 +20,7 @@
     {% for c in clients %}
     <tr onclick="location.href='{{ link('/clients/' ~ c.id) }}'" class="clickable">
       <td>{{ c.name }}</td>
-      <td>{{ c.phone or '—' }}</td>
+      <td>{% if c.phone %}<a href="tel:{{ c.phone }}" onclick="event.stopPropagation()">{{ c.phone }}</a>{% else %}—{% endif %}</td>
       <td>{{ 'Онлайн' if c.source == 'online' else 'Офлайн' }}</td>
       <td>{{ c.created_at }}</td>
     </tr>

@@ -9,7 +9,7 @@
   <div>
     <div class="panel-box">
       <h3>Клиент и устройство</h3>
-      <p><a href="{{ link('/clients/' ~ repair.client_id) }}">{{ repair.client_name }}</a> · {{ repair.client_phone or '—' }}</p>
+      <p><a href="{{ link('/clients/' ~ repair.client_id) }}">{{ repair.client_name }}</a> · {% if repair.client_phone %}<a href="tel:{{ repair.client_phone }}">{{ repair.client_phone }}</a>{% else %}—{% endif %}</p>
       <p>{{ repair.device_type }} {{ repair.brand or '' }} {{ repair.model or '' }}</p>
       <p class="meta">Серийный №: {{ repair.serial_number or '—' }}</p>
       <p class="meta">Неисправность: {{ repair.defect_description or '—' }}</p>
