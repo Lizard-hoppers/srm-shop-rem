@@ -23,7 +23,7 @@
 
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 
-html { background: var(--bg); }
+html { background: var(--bg); color-scheme: dark; }
 
 body {
   margin: 0;
@@ -163,9 +163,21 @@ input, select, textarea, button {
   padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm);
   background: var(--panel-alt); color: var(--text);
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
 }
 input::placeholder, textarea::placeholder { color: #4d5566; }
 input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
+
+select {
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238b93a1' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  background-size: 16px;
+  padding-right: 34px;
+}
+select::-ms-expand { display: none; }
 button {
   background: linear-gradient(135deg, var(--accent), #6b7fe8); color: var(--accent-text);
   border: none; cursor: pointer; padding: 11px 18px; font-weight: 700;
