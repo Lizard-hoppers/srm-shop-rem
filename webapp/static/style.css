@@ -178,6 +178,7 @@ select {
   padding-right: 34px;
 }
 select::-ms-expand { display: none; }
+option { background: var(--panel-alt); color: var(--text); }
 button {
   background: linear-gradient(135deg, var(--accent), #6b7fe8); color: var(--accent-text);
   border: none; cursor: pointer; padding: 11px 18px; font-weight: 700;
