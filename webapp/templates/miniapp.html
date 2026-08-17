@@ -41,6 +41,7 @@
   <div class="spinner" id="spinner"></div>
   {% endif %}
 </div>
+{% if not error %}
 <form id="autoForm" method="post" action="/miniapp/auto" style="display:none">
   <input type="hidden" name="initData" id="initDataField">
 </form>
@@ -59,5 +60,10 @@ if (!initData) {
   document.getElementById("autoForm").submit();
 }
 </script>
+{% else %}
+<script>
+if (window.Telegram && window.Telegram.WebApp) { window.Telegram.WebApp.ready(); window.Telegram.WebApp.expand(); }
+</script>
+{% endif %}
 </body>
 </html>
