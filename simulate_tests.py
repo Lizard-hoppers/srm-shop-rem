@@ -16,6 +16,8 @@ import json
 import time
 import urllib.parse
 
+import jinja2
+
 from core import auth, clients, inventory, purchases, repairs, sales
 from core.session_token import make_token, read_token
 from core.storage import get_conn, init_db
@@ -238,6 +240,25 @@ def scenario_session_token() -> None:
     check("tampered token rejected", read_token(tampered) is None)
 
 
+def scenario_miniapp_boot_template() -> None:
+    """Regression guard: an unrecognized/failed Telegram login used to
+    re-render the same boot page whose script always auto-submits, so a
+    stranger's browser hammered /miniapp/auto in an infinite loop (found in
+    production 17.08.2026). The auto-submit form must only appear on a
+    clean load, never alongside an error."""
+    print("scenario: miniapp boot page never auto-resubmits on error")
+    templates_dir = os.path.join(os.path.dirname(__file__), "webapp", "templates")
+    env = jinja2.Environment(loader=jinja2.FileSystemLoader(templates_dir))
+    template = env.get_template("miniapp.html")
+
+    clean = template.render(error=None)
+    check("clean load includes the auto-submit form", "autoForm" in clean)
+
+    with_error = template.render(error="Этот Telegram-аккаунт не привязан к CRM.")
+    check("error response has no auto-submit form (no resubmit loop)", "autoForm" not in with_error)
+    check("error response shows the error message", "не привязан" in with_error)
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         db_path = os.path.join(tmp, "test.sqlite3")
@@ -251,6 +272,7 @@ def main() -> None:
 
     scenario_telegram_auth()
     scenario_session_token()
+    scenario_miniapp_boot_template()
 
     print(f"\nPASS={PASS} FAIL={FAIL}")
     sys.exit(1 if FAIL else 0)
