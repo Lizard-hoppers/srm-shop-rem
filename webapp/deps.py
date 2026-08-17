@@ -41,3 +41,12 @@ def link(request: Request, path: str) -> str:
         return path
     sep = "&" if "?" in path else "?"
     return f"{path}{sep}t={token}"
+
+
+def optional_int(value: str) -> int | None:
+    """Parse an optional numeric form field. FastAPI/Pydantic reject an empty
+    string for `int | None`, but an empty <select>/<input> submits exactly
+    that (e.g. the "not assigned" option) — so routes take these as plain
+    `str = Form("")` and convert with this instead of a typed Form(...)."""
+    value = value.strip()
+    return int(value) if value else None

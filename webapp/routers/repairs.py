@@ -9,7 +9,7 @@ from core import inventory as core_inventory
 from core import repairs as core_repairs
 from core.inventory import InsufficientStockError
 from core.storage import get_conn
-from webapp.deps import link, require_staff
+from webapp.deps import link, optional_int, require_staff
 from webapp.templating import render
 
 router = APIRouter(prefix="/repairs")
@@ -37,8 +37,8 @@ def create_view(
     serial_number: str = Form(""),
     defect_description: str = Form(""),
     channel: str = Form("offline"),
-    master_id: int | None = Form(None),
-    price_estimate: int | None = Form(None),
+    master_id: str = Form(""),
+    price_estimate: str = Form(""),
     staff=Depends(require_staff),
 ):
     with get_conn() as conn:
@@ -46,7 +46,7 @@ def create_view(
         order_id = core_repairs.create_repair(
             conn, client_id, device_type.strip(), brand.strip() or None, model.strip() or None,
             serial_number.strip() or None, defect_description.strip() or None, channel,
-            master_id or None, price_estimate, staff["id"],
+            optional_int(master_id), optional_int(price_estimate), staff["id"],
         )
     return RedirectResponse(link(request, f"/repairs/{order_id}"), status_code=303)
 
@@ -83,20 +83,20 @@ def status_view(
 
 
 @router.post("/{order_id}/assign")
-def assign_view(request: Request, order_id: int, master_id: int | None = Form(None), staff=Depends(require_staff)):
+def assign_view(request: Request, order_id: int, master_id: str = Form(""), staff=Depends(require_staff)):
     with get_conn() as conn:
-        core_repairs.assign_master(conn, order_id, master_id or None)
+        core_repairs.assign_master(conn, order_id, optional_int(master_id))
     return RedirectResponse(link(request, f"/repairs/{order_id}"), status_code=303)
 
 
 @router.post("/{order_id}/price")
 def price_view(
     request: Request, order_id: int,
-    price_estimate: int | None = Form(None), price_final: int | None = Form(None),
+    price_estimate: str = Form(""), price_final: str = Form(""),
     warranty_until: str = Form(""), staff=Depends(require_staff),
 ):
     with get_conn() as conn:
-        core_repairs.set_price(conn, order_id, price_estimate, price_final)
+        core_repairs.set_price(conn, order_id, optional_int(price_estimate), optional_int(price_final))
         core_repairs.set_warranty(conn, order_id, warranty_until.strip() or None)
     return RedirectResponse(link(request, f"/repairs/{order_id}"), status_code=303)
 

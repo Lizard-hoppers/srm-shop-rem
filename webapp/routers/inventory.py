@@ -6,7 +6,7 @@ from fastapi.responses import RedirectResponse
 from core import inventory as core_inventory
 from core.inventory import InsufficientStockError
 from core.storage import get_conn
-from webapp.deps import link, require_staff
+from webapp.deps import link, optional_int, require_staff
 from webapp.templating import render
 
 router = APIRouter(prefix="/inventory")
@@ -29,7 +29,7 @@ def products_create(
     category: str = Form(""),
     unit: str = Form("шт"),
     min_qty: int = Form(0),
-    price: int | None = Form(None),
+    price: str = Form(""),
     is_repair_part: bool = Form(False),
     is_sellable: bool = Form(False),
     staff=Depends(require_staff),
@@ -44,7 +44,7 @@ def products_create(
             is_repair_part=is_repair_part,
             is_sellable=is_sellable,
             min_qty=min_qty,
-            price=price,
+            price=optional_int(price),
         )
     return RedirectResponse(link(request, "/inventory/products"), status_code=303)
 
