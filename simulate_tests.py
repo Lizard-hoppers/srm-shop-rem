@@ -23,7 +23,7 @@ import urllib.parse
 
 import jinja2
 
-from core import auth, clients, inventory, purchases, qr, repairs, sales
+from core import auth, clients, device_catalog, inventory, purchases, qr, repairs, sales
 from core.session_token import make_token, read_token
 from core.storage import get_conn, init_db
 from core.telegram_auth import validate_init_data
@@ -222,6 +222,33 @@ def scenario_client_qr(db_path: str) -> None:
         check("unknown telegram_id finds no client", clients.get_by_telegram_id(conn, 999) is None)
 
 
+def scenario_device_catalog(db_path: str) -> None:
+    print("scenario: device catalog autocomplete (seeded + learns new entries)")
+    with get_conn(db_path) as conn:
+        types = device_catalog.list_device_types(conn)
+        check("seed device types present", "Смартфон" in types and "Ноутбук" in types)
+        brands = device_catalog.list_brands(conn)
+        check("seed brands present", "Apple" in brands and "Samsung" in brands)
+        all_rows = device_catalog.list_all(conn)
+        check("seed has a substantial number of entries", len(all_rows) > 50)
+        check("known combo present in seed", any(r["brand"] == "Apple" and r["model"] == "iPhone 13" for r in all_rows))
+
+        before = len(device_catalog.list_all(conn))
+        device_catalog.remember(conn, "Смартфон", "Nokia", "3310 Rebuild Edition")
+        after = device_catalog.list_all(conn)
+        check("remembering a new combo grows the catalog", len(after) == before + 1)
+        check("the new combo is actually queryable", any(r["model"] == "3310 Rebuild Edition" for r in after))
+
+        before2 = len(device_catalog.list_all(conn))
+        device_catalog.remember(conn, "Смартфон", "Nokia", "3310 Rebuild Edition")
+        check("remembering the same combo twice does not duplicate it", len(device_catalog.list_all(conn)) == before2)
+
+        device_catalog.remember(conn, "", "Brand", "Model")
+        device_catalog.remember(conn, "Тип", "", "Model")
+        device_catalog.remember(conn, "Тип", "Brand", "")
+        check("incomplete combos (blank type/brand/model) are silently ignored", len(device_catalog.list_all(conn)) == before2)
+
+
 def scenario_purchases(db_path: str) -> None:
     print("scenario: goods receipt (приход)")
     with get_conn(db_path) as conn:
@@ -395,6 +422,22 @@ def scenario_webapp_forms(db_path: str) -> None:
         resp = client.get(f"/clients/find?t={token}&code=garbage-not-a-code")
         check("scanning an unknown code: no raw error, friendly message", resp.status_code != 422 and "не распознан" in resp.text)
 
+        # Device catalog autocomplete: seeded suggestions render, and a
+        # brand-new device typed on intake gets remembered for next time.
+        resp = client.get(f"/repairs?t={token}")
+        check("repairs page renders the device type datalist", 'id="deviceTypeList"' in resp.text)
+        check("repairs page embeds a known seeded brand", '"Apple"' in resp.text)
+
+        client.post(f"/repairs?t={token}", data={
+            "client_name": "Каталог Тест", "client_phone": "+380990002233",
+            "device_type": "Экзотика", "brand": "НовыйБренд", "model": "СуперМодель X",
+            "channel": "offline",
+        })
+        with get_conn(db_path) as conn:
+            learned = device_catalog.list_all(conn)
+        check("a brand-new device typed on intake is remembered in the catalog",
+              any(r["brand"] == "НовыйБренд" and r["model"] == "СуперМодель X" for r in learned))
+
 
 def main() -> None:
     with tempfile.TemporaryDirectory() as tmp:
@@ -406,6 +449,7 @@ def main() -> None:
         scenario_repairs_pipeline(db_path)
         scenario_client_history(db_path)
         scenario_client_qr(db_path)
+        scenario_device_catalog(db_path)
         scenario_purchases(db_path)
         scenario_sales(db_path)
 

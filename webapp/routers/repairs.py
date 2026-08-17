@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
+
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import RedirectResponse
 
 from core import auth as core_auth
 from core import clients as core_clients
+from core import device_catalog
 from core import inventory as core_inventory
 from core import repairs as core_repairs
 from core.inventory import InsufficientStockError
@@ -28,6 +31,9 @@ def _list_context(conn, status: str | None) -> dict:
         "status": status,
         "masters": core_auth.list_staff(conn),
         "statuses": core_repairs.STATUSES,
+        "device_types": device_catalog.list_device_types(conn),
+        "device_brands": device_catalog.list_brands(conn),
+        "device_catalog_json": json.dumps([dict(r) for r in device_catalog.list_all(conn)]),
     }
 
 
@@ -63,6 +69,7 @@ def create_view(
             serial_number.strip() or None, defect_description.strip() or None, channel,
             optional_int(master_id), optional_int(price_estimate), staff["id"],
         )
+        device_catalog.remember(conn, device_type, brand, model)
     return RedirectResponse(link(request, f"/repairs/{order_id}"), status_code=303)
 
 

@@ -30,9 +30,18 @@
 <form method="post" action="{{ link('/repairs') }}" class="edit-form">
   <label>Имя клиента<input type="text" name="client_name" required></label>
   <label>Телефон клиента<input type="text" name="client_phone" required></label>
-  <label>Тип устройства<input type="text" name="device_type" placeholder="Смартфон, ноутбук…" required></label>
-  <label>Бренд<input type="text" name="brand"></label>
-  <label>Модель<input type="text" name="model"></label>
+  <label>Тип устройства
+    <input type="text" name="device_type" id="deviceType" list="deviceTypeList" placeholder="Смартфон, ноутбук…" required>
+    <datalist id="deviceTypeList">{% for t in device_types %}<option value="{{ t }}">{% endfor %}</datalist>
+  </label>
+  <label>Бренд
+    <input type="text" name="brand" id="deviceBrand" list="deviceBrandList" placeholder="Apple, Samsung…">
+    <datalist id="deviceBrandList">{% for b in device_brands %}<option value="{{ b }}">{% endfor %}</datalist>
+  </label>
+  <label>Модель
+    <input type="text" name="model" id="deviceModel" list="deviceModelList" placeholder="Начните вводить бренд — появятся модели">
+    <datalist id="deviceModelList"></datalist>
+  </label>
   <label>Серийный №/IMEI<input type="text" name="serial_number"></label>
   <label>Описание неисправности<textarea name="defect_description"></textarea></label>
   <label>Канал
@@ -50,4 +59,29 @@
   <label>Оценка стоимости<input type="number" name="price_estimate"></label>
   <button type="submit">Принять</button>
 </form>
+
+<script>
+(function () {
+  var catalog = {{ device_catalog_json | safe }};
+  var brandInput = document.getElementById("deviceBrand");
+  var modelList = document.getElementById("deviceModelList");
+
+  function refreshModels() {
+    var brand = brandInput.value.trim().toLowerCase();
+    var seen = {};
+    modelList.innerHTML = "";
+    catalog.forEach(function (row) {
+      if (brand && row.brand.toLowerCase() !== brand) return;
+      if (seen[row.model]) return;
+      seen[row.model] = true;
+      var opt = document.createElement("option");
+      opt.value = row.model;
+      modelList.appendChild(opt);
+    });
+  }
+
+  brandInput.addEventListener("input", refreshModels);
+  refreshModels();
+})();
+</script>
 {% endblock %}

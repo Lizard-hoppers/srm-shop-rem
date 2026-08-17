@@ -12,6 +12,8 @@ import os
 import sqlite3
 from contextlib import contextmanager
 
+from core import device_catalog
+
 DB_PATH = os.environ.get("CRM_DB_PATH", os.path.join(os.path.dirname(__file__), "..", "crm.sqlite3"))
 
 SCHEMA = """
@@ -155,6 +157,14 @@ CREATE TABLE IF NOT EXISTS sales_order_items (
     qty INTEGER NOT NULL,
     price INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS device_catalog (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_type TEXT NOT NULL,
+    brand TEXT NOT NULL,
+    model TEXT NOT NULL,
+    UNIQUE(device_type, brand, model)
+);
 """
 
 
@@ -171,6 +181,7 @@ def init_db(db_path: str = DB_PATH) -> None:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript(SCHEMA)
         _ensure_column(conn, "goods_receipt_items", "cell_id", "cell_id INTEGER REFERENCES storage_cells(id)")
+        device_catalog.seed(conn)
         conn.commit()
     finally:
         conn.close()
