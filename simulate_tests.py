@@ -120,6 +120,19 @@ def scenario_inventory(db_path: str) -> None:
             raised = True
         check("overdraw raises InsufficientStockError", raised)
 
+        inventory.update_product(
+            conn, product_id, "Дисплей Samsung A54 OLED", "SKU-A54-DSP", "Дисплеи", "шт", True, False, 3, 1500,
+        )
+        updated = inventory.get_product(conn, product_id)
+        check("update_product changes the stored fields",
+              updated["name"] == "Дисплей Samsung A54 OLED" and updated["min_qty"] == 3 and updated["price"] == 1500)
+
+        check("a fresh product has no photo", inventory.get_product(conn, product_id)["photo_path"] is None)
+        inventory.set_product_photo(conn, product_id, "42_abc123.jpg")
+        check("set_product_photo stores the filename", inventory.get_product(conn, product_id)["photo_path"] == "42_abc123.jpg")
+        inventory.set_product_photo(conn, product_id, None)
+        check("set_product_photo(None) clears it", inventory.get_product(conn, product_id)["photo_path"] is None)
+
         movements = inventory.list_movements(conn)
         check("movements logged", len(movements) == 3)
 
@@ -713,6 +726,38 @@ def scenario_webapp_forms(db_path: str) -> None:
         scan_resp = client.post(f"/purchases/scan?t={token}", files={"photo": ("invoice.jpg", b"fake-bytes", "image/jpeg")})
         check("POST /purchases/scan without an API key returns a structured error, not a 500",
               scan_resp.status_code == 502 and "rows" in scan_resp.json() and "error" in scan_resp.json())
+
+        # Product card (Склад → Товары → клик на товар): view, edit, photo.
+        detail_resp = client.get(f"/inventory/products/{wproduct_id}?t={token}")
+        check("product detail page renders", detail_resp.status_code == 200 and "Гарантийный товар" in detail_resp.text)
+
+        client.post(f"/inventory/products/{wproduct_id}/edit?t={token}", data={
+            "name": "Гарантийный товар PRO", "sku": "WARR-1", "unit": "шт", "min_qty": "0",
+        })
+        with get_conn(db_path) as conn:
+            renamed = conn.execute("SELECT name FROM products WHERE id = ?", (wproduct_id,)).fetchone()
+        check("editing a product from its card updates the name", renamed["name"] == "Гарантийный товар PRO")
+
+        bad_photo_resp = client.post(
+            f"/inventory/products/{wproduct_id}/photo?t={token}",
+            files={"photo": ("note.txt", b"not an image", "text/plain")},
+        )
+        check("uploading a non-image is rejected with a friendly error, not a 500",
+              bad_photo_resp.status_code == 200 and "JPEG" in bad_photo_resp.text)
+
+        good_photo_resp = client.post(
+            f"/inventory/products/{wproduct_id}/photo?t={token}",
+            files={"photo": ("device.jpg", b"\xff\xd8\xff-fake-jpeg-bytes", "image/jpeg")},
+        )
+        with get_conn(db_path) as conn:
+            photo_path = conn.execute("SELECT photo_path FROM products WHERE id = ?", (wproduct_id,)).fetchone()["photo_path"]
+        check("uploading a valid image stores a photo_path", bool(photo_path) and photo_path.endswith(".jpg"))
+        check("product card now renders the uploaded photo", photo_path is not None and photo_path in good_photo_resp.text)
+
+        saved_photo_file = os.path.join("webapp", "static", "product_photos", photo_path or "")
+        check("the uploaded photo file was actually written to disk", photo_path is not None and os.path.exists(saved_photo_file))
+        if photo_path and os.path.exists(saved_photo_file):
+            os.remove(saved_photo_file)  # test hygiene — don't leave uploaded test images on disk
 
 
 def main() -> None:

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Form, Request
+import os
+import uuid
+
+from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from fastapi.responses import RedirectResponse
 
 from core import inventory as core_inventory
@@ -12,6 +15,9 @@ from webapp.templating import render
 router = APIRouter(prefix="/inventory")
 
 _STOCK_WRITE_ROLES = ("owner", "admin", "storekeeper")
+
+_PHOTO_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", "product_photos")
+_PHOTO_EXT_BY_CONTENT_TYPE = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
 
 
 @router.get("/products")
@@ -54,6 +60,77 @@ def products_create(
             price=optional_int(price),
         )
     return RedirectResponse(link(request, "/inventory/products"), status_code=303)
+
+
+@router.get("/products/{product_id}")
+def product_detail_view(request: Request, product_id: int, staff=Depends(require_staff)):
+    with get_conn() as conn:
+        product = core_inventory.get_product(conn, product_id)
+        if not product:
+            return RedirectResponse(link(request, "/inventory/products"), status_code=303)
+        stock_by_cell = core_inventory.product_stock_by_cell(conn, product_id)
+    return render(request, "inventory_product_detail.html", staff=staff, product=product, stock_by_cell=stock_by_cell)
+
+
+@router.post("/products/{product_id}/edit")
+def product_edit_view(
+    request: Request,
+    product_id: int,
+    name: str = Form(""),
+    sku: str = Form(""),
+    category: str = Form(""),
+    unit: str = Form("шт"),
+    min_qty: str = Form("0"),
+    price: str = Form(""),
+    is_repair_part: bool = Form(False),
+    is_sellable: bool = Form(False),
+    staff=Depends(require_role(*_STOCK_WRITE_ROLES)),
+):
+    with get_conn() as conn:
+        if not name.strip():
+            product = core_inventory.get_product(conn, product_id)
+            stock_by_cell = core_inventory.product_stock_by_cell(conn, product_id)
+            return render(
+                request, "inventory_product_detail.html", staff=staff, product=product,
+                stock_by_cell=stock_by_cell, error="Введите название товара.",
+            )
+        core_inventory.update_product(
+            conn, product_id,
+            name=name.strip(), sku=sku.strip() or None, category=category.strip() or None,
+            unit=unit.strip() or "шт", is_repair_part=is_repair_part, is_sellable=is_sellable,
+            min_qty=optional_int(min_qty) or 0, price=optional_int(price),
+        )
+    return RedirectResponse(link(request, f"/inventory/products/{product_id}"), status_code=303)
+
+
+@router.post("/products/{product_id}/photo")
+async def product_photo_view(
+    request: Request, product_id: int, photo: UploadFile = File(...),
+    staff=Depends(require_role(*_STOCK_WRITE_ROLES)),
+):
+    ext = _PHOTO_EXT_BY_CONTENT_TYPE.get(photo.content_type)
+    if not ext:
+        with get_conn() as conn:
+            product = core_inventory.get_product(conn, product_id)
+            stock_by_cell = core_inventory.product_stock_by_cell(conn, product_id)
+        return render(
+            request, "inventory_product_detail.html", staff=staff, product=product,
+            stock_by_cell=stock_by_cell, error="Фото должно быть JPEG, PNG или WebP.",
+        )
+
+    os.makedirs(_PHOTO_DIR, exist_ok=True)
+    filename = f"{product_id}_{uuid.uuid4().hex}{ext}"
+    with open(os.path.join(_PHOTO_DIR, filename), "wb") as f:
+        f.write(await photo.read())
+
+    with get_conn() as conn:
+        old = core_inventory.get_product(conn, product_id)
+        core_inventory.set_product_photo(conn, product_id, filename)
+    if old and old["photo_path"]:
+        old_path = os.path.join(_PHOTO_DIR, old["photo_path"])
+        if os.path.exists(old_path):
+            os.remove(old_path)
+    return RedirectResponse(link(request, f"/inventory/products/{product_id}"), status_code=303)
 
 
 @router.get("/cells")

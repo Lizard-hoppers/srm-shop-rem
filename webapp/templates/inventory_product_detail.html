@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% import "_icons.html" as icons %}
+{% block title %}{{ product.name }}{% endblock %}
+{% block content %}
+<a class="back-link" href="{{ link('/inventory/products') }}">{{ icons.icon('back', 16) }} Товары</a>
+
+<div class="panel-box" style="text-align: center;">
+  {% if product.photo_path %}
+  <img src="/static/product_photos/{{ product.photo_path }}" alt="{{ product.name }}"
+       style="max-width: 240px; max-height: 240px; border-radius: 10px; object-fit: cover;">
+  {% else %}
+  <p class="meta">Фото ещё не добавлено.</p>
+  {% endif %}
+  <form method="post" action="{{ link('/inventory/products/' ~ product.id ~ '/photo') }}"
+        enctype="multipart/form-data" class="edit-form" style="margin-top: 10px;">
+    <label>{{ 'Заменить фото' if product.photo_path else 'Добавить фото' }}
+      <input type="file" name="photo" accept="image/jpeg,image/png,image/webp" capture="environment" required>
+    </label>
+    <button type="submit">Загрузить</button>
+  </form>
+</div>
+
+<h2>Остаток по ячейкам</h2>
+<table class="table">
+  <thead><tr><th>Ячейка</th><th>Кол-во</th></tr></thead>
+  <tbody>
+    {% for s in stock_by_cell %}
+    <tr><td>{{ s.code }}</td><td>{{ s.qty }} {{ product.unit }}</td></tr>
+    {% else %}
+    <tr><td colspan="2">На складе нет.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<h2>Данные товара</h2>
+<form method="post" action="{{ link('/inventory/products/' ~ product.id ~ '/edit') }}" class="edit-form">
+  <label>Название<input type="text" name="name" value="{{ product.name }}" required></label>
+  <label>SKU<input type="text" name="sku" value="{{ product.sku or '' }}"></label>
+  <label>Категория<input type="text" name="category" value="{{ product.category or '' }}"></label>
+  <label>Единица<input type="text" name="unit" value="{{ product.unit }}"></label>
+  <label>Мин. остаток (сигнал дефицита)<input type="number" name="min_qty" value="{{ product.min_qty }}"></label>
+  <label>Цена продажи<input type="number" name="price" value="{{ product.price or '' }}"></label>
+  <label><input type="checkbox" name="is_repair_part" {% if product.is_repair_part %}checked{% endif %}> Деталь для ремонта</label>
+  <label><input type="checkbox" name="is_sellable" {% if product.is_sellable %}checked{% endif %}> Товар на продажу</label>
+  <button type="submit">Сохранить</button>
+</form>
+{% endblock %}

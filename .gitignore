@@ -7,3 +7,4 @@ venv/
 *.sqlite3-shm
 *.env
 .env
+webapp/static/product_photos/

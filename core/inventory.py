@@ -47,6 +47,30 @@ def create_product(
     return cur.lastrowid
 
 
+def update_product(
+    conn: sqlite3.Connection,
+    product_id: int,
+    name: str,
+    sku: str | None,
+    category: str | None,
+    unit: str,
+    is_repair_part: bool,
+    is_sellable: bool,
+    min_qty: int,
+    price: int | None,
+) -> None:
+    conn.execute(
+        """UPDATE products SET name = ?, sku = ?, category = ?, unit = ?, is_repair_part = ?,
+                                is_sellable = ?, min_qty = ?, price = ?
+           WHERE id = ?""",
+        (name, sku or None, category, unit, int(is_repair_part), int(is_sellable), min_qty, price, product_id),
+    )
+
+
+def set_product_photo(conn: sqlite3.Connection, product_id: int, photo_filename: str | None) -> None:
+    conn.execute("UPDATE products SET photo_path = ? WHERE id = ?", (photo_filename, product_id))
+
+
 def product_stock_by_cell(conn: sqlite3.Connection, product_id: int) -> list[sqlite3.Row]:
     return conn.execute(
         """SELECT stock.cell_id, storage_cells.code, stock.qty

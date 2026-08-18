@@ -14,7 +14,8 @@
   <thead><tr><th>Название</th><th>SKU</th><th>Категория</th><th>Остаток</th><th>Мин.</th><th>Назначение</th></tr></thead>
   <tbody>
     {% for p in products %}
-    <tr class="{% if p.total_qty <= p.min_qty %}row-warn{% endif %}">
+    <tr onclick="location.href='{{ link('/inventory/products/' ~ p.id) }}'"
+        class="clickable {% if p.total_qty <= p.min_qty %}row-warn{% endif %}">
       <td>{{ p.name }}</td>
       <td>{{ p.sku or '—' }}</td>
       <td>{{ p.category or '—' }}</td>
