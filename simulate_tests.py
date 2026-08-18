@@ -299,10 +299,17 @@ def scenario_sales(db_path: str) -> None:
         check("warranty_until defaults to null when not given", sale2["warranty_until"] is None)
 
 
+class _FakeTelegramResponse:
+    status_code = 200
+    text = "ok"
+
+    def json(self):
+        return {"result": {"message_id": 555}}
+
+
 def scenario_repair_card_notify(db_path: str) -> None:
     print("scenario: repair staff-group card + notify")
     from core import notify
-    from webapp.routers.repairs import _repair_card_text
 
     with get_conn(db_path) as conn:
         client_id = clients.get_or_create_by_phone(conn, "Карточка <script>", "+380990004455", source="offline")
@@ -312,12 +319,22 @@ def scenario_repair_card_notify(db_path: str) -> None:
         )
         repair = repairs.get_repair(conn, order_id)
 
-    text = _repair_card_text(repair)
+    text = repairs.render_card_text(repair)
     check("repair card escapes HTML in client name", "&lt;script&gt;" in text and "<script>" not in text)
     check("repair card escapes HTML in defect description", "&lt;включается&gt;" in text)
     check("repair card shows the device line", "Смартфон Apple iPhone 12" in text)
     check("repair card shows 'не назначен' when no master is assigned", "не назначен" in text)
     check("repair card shows the order id", f"№{order_id}" in text)
+    check("repair card header uses the status label", "Новый" in text)
+
+    kb_new = repairs.render_keyboard(order_id, "new")
+    check("keyboard for 'new' offers to take the job",
+          kb_new["inline_keyboard"][0][0]["callback_data"] == f"repair_take:{order_id}")
+    kb_in_progress = repairs.render_keyboard(order_id, "in_progress")
+    check("keyboard for 'in_progress' offers done + release",
+          {b["callback_data"] for b in kb_in_progress["inline_keyboard"][0]}
+          == {f"repair_done:{order_id}", f"repair_release:{order_id}"})
+    check("keyboard for 'ready' has nothing left to press", repairs.render_keyboard(order_id, "ready") is None)
 
     # No CRM_STAFF_GROUP_CHAT_ID in the test env — must no-op, never raise.
     raised = False
@@ -329,34 +346,88 @@ def scenario_repair_card_notify(db_path: str) -> None:
 
     # With both destinations configured, a new repair must fan out to both:
     # the "Ремонт техники" topic in the main group, and the separate
-    # masters group — two independent sendMessage calls.
+    # masters group — two independent sendMessage calls, both carrying the
+    # initial keyboard.
     calls = []
 
-    class _FakeResponse:
-        status_code = 200
-        text = "ok"
-
     def _fake_post(url, json, timeout):
-        calls.append(json)
-        return _FakeResponse()
+        calls.append({"url": url, **json})
+        return _FakeTelegramResponse()
 
     orig_post = httpx.post
-    orig = (notify._BOT_TOKEN, notify._STAFF_GROUP_CHAT_ID, notify._REPAIR_TOPIC_ID, notify._MASTERS_GROUP_CHAT_ID)
+    orig_env = (notify._BOT_TOKEN, notify._STAFF_GROUP_CHAT_ID, notify._REPAIR_TOPIC_ID, notify._MASTERS_GROUP_CHAT_ID)
     notify._BOT_TOKEN = "test-token"
     notify._STAFF_GROUP_CHAT_ID, notify._REPAIR_TOPIC_ID, notify._MASTERS_GROUP_CHAT_ID = "-100main", "5", "-100masters"
-    httpx.post = _fake_post
+    edit_calls = []
+
+    def _fake_post_edit(url, json, timeout):
+        edit_calls.append({"url": url, **json})
+        return _FakeTelegramResponse()
+
     try:
-        notify.notify_repair_card("карточка")
+        httpx.post = _fake_post
+        sent = notify.notify_repair_card("карточка", reply_markup=kb_new)
+
+        # A status change — whether from a button or the web app — must
+        # edit every stored message for the order, not post a new one.
+        # Keep _BOT_TOKEN/chat-id overrides active through this part too,
+        # since edit_message()/sync_repair_cards() short-circuit without them.
+        httpx.post = _fake_post_edit
+        ok = notify.edit_message(sent[0][0], sent[0][1], "обновлённый текст", reply_markup=kb_in_progress)
+        notify.sync_repair_cards([(c, m) for c, m, _k in sent], "синхронизировано")
     finally:
         httpx.post = orig_post
-        notify._BOT_TOKEN, notify._STAFF_GROUP_CHAT_ID, notify._REPAIR_TOPIC_ID, notify._MASTERS_GROUP_CHAT_ID = orig
+        notify._BOT_TOKEN, notify._STAFF_GROUP_CHAT_ID, notify._REPAIR_TOPIC_ID, notify._MASTERS_GROUP_CHAT_ID = orig_env
 
     check(
-        "notify_repair_card posts to both the repair topic and the masters group",
-        len(calls) == 2
-        and {c["chat_id"] for c in calls} == {"-100main", "-100masters"}
-        and next(c for c in calls if c["chat_id"] == "-100main")["message_thread_id"] == "5",
+        "notify_repair_card fans out to both the repair topic and the masters group",
+        len(sent) == 2 and {c for c, m, k in sent} == {"-100main", "-100masters"}
+        and all(c["reply_markup"] == kb_new for c in calls),
     )
+    check("the topic destination carries message_thread_id", calls[0]["message_thread_id"] == "5")
+    check("edit_message reports success against the (faked) Telegram API", ok)
+    check("sync_repair_cards edits every stored message for the order",
+          sum(1 for c in edit_calls if c["url"].endswith("editMessageText")) == 1 + len(sent))
+    check("sync_repair_cards clears the keyboard when reply_markup is omitted",
+          any(c.get("reply_markup") == {"inline_keyboard": []} for c in edit_calls))
+
+
+def scenario_repair_actions(db_path: str) -> None:
+    print("scenario: claim / complete / release a repair (button actions)")
+    with get_conn(db_path) as conn:
+        master_a = auth.create_staff(conn, "master_a", "pass", "Мастер A", "master")
+        master_b = auth.create_staff(conn, "master_b", "pass", "Мастер B", "master")
+        client_id = clients.get_or_create_by_phone(conn, "Кнопки Тест", "+380990005566", source="offline")
+
+        order_id = repairs.create_repair(
+            conn, client_id, "Ноутбук", "Dell", "XPS", None, "не включается", "offline", None, None, 1,
+        )
+
+        check("claim by master A succeeds", repairs.claim_repair(conn, order_id, master_a))
+        check("second claim by master B fails — already taken", not repairs.claim_repair(conn, order_id, master_b))
+        repair = repairs.get_repair(conn, order_id)
+        check("repair is now in_progress with master A assigned",
+              repair["status"] == "in_progress" and repair["master_id"] == master_a)
+
+        check("complete by the wrong master fails without override", not repairs.complete_repair(conn, order_id, master_b))
+        check("complete by the assigned master succeeds", repairs.complete_repair(conn, order_id, master_a))
+        repair = repairs.get_repair(conn, order_id)
+        check("repair is now ready", repair["status"] == "ready")
+
+        check("release after already-ready fails — not in_progress anymore", not repairs.release_claim(conn, order_id, master_a))
+
+        order_id_2 = repairs.create_repair(
+            conn, client_id, "Планшет", "Samsung", "Tab", None, "треснул экран", "offline", None, None, 1,
+        )
+        check("claim order 2", repairs.claim_repair(conn, order_id_2, master_a))
+        check("release by the claiming master returns it to the queue", repairs.release_claim(conn, order_id_2, master_a))
+        repair2 = repairs.get_repair(conn, order_id_2)
+        check("order 2 is back to 'new' with no master assigned",
+              repair2["status"] == "new" and repair2["master_id"] is None)
+
+        check("anyone can claim it again after release", repairs.claim_repair(conn, order_id_2, master_b))
+        check("owner can complete order 2 on master B's behalf via override",
+              repairs.complete_repair(conn, order_id_2, 1, override=True))
 
 
 def _build_init_data(bot_token: str, user: dict, auth_date: int) -> str:
@@ -551,6 +622,7 @@ def main() -> None:
         scenario_purchases(db_path)
         scenario_sales(db_path)
         scenario_repair_card_notify(db_path)
+        scenario_repair_actions(db_path)
 
     scenario_timefmt()
     scenario_telegram_auth()

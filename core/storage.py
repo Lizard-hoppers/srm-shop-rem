@@ -77,6 +77,19 @@ CREATE TABLE IF NOT EXISTS repair_status_history (
     changed_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Telegram messages posted for a repair order (staff-group card, forum
+-- topic card, ...), so a later status change can edit them in place
+-- instead of spamming a new message per update.
+CREATE TABLE IF NOT EXISTS repair_order_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id INTEGER NOT NULL REFERENCES repair_orders(id),
+    chat_id TEXT NOT NULL,
+    message_id INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_repair_order_messages_order ON repair_order_messages(order_id);
+
 CREATE TABLE IF NOT EXISTS products (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     sku TEXT UNIQUE,

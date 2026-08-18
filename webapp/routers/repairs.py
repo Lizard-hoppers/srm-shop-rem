@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import html
-
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import RedirectResponse
 
@@ -75,34 +73,12 @@ def create_view(
         device_catalog.remember(conn, device_type, brand, model)
         repair = core_repairs.get_repair(conn, order_id)
 
-    core_notify.notify_repair_card(_repair_card_text(repair))
+    keyboard = core_repairs.render_keyboard(order_id, repair["status"])
+    sent = core_notify.notify_repair_card(core_repairs.render_card_text(repair), reply_markup=keyboard)
+    if sent:
+        with get_conn() as conn:
+            core_repairs.save_order_messages(conn, order_id, sent)
     return RedirectResponse(link(request, f"/repairs/{order_id}"), status_code=303)
-
-
-def _repair_card_text(repair) -> str:
-    """HTML-formatted card for the staff group chat. User-supplied fields
-    are escaped — this goes out with parse_mode=HTML, and a device model or
-    defect description is free text a client or master can type anything
-    into (see the repairs_list.html device-catalog XSS fix — same class of
-    input, different sink)."""
-    device = " ".join(filter(None, [repair["device_type"], repair["brand"], repair["model"]]))
-    channel_label = "Онлайн" if repair["channel"] == "online" else "Офлайн"
-    master_label = html.escape(repair["master_name"]) if repair["master_name"] else "не назначен"
-    price_label = f"{repair['price_estimate']} грн" if repair["price_estimate"] else "не указана"
-
-    lines = [
-        f"🔧 <b>Новый ремонт №{repair['id']}</b>",
-        "",
-        f"Клиент: {html.escape(repair['client_name'])}",
-        f"Телефон: {html.escape(repair['client_phone'] or '—')}",
-        f"Устройство: {html.escape(device)}",
-    ]
-    if repair["defect_description"]:
-        lines.append(f"Неисправность: {html.escape(repair['defect_description'])}")
-    lines.append(f"Мастер: {master_label}")
-    lines.append(f"Оценка: {price_label}")
-    lines.append(f"Канал: {channel_label}")
-    return "\n".join(lines)
 
 
 def _detail_context(conn, order_id: int) -> dict:
@@ -134,6 +110,12 @@ def status_view(
 ):
     with get_conn() as conn:
         core_repairs.update_status(conn, order_id, status, staff["id"], comment.strip() or None)
+        repair = core_repairs.get_repair(conn, order_id)
+        messages = core_repairs.get_order_messages(conn, order_id)
+
+    core_notify.sync_repair_cards(
+        messages, core_repairs.render_card_text(repair), core_repairs.render_keyboard(order_id, repair["status"])
+    )
     return RedirectResponse(link(request, f"/repairs/{order_id}"), status_code=303)
 
 
