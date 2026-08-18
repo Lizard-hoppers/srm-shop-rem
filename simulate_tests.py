@@ -21,6 +21,7 @@ import json
 import time
 import urllib.parse
 
+import httpx
 import jinja2
 
 from core import auth, clients, device_catalog, inventory, purchases, qr, repairs, sales, timefmt
@@ -325,6 +326,37 @@ def scenario_repair_card_notify(db_path: str) -> None:
     except Exception:
         raised = True
     check("notify_repair_card is a silent no-op when unconfigured", not raised)
+
+    # With both destinations configured, a new repair must fan out to both:
+    # the "Ремонт техники" topic in the main group, and the separate
+    # masters group — two independent sendMessage calls.
+    calls = []
+
+    class _FakeResponse:
+        status_code = 200
+        text = "ok"
+
+    def _fake_post(url, json, timeout):
+        calls.append(json)
+        return _FakeResponse()
+
+    orig_post = httpx.post
+    orig = (notify._BOT_TOKEN, notify._STAFF_GROUP_CHAT_ID, notify._REPAIR_TOPIC_ID, notify._MASTERS_GROUP_CHAT_ID)
+    notify._BOT_TOKEN = "test-token"
+    notify._STAFF_GROUP_CHAT_ID, notify._REPAIR_TOPIC_ID, notify._MASTERS_GROUP_CHAT_ID = "-100main", "5", "-100masters"
+    httpx.post = _fake_post
+    try:
+        notify.notify_repair_card("карточка")
+    finally:
+        httpx.post = orig_post
+        notify._BOT_TOKEN, notify._STAFF_GROUP_CHAT_ID, notify._REPAIR_TOPIC_ID, notify._MASTERS_GROUP_CHAT_ID = orig
+
+    check(
+        "notify_repair_card posts to both the repair topic and the masters group",
+        len(calls) == 2
+        and {c["chat_id"] for c in calls} == {"-100main", "-100masters"}
+        and next(c for c in calls if c["chat_id"] == "-100main")["message_thread_id"] == "5",
+    )
 
 
 def _build_init_data(bot_token: str, user: dict, auth_date: int) -> str:
