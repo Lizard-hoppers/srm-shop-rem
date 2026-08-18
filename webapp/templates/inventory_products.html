@@ -10,28 +10,23 @@
   {% if low_stock %}<span class="badge">только с низким остатком</span>{% endif %}
 </form>
 
-<table class="table">
-  <thead><tr><th>Название</th><th>SKU</th><th>Категория</th><th>Остаток</th><th>Мин.</th><th>Назначение</th></tr></thead>
-  <tbody>
-    {% for p in products %}
-    <tr onclick="location.href='{{ link('/inventory/products/' ~ p.id) }}'"
-        class="clickable {% if p.total_qty <= p.min_qty %}row-warn{% endif %}">
-      <td>{{ p.name }}</td>
-      <td>{{ p.sku or '—' }}</td>
-      <td>{{ p.category or '—' }}</td>
-      <td>{{ p.total_qty }} {{ p.unit }}</td>
-      <td>{{ p.min_qty }}</td>
-      <td>
-        {% if p.is_repair_part %}деталь для ремонта{% endif %}
-        {% if p.is_repair_part and p.is_sellable %} / {% endif %}
-        {% if p.is_sellable %}товар на продажу{% endif %}
-      </td>
-    </tr>
+<div class="cards">
+  {% for p in products %}
+  <a class="card product-card {% if p.total_qty <= p.min_qty %}card-warn{% endif %}"
+     href="{{ link('/inventory/products/' ~ p.id) }}">
+    {% if p.photo_path %}
+    <img class="product-card-photo" src="/static/product_photos/{{ p.photo_path }}" alt="{{ p.name }}">
     {% else %}
-    <tr><td colspan="6">Товаров пока нет.</td></tr>
-    {% endfor %}
-  </tbody>
-</table>
+    <div class="product-card-photo-placeholder">{{ icons.icon('box', 26) }}</div>
+    {% endif %}
+    <div class="product-card-name">{{ p.name }}</div>
+    <div class="product-card-meta">{{ p.sku or 'без SKU' }}{% if p.category %} · {{ p.category }}{% endif %}</div>
+    <div class="product-card-meta">Остаток: {{ p.total_qty }} {{ p.unit }} (мин. {{ p.min_qty }})</div>
+  </a>
+  {% else %}
+  <p class="meta">Товаров пока нет.</p>
+  {% endfor %}
+</div>
 
 <h2>Добавить товар</h2>
 <form method="post" action="{{ link('/inventory/products') }}" class="edit-form">
@@ -47,7 +42,7 @@
   <p id="newProductScanStatus" class="meta" style="display:none;"></p>
   <label>Категория<input type="text" name="category"></label>
   <label>Единица<input type="text" name="unit" value="шт"></label>
-  <label>Мин. остаток (сигнал дефицита)<input type="number" name="min_qty" value="0"></label>
+  <label>Мин. остаток (сигнал дефицита)<input type="number" name="min_qty" placeholder="0"></label>
   <label>Цена продажи<input type="number" name="price"></label>
   <label><input type="checkbox" name="is_repair_part" checked> Деталь для ремонта</label>
   <label><input type="checkbox" name="is_sellable" checked> Товар на продажу</label>
