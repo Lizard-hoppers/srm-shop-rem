@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Form, Request
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 
 from core import inventory as core_inventory
+from core import purchase_import as core_purchase_import
 from core import purchases as core_purchases
 from core.storage import get_conn
 from webapp.deps import link, require_role
@@ -90,6 +91,17 @@ async def create_receipt_view(request: Request, staff=Depends(require_role(*_PUR
                 conn, int(supplier_id) if supplier_id else None, invoice_no.strip() or None, staff["id"], items
             )
     return RedirectResponse(link(request, "/purchases"), status_code=303)
+
+
+@router.post("/parse")
+async def parse_invoice_view(request: Request, staff=Depends(require_role(*_PURCHASE_ROLES))):
+    """Best-effort parse of a pasted invoice into draft rows for the intake
+    form's JS to render — see purchases_list.html and core/purchase_import.py.
+    Read-only: never writes to the DB."""
+    body = await request.json()
+    with get_conn() as conn:
+        rows = core_purchase_import.parse_invoice_text(conn, body.get("text", ""))
+    return JSONResponse({"rows": rows})
 
 
 @router.get("/{receipt_id}")

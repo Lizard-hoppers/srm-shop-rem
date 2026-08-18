@@ -32,6 +32,11 @@
       </label>
       <label>Номер накладной<input type="text" name="invoice_no"></label>
 
+      <label>Вставить накладную (скопировано из Excel/таблицы поставщика)
+        <textarea id="invoiceText" rows="3" placeholder="Название&#9;Кол-во&#9;Цена — по одной позиции на строку"></textarea>
+      </label>
+      <button type="button" id="parseInvoiceBtn" class="secondary">Разобрать →</button>
+
       <datalist id="productList"></datalist>
       <input type="hidden" name="row_count" id="rowCount" value="{{ item_rows | length }}">
       <div id="purchaseRows">
@@ -89,7 +94,8 @@
   var productPicker = {{ products_for_picker | tojson }};
   var defaultCellByProduct = {{ default_cell_by_product | tojson }};
   var labelToId = {};
-  productPicker.forEach(function (p) { labelToId[p.label] = p.id; });
+  var idToLabel = {};
+  productPicker.forEach(function (p) { labelToId[p.label] = p.id; idToLabel[p.id] = p.label; });
 
   var datalist = document.getElementById("productList");
   productPicker.forEach(function (p) {
@@ -99,6 +105,9 @@
   });
 
   var rowsContainer = document.getElementById("purchaseRows");
+  var rowCountInput = document.getElementById("rowCount");
+  var rowTemplate = document.getElementById("rowTemplate");
+  var nextIndex = {{ item_rows | length }};
 
   function resolveRow(searchInput) {
     var row = searchInput.closest(".purchase-row");
@@ -127,17 +136,43 @@
     }
   });
 
-  var rowCountInput = document.getElementById("rowCount");
-  var rowTemplate = document.getElementById("rowTemplate");
-  var nextIndex = {{ item_rows | length }};
-
-  document.getElementById("addRowBtn").addEventListener("click", function () {
+  function addRow() {
     var html = rowTemplate.innerHTML.split("__IDX__").join(String(nextIndex));
     var wrapper = document.createElement("div");
     wrapper.innerHTML = html.trim();
-    rowsContainer.appendChild(wrapper.firstElementChild);
+    var rowEl = wrapper.firstElementChild;
+    rowsContainer.appendChild(rowEl);
     nextIndex++;
     rowCountInput.value = nextIndex;
+    return rowEl;
+  }
+
+  document.getElementById("addRowBtn").addEventListener("click", function () { addRow(); });
+
+  function fillRow(rowEl, data) {
+    var search = rowEl.querySelector(".product-search");
+    search.value = (data.product_id && idToLabel[data.product_id]) || data.name_guess || "";
+    if (data.qty != null) rowEl.querySelector('[name^="qty_"]').value = data.qty;
+    if (data.unit_cost != null) rowEl.querySelector('[name^="unit_cost_"]').value = data.unit_cost;
+    resolveRow(search);
+  }
+
+  document.getElementById("parseInvoiceBtn").addEventListener("click", function () {
+    var text = document.getElementById("invoiceText").value.trim();
+    if (!text) return;
+    fetch(window.location.pathname + "/parse" + window.location.search, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: text }),
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        var parsedRows = (data && data.rows) || [];
+        rowsContainer.innerHTML = "";
+        nextIndex = 0;
+        parsedRows.forEach(function (row) { fillRow(addRow(), row); });
+        if (!parsedRows.length) addRow();
+      });
   });
 })();
 </script>

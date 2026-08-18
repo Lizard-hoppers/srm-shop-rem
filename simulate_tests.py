@@ -268,6 +268,26 @@ def scenario_purchases(db_path: str) -> None:
         check("receipt linked to a stock movement", len(movements) == 1 and movements[0]["ref_id"] == receipt_id)
 
 
+def scenario_purchase_import(db_path: str) -> None:
+    print("scenario: parse pasted invoice text into draft receipt rows")
+    from core import purchase_import
+
+    with get_conn(db_path) as conn:
+        # "Шлейф зарядки" / SKU-CHG already exists, created by scenario_purchases.
+        text = "SKU-CHG\t5\t300\nШлейф зарядки;3;280\nНеизвестный товар   2   40"
+        rows = purchase_import.parse_invoice_text(conn, text)
+        blank_lines_skipped = purchase_import.parse_invoice_text(conn, "\n\nSKU-CHG\t1\t100\n\n")
+
+    check("parse_invoice_text returns one row per non-empty line", len(rows) == 3)
+    check("tab-separated line matches by exact SKU",
+          rows[0]["product_id"] is not None and rows[0]["qty"] == 5 and rows[0]["unit_cost"] == 300)
+    check("semicolon-separated line matches the same product by exact name",
+          rows[1]["product_id"] == rows[0]["product_id"] and rows[1]["qty"] == 3 and rows[1]["unit_cost"] == 280)
+    check("multi-space-separated line with no catalog match comes back product_id=None",
+          rows[2]["product_id"] is None and rows[2]["name_guess"] == "Неизвестный товар" and rows[2]["qty"] == 2)
+    check("blank lines in the pasted text are skipped", len(blank_lines_skipped) == 1)
+
+
 def scenario_sales(db_path: str) -> None:
     print("scenario: offline sale deducts stock from a cell with enough qty")
     with get_conn(db_path) as conn:
@@ -620,6 +640,7 @@ def main() -> None:
         scenario_client_qr(db_path)
         scenario_device_catalog(db_path)
         scenario_purchases(db_path)
+        scenario_purchase_import(db_path)
         scenario_sales(db_path)
         scenario_repair_card_notify(db_path)
         scenario_repair_actions(db_path)
