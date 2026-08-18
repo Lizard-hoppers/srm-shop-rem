@@ -160,12 +160,16 @@ form.inline-form { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
 form.search-bar { display: flex; gap: 8px; margin-bottom: 16px; align-items: center; }
 form.edit-form { display: flex; flex-direction: column; gap: 12px; margin-top: 8px; }
 form.edit-form label { display: flex; flex-direction: column; gap: 5px; font-size: 12.5px; color: var(--muted); font-weight: 600; }
+.checkbox-row { display: flex; flex-direction: row; flex-wrap: wrap; gap: 10px; }
 form.edit-form label.checkbox-label {
-  flex-direction: row; align-items: center; gap: 8px;
+  flex-direction: row; align-items: center; gap: 10px;
+  flex: 1 1 auto; min-width: 150px;
+  padding: 12px 14px;
+  border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel);
   font-size: 13.5px; color: var(--text); font-weight: 500;
 }
 form.edit-form label.checkbox-label input[type="checkbox"] {
-  flex: 0 0 auto; width: 18px; height: 18px;
+  flex: 0 0 auto; width: 24px; height: 24px;
 }
 .movement-forms { display: flex; flex-direction: column; gap: 14px; }
 .movement-forms form,

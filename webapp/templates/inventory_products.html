@@ -44,8 +44,10 @@
   <label>Единица<input type="text" name="unit" value="шт"></label>
   <label>Мин. остаток (сигнал дефицита)<input type="number" name="min_qty" placeholder="0"></label>
   <label>Цена продажи<input type="number" name="price"></label>
-  <label class="checkbox-label"><input type="checkbox" name="is_repair_part" checked> Деталь для ремонта</label>
-  <label class="checkbox-label"><input type="checkbox" name="is_sellable" checked> Товар на продажу</label>
+  <div class="checkbox-row">
+    <label class="checkbox-label"><input type="checkbox" name="is_repair_part" checked> Деталь для ремонта</label>
+    <label class="checkbox-label"><input type="checkbox" name="is_sellable" checked> Товар на продажу</label>
+  </div>
   <button type="submit">Добавить</button>
 </form>
 
