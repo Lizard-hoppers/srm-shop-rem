@@ -818,6 +818,12 @@ def scenario_webapp_forms(db_path: str) -> None:
         check("repairs intake form accepts a file upload (multipart, not urlencoded)",
               'enctype="multipart/form-data"' in resp.text)
 
+        # App-wide double-submit guard (18.08 — a laggy save + a second
+        # tap duplicated a repair order): loaded on every page via
+        # base.html, not just the repairs intake form.
+        check("every page loads the double-submit guard, not just repairs intake",
+              'double-submit-guard.js' in resp.text)
+
         catalog_resp = client.post(f"/repairs?t={token}", data={
             "client_name": "Каталог Тест", "client_phone": "+380990002233",
             "device_type_0": "Экзотика", "brand_0": "НовыйБренд", "model_0": "СуперМодель X",
