@@ -4,7 +4,7 @@ import os
 import uuid
 
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 
 from core import inventory as core_inventory
 from core.inventory import InsufficientStockError
@@ -18,6 +18,7 @@ _STOCK_WRITE_ROLES = ("owner", "admin", "storekeeper")
 
 _PHOTO_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", "product_photos")
 _PHOTO_EXT_BY_CONTENT_TYPE = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
+_MAX_PHOTO_BYTES = 15 * 1024 * 1024  # comfortably under nginx's client_max_body_size (20M)
 
 
 @router.get("/products")
@@ -105,23 +106,26 @@ def product_edit_view(
 
 @router.post("/products/{product_id}/photo")
 async def product_photo_view(
-    request: Request, product_id: int, photo: UploadFile = File(...),
+    product_id: int, photo: UploadFile = File(...),
     staff=Depends(require_role(*_STOCK_WRITE_ROLES)),
 ):
+    """AJAX upload (see inventory_product_detail.html) — returns JSON
+    rather than redirecting, so the page can show a friendly error instead
+    of the native-navigation hang a plain <form> gives when e.g. a real
+    phone photo trips a size limit: no response ever reaches the page to
+    render, it just sits there looking dead."""
     ext = _PHOTO_EXT_BY_CONTENT_TYPE.get(photo.content_type)
     if not ext:
-        with get_conn() as conn:
-            product = core_inventory.get_product(conn, product_id)
-            stock_by_cell = core_inventory.product_stock_by_cell(conn, product_id)
-        return render(
-            request, "inventory_product_detail.html", staff=staff, product=product,
-            stock_by_cell=stock_by_cell, error="Фото должно быть JPEG, PNG или WebP.",
-        )
+        return JSONResponse({"ok": False, "error": "Фото должно быть JPEG, PNG или WebP."}, status_code=400)
+
+    data = await photo.read(_MAX_PHOTO_BYTES + 1)
+    if len(data) > _MAX_PHOTO_BYTES:
+        return JSONResponse({"ok": False, "error": "Фото слишком большое (максимум 15 МБ)."}, status_code=413)
 
     os.makedirs(_PHOTO_DIR, exist_ok=True)
     filename = f"{product_id}_{uuid.uuid4().hex}{ext}"
     with open(os.path.join(_PHOTO_DIR, filename), "wb") as f:
-        f.write(await photo.read())
+        f.write(data)
 
     with get_conn() as conn:
         old = core_inventory.get_product(conn, product_id)
@@ -130,7 +134,8 @@ async def product_photo_view(
         old_path = os.path.join(_PHOTO_DIR, old["photo_path"])
         if os.path.exists(old_path):
             os.remove(old_path)
-    return RedirectResponse(link(request, f"/inventory/products/{product_id}"), status_code=303)
+
+    return JSONResponse({"ok": True, "photo_url": f"/static/product_photos/{filename}"})
 
 
 @router.get("/cells")

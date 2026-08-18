@@ -5,20 +5,65 @@
 <a class="back-link" href="{{ link('/inventory/products') }}">{{ icons.icon('back', 16) }} Товары</a>
 
 <div class="panel-box" style="text-align: center;">
-  {% if product.photo_path %}
-  <img src="/static/product_photos/{{ product.photo_path }}" alt="{{ product.name }}"
-       style="max-width: 240px; max-height: 240px; border-radius: 10px; object-fit: cover;">
-  {% else %}
-  <p class="meta">Фото ещё не добавлено.</p>
-  {% endif %}
-  <form method="post" action="{{ link('/inventory/products/' ~ product.id ~ '/photo') }}"
-        enctype="multipart/form-data" class="edit-form" style="margin-top: 10px;">
-    <label>{{ 'Заменить фото' if product.photo_path else 'Добавить фото' }}
-      <input type="file" name="photo" accept="image/jpeg,image/png,image/webp" capture="environment" required>
+  <img id="productPhoto" src="{{ '/static/product_photos/' ~ product.photo_path if product.photo_path else '' }}"
+       alt="{{ product.name }}"
+       style="max-width: 240px; max-height: 240px; border-radius: 10px; object-fit: cover; {% if not product.photo_path %}display:none;{% endif %}">
+  <p id="noPhotoText" class="meta" {% if product.photo_path %}style="display:none;"{% endif %}>Фото ещё не добавлено.</p>
+  <form id="photoForm" class="edit-form" style="margin-top: 10px;">
+    <label id="photoLabel">{{ 'Заменить фото' if product.photo_path else 'Добавить фото' }}
+      <input type="file" name="photo" id="photoInput" accept="image/jpeg,image/png,image/webp" capture="environment" required>
     </label>
-    <button type="submit">Загрузить</button>
+    <button type="submit" id="photoSubmitBtn">Загрузить</button>
   </form>
+  <p id="photoStatus" class="meta" style="display:none;"></p>
 </div>
+
+<script>
+(function () {
+  var form = document.getElementById("photoForm");
+  var input = document.getElementById("photoInput");
+  var btn = document.getElementById("photoSubmitBtn");
+  var status = document.getElementById("photoStatus");
+  var img = document.getElementById("productPhoto");
+  var noPhotoText = document.getElementById("noPhotoText");
+  var photoLabel = document.getElementById("photoLabel");
+
+  form.addEventListener("submit", function (e) {
+    e.preventDefault();
+    var file = input.files[0];
+    if (!file) return;
+    btn.disabled = true;
+    status.style.display = "block";
+    status.textContent = "Загружаю…";
+
+    var formData = new FormData();
+    formData.append("photo", file);
+    fetch(window.location.pathname + "/photo" + window.location.search, {
+      method: "POST",
+      body: formData,
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (data && data.ok) {
+          img.src = data.photo_url + "?v=" + Date.now();
+          img.style.display = "inline-block";
+          noPhotoText.style.display = "none";
+          photoLabel.childNodes[0].textContent = "Заменить фото";
+          status.textContent = "Готово ✅";
+          input.value = "";
+        } else {
+          status.textContent = "⚠️ " + ((data && data.error) || "Не удалось загрузить фото.");
+        }
+      })
+      .catch(function () {
+        status.textContent = "⚠️ Не удалось загрузить фото — проверьте соединение и попробуйте ещё раз.";
+      })
+      .finally(function () {
+        btn.disabled = false;
+      });
+  });
+})();
+</script>
 
 <h2>Остаток по ячейкам</h2>
 <table class="table">

@@ -15,6 +15,7 @@ router = APIRouter(prefix="/purchases")
 
 ITEM_ROWS = 3
 _PURCHASE_ROLES = ("owner", "admin", "storekeeper")
+_MAX_PHOTO_BYTES = 15 * 1024 * 1024  # comfortably under nginx's client_max_body_size (20M)
 
 
 def _list_context(conn) -> dict:
@@ -128,7 +129,9 @@ async def scan_invoice_view(
     the bot DM flow (bot/purchase_photo.py), this happens synchronously on
     the page the staff member is already reviewing/submitting, so there's
     nothing to persist for later. Read-only: never writes to the DB."""
-    photo_bytes = await photo.read()
+    photo_bytes = await photo.read(_MAX_PHOTO_BYTES + 1)
+    if len(photo_bytes) > _MAX_PHOTO_BYTES:
+        return JSONResponse({"rows": [], "error": "Фото слишком большое (максимум 15 МБ)."}, status_code=413)
     try:
         raw_items = vision_ocr.extract_invoice_items(photo_bytes)
     except vision_ocr.VisionOcrError as exc:

@@ -727,6 +727,13 @@ def scenario_webapp_forms(db_path: str) -> None:
         check("POST /purchases/scan without an API key returns a structured error, not a 500",
               scan_resp.status_code == 502 and "rows" in scan_resp.json() and "error" in scan_resp.json())
 
+        oversized_scan_resp = client.post(
+            f"/purchases/scan?t={token}",
+            files={"photo": ("huge.jpg", b"x" * (16 * 1024 * 1024), "image/jpeg")},
+        )
+        check("POST /purchases/scan rejects an oversized photo before ever calling OpenAI",
+              oversized_scan_resp.status_code == 413 and oversized_scan_resp.json()["rows"] == [])
+
         # Product card (Склад → Товары → клик на товар): view, edit, photo.
         detail_resp = client.get(f"/inventory/products/{wproduct_id}?t={token}")
         check("product detail page renders", detail_resp.status_code == 200 and "Гарантийный товар" in detail_resp.text)
@@ -738,21 +745,38 @@ def scenario_webapp_forms(db_path: str) -> None:
             renamed = conn.execute("SELECT name FROM products WHERE id = ?", (wproduct_id,)).fetchone()
         check("editing a product from its card updates the name", renamed["name"] == "Гарантийный товар PRO")
 
+        # Photo upload is AJAX (JSON in/out) now, not a plain <form> POST —
+        # a native-navigation upload just hangs blank in a WebView when the
+        # request fails (e.g. nginx's client_max_body_size on a real phone
+        # photo), with no way to show the user what went wrong.
         bad_photo_resp = client.post(
             f"/inventory/products/{wproduct_id}/photo?t={token}",
             files={"photo": ("note.txt", b"not an image", "text/plain")},
         )
-        check("uploading a non-image is rejected with a friendly error, not a 500",
-              bad_photo_resp.status_code == 200 and "JPEG" in bad_photo_resp.text)
+        check("uploading a non-image is rejected with a friendly JSON error, not a 500",
+              bad_photo_resp.status_code == 400 and bad_photo_resp.json()["ok"] is False
+              and "JPEG" in bad_photo_resp.json()["error"])
+
+        oversized_resp = client.post(
+            f"/inventory/products/{wproduct_id}/photo?t={token}",
+            files={"photo": ("huge.jpg", b"\xff\xd8\xff" + b"x" * (16 * 1024 * 1024), "image/jpeg")},
+        )
+        check("an oversized photo is rejected with a friendly JSON error, not accepted or hung",
+              oversized_resp.status_code == 413 and oversized_resp.json()["ok"] is False)
 
         good_photo_resp = client.post(
             f"/inventory/products/{wproduct_id}/photo?t={token}",
             files={"photo": ("device.jpg", b"\xff\xd8\xff-fake-jpeg-bytes", "image/jpeg")},
         )
+        good_photo_json = good_photo_resp.json()
         with get_conn(db_path) as conn:
             photo_path = conn.execute("SELECT photo_path FROM products WHERE id = ?", (wproduct_id,)).fetchone()["photo_path"]
-        check("uploading a valid image stores a photo_path", bool(photo_path) and photo_path.endswith(".jpg"))
-        check("product card now renders the uploaded photo", photo_path is not None and photo_path in good_photo_resp.text)
+        check("uploading a valid image stores a photo_path",
+              good_photo_json["ok"] is True and bool(photo_path) and photo_path.endswith(".jpg"))
+        check("the JSON response's photo_url matches the stored path", photo_path in good_photo_json["photo_url"])
+
+        card_resp = client.get(f"/inventory/products/{wproduct_id}?t={token}")
+        check("the product card now renders the uploaded photo", photo_path in card_resp.text)
 
         saved_photo_file = os.path.join("webapp", "static", "product_photos", photo_path or "")
         check("the uploaded photo file was actually written to disk", photo_path is not None and os.path.exists(saved_photo_file))
