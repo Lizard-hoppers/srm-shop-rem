@@ -15,10 +15,10 @@ router = APIRouter(prefix="/clients")
 
 
 @router.get("")
-def list_view(request: Request, q: str | None = None, staff=Depends(require_staff)):
+def list_view(request: Request, q: str | None = None, source: str | None = None, staff=Depends(require_staff)):
     with get_conn() as conn:
-        rows = core_clients.list_clients(conn, search=q)
-    return render(request, "clients_list.html", staff=staff, clients=rows, query=q)
+        rows = core_clients.list_clients(conn, search=q, source=source)
+    return render(request, "clients_list.html", staff=staff, clients=rows, query=q, source=source)
 
 
 @router.post("")
@@ -32,7 +32,7 @@ def create_view(
     if not name.strip():
         with get_conn() as conn:
             rows = core_clients.list_clients(conn)
-        return render(request, "clients_list.html", staff=staff, clients=rows, query=None, error="Введите имя клиента.")
+        return render(request, "clients_list.html", staff=staff, clients=rows, query=None, source=None, error="Введите имя клиента.")
 
     with get_conn() as conn:
         client_id = core_clients.create_client(
@@ -49,7 +49,7 @@ def find_view(request: Request, code: str = "", staff=Depends(require_staff)):
         if client:
             return RedirectResponse(link(request, f"/clients/{client_id}"), status_code=303)
         rows = core_clients.list_clients(conn)
-    return render(request, "clients_list.html", staff=staff, clients=rows, query=None, error="QR-код не распознан — клиент не найден.")
+    return render(request, "clients_list.html", staff=staff, clients=rows, query=None, source=None, error="QR-код не распознан — клиент не найден.")
 
 
 @router.get("/{client_id}")

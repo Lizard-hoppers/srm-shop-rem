@@ -758,6 +758,20 @@ def scenario_webapp_forms(db_path: str) -> None:
         check("the clients list is now a card grid, not a table", 'class="cards"' in clients_list_resp.text)
         check("a client's card links to their detail page", f"/clients/{client_id}" in clients_list_resp.text)
 
+        # Онлайн/офлайн filter buttons (all clients so far in this scenario
+        # are offline; add one online client to prove the filter actually
+        # excludes rows, not just renders the buttons).
+        with get_conn(db_path) as conn:
+            online_client_id = clients.create_client(conn, "Онлайн Клиент", phone="+380990003344", source="online")
+
+        offline_filter_resp = client.get(f"/clients?t={token}&source=offline")
+        check("«Офлайн» filter excludes the online client", f"/clients/{online_client_id}" not in offline_filter_resp.text)
+        check("«Офлайн» filter still shows an offline client", f"/clients/{client_id}" in offline_filter_resp.text)
+
+        online_filter_resp = client.get(f"/clients?t={token}&source=online")
+        check("«Онлайн» filter shows only the online client", f"/clients/{online_client_id}" in online_filter_resp.text
+              and f"/clients/{client_id}" not in online_filter_resp.text)
+
         # Device catalog autocomplete: seeded suggestions render, and a
         # brand-new device typed on intake gets remembered for next time.
         resp = client.get(f"/repairs?t={token}")

@@ -4,14 +4,20 @@ from __future__ import annotations
 import sqlite3
 
 
-def list_clients(conn: sqlite3.Connection, search: str | None = None) -> list[sqlite3.Row]:
+def list_clients(
+    conn: sqlite3.Connection, search: str | None = None, source: str | None = None
+) -> list[sqlite3.Row]:
+    query = "SELECT * FROM clients WHERE 1=1"
+    params: list = []
     if search:
+        query += " AND (name LIKE ? OR phone LIKE ?)"
         like = f"%{search}%"
-        return conn.execute(
-            "SELECT * FROM clients WHERE name LIKE ? OR phone LIKE ? ORDER BY created_at DESC",
-            (like, like),
-        ).fetchall()
-    return conn.execute("SELECT * FROM clients ORDER BY created_at DESC").fetchall()
+        params.extend([like, like])
+    if source:
+        query += " AND source = ?"
+        params.append(source)
+    query += " ORDER BY created_at DESC"
+    return conn.execute(query, params).fetchall()
 
 
 def get_client(conn: sqlite3.Connection, client_id: int) -> sqlite3.Row | None:

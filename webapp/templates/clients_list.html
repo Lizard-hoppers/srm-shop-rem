@@ -8,8 +8,15 @@
   <button type="button" id="scanQrBtn" onclick="scanClientQr()" style="display:none;">📷 Сканировать QR</button>
 </div>
 
+<div class="section-btns">
+  <a href="{{ link('/clients' ~ ('?q=' ~ (query | urlencode) if query else '')) }}"><button type="button" class="secondary" {% if not source %}style="border-color: var(--accent); color: var(--accent-2);"{% endif %}>Все</button></a>
+  <a href="{{ link('/clients?source=offline' ~ ('&q=' ~ (query | urlencode) if query else '')) }}"><button type="button" class="secondary" {% if source == 'offline' %}style="border-color: var(--accent); color: var(--accent-2);"{% endif %}>Офлайн</button></a>
+  <a href="{{ link('/clients?source=online' ~ ('&q=' ~ (query | urlencode) if query else '')) }}"><button type="button" class="secondary" {% if source == 'online' %}style="border-color: var(--accent); color: var(--accent-2);"{% endif %}>Онлайн</button></a>
+</div>
+
 <form method="get" class="search-bar">
   <input type="hidden" name="t" value="{{ token }}">
+  <input type="hidden" name="source" value="{{ source or '' }}">
   <input type="text" name="q" value="{{ query or '' }}" placeholder="Поиск по имени или телефону">
   <button type="submit">Найти</button>
 </form>
