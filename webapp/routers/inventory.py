@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from fastapi.responses import JSONResponse, RedirectResponse
 
 from core import inventory as core_inventory
+from core import vision_ocr
 from core.inventory import InsufficientStockError
 from core.storage import get_conn
 from webapp.deps import link, optional_int, require_role, require_staff
@@ -61,6 +62,26 @@ def products_create(
             price=optional_int(price),
         )
     return RedirectResponse(link(request, "/inventory/products"), status_code=303)
+
+
+@router.post("/products/scan-label")
+async def scan_product_label_view(photo: UploadFile = File(...), staff=Depends(require_role(*_STOCK_WRITE_ROLES))):
+    """Scan-to-fill button next to the SKU field (create form and product
+    card edit form): photo of a barcode/label -> OpenAI vision -> {name,
+    sku} to fill in client-side. No product_id — used before a product
+    exists too. Deliberately never returns a price (see
+    core.vision_ocr.extract_product_label). Read-only: never writes to
+    the DB."""
+    photo_bytes = await photo.read(_MAX_PHOTO_BYTES + 1)
+    if len(photo_bytes) > _MAX_PHOTO_BYTES:
+        return JSONResponse({"ok": False, "error": "Фото слишком большое (максимум 15 МБ)."}, status_code=413)
+
+    try:
+        result = vision_ocr.extract_product_label(photo_bytes)
+    except vision_ocr.VisionOcrError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
+
+    return JSONResponse({"ok": True, "name": result["name"], "sku": result["sku"]})
 
 
 @router.get("/products/{product_id}")

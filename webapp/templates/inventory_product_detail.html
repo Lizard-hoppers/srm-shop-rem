@@ -79,8 +79,16 @@
 
 <h2>Данные товара</h2>
 <form method="post" action="{{ link('/inventory/products/' ~ product.id ~ '/edit') }}" class="edit-form">
-  <label>Название<input type="text" name="name" value="{{ product.name }}" required></label>
-  <label>SKU<input type="text" name="sku" value="{{ product.sku or '' }}"></label>
+  <label>Название<input type="text" name="name" id="editProductName" value="{{ product.name }}" required></label>
+  <label>SKU
+    <div style="display:flex; gap:6px;">
+      <input type="text" name="sku" id="editProductSku" value="{{ product.sku or '' }}" style="flex:1;">
+      <button type="button" class="secondary scan-label-btn" style="flex:0 0 auto;"
+              data-name-target="editProductName" data-sku-target="editProductSku"
+              data-status-target="editProductScanStatus">📷</button>
+    </div>
+  </label>
+  <p id="editProductScanStatus" class="meta" style="display:none;"></p>
   <label>Категория<input type="text" name="category" value="{{ product.category or '' }}"></label>
   <label>Единица<input type="text" name="unit" value="{{ product.unit }}"></label>
   <label>Мин. остаток (сигнал дефицита)<input type="number" name="min_qty" value="{{ product.min_qty }}"></label>
@@ -89,4 +97,6 @@
   <label><input type="checkbox" name="is_sellable" {% if product.is_sellable %}checked{% endif %}> Товар на продажу</label>
   <button type="submit">Сохранить</button>
 </form>
+
+<script src="/static/product-scan.js?v={{ asset_version }}"></script>
 {% endblock %}

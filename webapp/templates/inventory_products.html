@@ -35,8 +35,16 @@
 
 <h2>Добавить товар</h2>
 <form method="post" action="{{ link('/inventory/products') }}" class="edit-form">
-  <label>Название<input type="text" name="name" required></label>
-  <label>SKU<input type="text" name="sku"></label>
+  <label>Название<input type="text" name="name" id="newProductName" required></label>
+  <label>SKU
+    <div style="display:flex; gap:6px;">
+      <input type="text" name="sku" id="newProductSku" style="flex:1;">
+      <button type="button" class="secondary scan-label-btn" style="flex:0 0 auto;"
+              data-name-target="newProductName" data-sku-target="newProductSku"
+              data-status-target="newProductScanStatus">📷</button>
+    </div>
+  </label>
+  <p id="newProductScanStatus" class="meta" style="display:none;"></p>
   <label>Категория<input type="text" name="category"></label>
   <label>Единица<input type="text" name="unit" value="шт"></label>
   <label>Мин. остаток (сигнал дефицита)<input type="number" name="min_qty" value="0"></label>
@@ -45,4 +53,6 @@
   <label><input type="checkbox" name="is_sellable" checked> Товар на продажу</label>
   <button type="submit">Добавить</button>
 </form>
+
+<script src="/static/product-scan.js?v={{ asset_version }}"></script>
 {% endblock %}

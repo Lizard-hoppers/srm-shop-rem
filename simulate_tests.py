@@ -375,6 +375,36 @@ def scenario_purchase_drafts_and_vision(db_path: str) -> None:
         except vision_ocr.VisionOcrError:
             raised_http_error = True
         check("extract_invoice_items raises on a non-200 response", raised_http_error)
+
+        # Product barcode/label scan (scan-to-fill SKU button) — same
+        # photo->JSON pipeline, different prompt/shape, and must never
+        # surface a price even if the model included one.
+        class _LabelResponse:
+            status_code = 200
+            text = "ok"
+
+            def json(self):
+                return {"choices": [{"message": {"content":
+                    '{"name": "Экран Redmi 9A", "sku": "  RM9A-DSP-042  ", "price": 999}'
+                }}]}
+
+        httpx.post = lambda url, headers, json, timeout: _LabelResponse()
+        label = vision_ocr.extract_product_label(b"fake-bytes")
+        check("extract_product_label parses name and (trimmed) sku",
+              label == {"name": "Экран Redmi 9A", "sku": "RM9A-DSP-042"})
+        check("extract_product_label never surfaces a price field", "price" not in label)
+
+        class _EmptyLabelResponse:
+            status_code = 200
+            text = "ok"
+
+            def json(self):
+                return {"choices": [{"message": {"content": '{"name": null, "sku": null}'}}]}
+
+        httpx.post = lambda url, headers, json, timeout: _EmptyLabelResponse()
+        empty_label = vision_ocr.extract_product_label(b"fake-bytes")
+        check("extract_product_label returns None for both fields when nothing was legible",
+              empty_label == {"name": None, "sku": None})
     finally:
         httpx.post = orig_post
         vision_ocr._API_KEY = orig_key
@@ -733,6 +763,21 @@ def scenario_webapp_forms(db_path: str) -> None:
         )
         check("POST /purchases/scan rejects an oversized photo before ever calling OpenAI",
               oversized_scan_resp.status_code == 413 and oversized_scan_resp.json()["rows"] == [])
+
+        # Scan-to-fill SKU button (product create/edit forms).
+        label_scan_resp = client.post(
+            f"/inventory/products/scan-label?t={token}",
+            files={"photo": ("label.jpg", b"fake-bytes", "image/jpeg")},
+        )
+        check("POST /inventory/products/scan-label without an API key returns a structured error, not a 500",
+              label_scan_resp.status_code == 502 and label_scan_resp.json()["ok"] is False)
+
+        oversized_label_resp = client.post(
+            f"/inventory/products/scan-label?t={token}",
+            files={"photo": ("huge.jpg", b"x" * (16 * 1024 * 1024), "image/jpeg")},
+        )
+        check("POST /inventory/products/scan-label rejects an oversized photo before ever calling OpenAI",
+              oversized_label_resp.status_code == 413 and oversized_label_resp.json()["ok"] is False)
 
         # Product card (Склад → Товары → клик на товар): view, edit, photo.
         detail_resp = client.get(f"/inventory/products/{wproduct_id}?t={token}")
