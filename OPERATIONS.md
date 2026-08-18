@@ -18,6 +18,15 @@ cookie (Telegram-вебвью ненадёжно их сохраняет меж�
 подписанном токене `?t=...`, который прокидывается через каждую
 ссылку/форму/редирект (`webapp/deps.link()` и `webapp/templating.render()`).
 
+**Роли (RBAC):** `owner`/`admin`/`master`/`storekeeper` в колонке
+`staff.role`, проверяются через `webapp/deps.require_role(*roles)` (поверх
+`require_staff`). `/reports` — только owner+admin; мутации склада
+(`/inventory/products`, `/cells`, `/movements/*`) — owner+admin+storekeeper;
+мутации ремонтов (создание/статус/назначение/цена/детали) —
+owner+admin+master. Просмотр списков (GET) открыт всем залогиненным. До
+18.08 ролей не было вообще — любой залогиненный видел выручку и мог
+списывать склад, см. commit `2c0d491`.
+
 ## Статус по фазам (план: `.claude/plans/fancy-greeting-pearl.md` у Павла)
 
 - [x] Фаза 0 — каркас: схема БД (`core/storage.py`), staff-аккаунты,
@@ -50,6 +59,22 @@ cookie (Telegram-вебвью ненадёжно их сохраняет меж�
 - [ ] Скидки по карте лояльности не считаются автоматически — id карты
       просто ускоряет поиск клиента, логику скидок ещё не обсуждали.
 
+## Уведомления в рабочую группу
+
+При приёме устройства в ремонт (`POST /repairs`) `crm_web` шлёт карточку
+(клиент, телефон, устройство, неисправность, мастер, оценка, канал)
+напрямую в Telegram Bot API (`core/notify.py`, `httpx` →
+`api.telegram.org`, без похода через процесс `crm_bot`) в чат
+`CRM_STAFF_GROUP_CHAT_ID`. Только при создании — смена статуса карточку не
+переотправляет и не редактирует. Если переменная не задана —
+`notify_staff_group()` молча ничего не делает, ошибка Telegram API тоже
+только логируется, запрос не падает.
+
+**Как узнать chat_id группы:** добавить бота в группу как админа → отправить
+там `/chatid` → бот ответит числом → вписать в `CRM_STAFF_GROUP_CHAT_ID` в
+`.env` на сервере → `systemctl restart crm_web`. На 18.08 переменная ещё не
+задана — группа не создана.
+
 ## Онбординг нового сотрудника
 
 Входа по паролю нет вообще, поэтому нового сотрудника подключает владелец
@@ -66,7 +91,7 @@ cookie (Telegram-вебвью ненадёжно их сохраняет меж�
 ```
 python3 -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env   # CRM_SECRET_KEY, CRM_BOT_TOKEN, CRM_MINIAPP_URL
+cp .env.example .env   # CRM_SECRET_KEY, CRM_BOT_TOKEN, CRM_MINIAPP_URL, CRM_STAFF_GROUP_CHAT_ID (опционально)
 export $(cat .env | xargs)
 python -m core.bootstrap owner <пароль> "Имя владельца"
 python -m core.link_telegram owner <telegram_id>
