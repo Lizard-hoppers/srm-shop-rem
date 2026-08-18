@@ -188,6 +188,22 @@ def pick_cell_with_stock(conn: sqlite3.Connection, product_id: int, qty: int) ->
     return row["cell_id"] if row else None
 
 
+def default_cell_by_product(conn: sqlite3.Connection) -> dict[int, int]:
+    """For every product, the cell most likely to be 'where it lives' —
+    whichever cell currently holds the most of it. Used to pre-fill the
+    cell picker on goods-receipt intake so restocking the same item
+    doesn't require re-picking its cell every time. No qty threshold (see
+    pick_cell_with_stock() for that variant) — a product being restocked
+    is often already at 0 everywhere. One query for the whole catalog, for
+    embedding into a page's JS context rather than looking up per product."""
+    rows = conn.execute(
+        """SELECT product_id, cell_id FROM stock s1
+           WHERE qty = (SELECT MAX(qty) FROM stock s2 WHERE s2.product_id = s1.product_id)
+           GROUP BY product_id"""
+    ).fetchall()
+    return {row["product_id"]: row["cell_id"] for row in rows}
+
+
 def list_movements(conn: sqlite3.Connection, limit: int = 100) -> list[sqlite3.Row]:
     return conn.execute(
         """SELECT stock_movements.*, products.name AS product_name,
