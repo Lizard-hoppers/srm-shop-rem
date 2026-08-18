@@ -220,6 +220,37 @@ def get_order_messages(conn: sqlite3.Connection, order_id: int) -> list[tuple[st
     return [(row["chat_id"], row["message_id"]) for row in rows]
 
 
+def find_order_by_message(conn: sqlite3.Connection, chat_id: str, message_id: int) -> int | None:
+    """The repair a posted card belongs to, given the chat/message it was
+    sent as — how bot/repair_attachments.py resolves a photo replying to
+    a card to the repair it should attach to."""
+    row = conn.execute(
+        "SELECT order_id FROM repair_order_messages WHERE chat_id = ? AND message_id = ?",
+        (chat_id, message_id),
+    ).fetchone()
+    return row["order_id"] if row else None
+
+
+def add_attachment(
+    conn: sqlite3.Connection, order_id: int, photo_path: str, caption: str | None, staff_id: int
+) -> int:
+    return conn.execute(
+        "INSERT INTO repair_attachments (order_id, photo_path, caption, staff_id) VALUES (?, ?, ?, ?)",
+        (order_id, photo_path, caption, staff_id),
+    ).lastrowid
+
+
+def get_attachments(conn: sqlite3.Connection, order_id: int) -> list[sqlite3.Row]:
+    return conn.execute(
+        """SELECT repair_attachments.*, staff.name AS staff_name
+           FROM repair_attachments
+           LEFT JOIN staff ON staff.id = repair_attachments.staff_id
+           WHERE order_id = ?
+           ORDER BY created_at DESC""",
+        (order_id,),
+    ).fetchall()
+
+
 def set_price(conn: sqlite3.Connection, order_id: int, price_estimate: int | None, price_final: int | None) -> None:
     conn.execute(
         "UPDATE repair_orders SET price_estimate = ?, price_final = ? WHERE id = ?",

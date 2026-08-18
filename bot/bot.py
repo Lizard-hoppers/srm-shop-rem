@@ -10,6 +10,7 @@ from bot.config import BOT_TOKEN, MINIAPP_URL
 from bot.handlers import router
 from bot.purchase_photo import router as purchase_photo_router
 from bot.repair_actions import router as repair_actions_router
+from bot.repair_attachments import router as repair_attachments_router
 from core.storage import init_db
 
 logging.basicConfig(level=logging.INFO)
@@ -21,6 +22,7 @@ async def main() -> None:
     dp = Dispatcher()
     dp.include_router(router)
     dp.include_router(repair_actions_router)
+    dp.include_router(repair_attachments_router)
     dp.include_router(purchase_photo_router)
     await bot.delete_webhook(drop_pending_updates=True)
     await bot.set_chat_menu_button(

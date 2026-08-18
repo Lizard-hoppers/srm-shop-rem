@@ -90,6 +90,19 @@ CREATE TABLE IF NOT EXISTS repair_order_messages (
 );
 CREATE INDEX IF NOT EXISTS idx_repair_order_messages_order ON repair_order_messages(order_id);
 
+-- Photos staff reply with directly on a repair's card in the group
+-- (bot/repair_attachments.py) — a lightweight documentation trail per
+-- repair (parts, damage, whatever's worth a photo), not a formal receipt.
+CREATE TABLE IF NOT EXISTS repair_attachments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id INTEGER NOT NULL REFERENCES repair_orders(id),
+    photo_path TEXT NOT NULL,
+    caption TEXT,
+    staff_id INTEGER REFERENCES staff(id),
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_repair_attachments_order ON repair_attachments(order_id);
+
 CREATE TABLE IF NOT EXISTS products (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     sku TEXT UNIQUE,

@@ -4,6 +4,7 @@ from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     BufferedInputFile,
+    CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
@@ -71,15 +72,34 @@ async def chat_id_cmd(message: Message) -> None:
     await message.answer(f"Chat ID: <code>{message.chat.id}</code>")
 
 
-@router.message(F.contact, F.chat.type == "private")
+@router.message(F.contact)
 async def got_contact(message: Message) -> None:
-    """Private-chat only — the bot is also a member of staff groups
-    ("Работа", "Мастера 007"), and without this filter, staff sharing a
-    *client's* contact card into a group topic (to note it for a repair,
-    say) made the bot reply there with the client-registration flow's
-    "share your own number" message, which makes no sense outside the
-    bot's own DM onboarding."""
-    if not message.contact or message.contact.user_id != message.from_user.id:
+    """Two distinct flows share this one trigger:
+    - a client, in DM, sharing their OWN contact -> self-registration
+      (unchanged).
+    - a STAFF member, anywhere (DM or a staff group — "Работа",
+      "Мастера 007"), sharing SOMEONE ELSE's contact -> offer to add that
+      person as a client (see offer_add_client/confirm_add_client below).
+      This is exactly the case the 67dea42 private-only fix accidentally
+      silenced: staff sharing a *client's* contact in a group topic to
+      note it now gets routed to the right flow instead of nothing at all.
+    Anything else (a non-staff person sharing someone else's contact
+    outside DM) is ignored — no case for the bot to react there."""
+    if not message.contact:
+        return
+    is_own_contact = message.contact.user_id == message.from_user.id
+
+    with get_conn() as conn:
+        staff = core_auth.get_staff_by_telegram_id(conn, message.from_user.id)
+
+    if staff and not is_own_contact:
+        await offer_add_client(message)
+        return
+
+    if message.chat.type != "private":
+        return
+
+    if not is_own_contact:
         await message.answer("Пожалуйста, поделитесь своим собственным номером — кнопкой ниже.")
         return
 
@@ -89,6 +109,37 @@ async def got_contact(message: Message) -> None:
         core_clients.link_telegram(conn, client_id, message.from_user.id)
 
     await _send_card(message, client_id, CLIENT_REGISTERED, remove_keyboard=True)
+
+
+async def offer_add_client(message: Message) -> None:
+    contact = message.contact
+    name = f"{contact.first_name or ''} {contact.last_name or ''}".strip() or "Клиент"
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="➕ Добавить как клиента", callback_data="contact_add_client"),
+    ]])
+    await message.reply(f"Добавить в CRM как клиента?\n{name} — {contact.phone_number}", reply_markup=keyboard)
+
+
+@router.callback_query(F.data == "contact_add_client")
+async def confirm_add_client(callback: CallbackQuery) -> None:
+    with get_conn() as conn:
+        staff = core_auth.get_staff_by_telegram_id(conn, callback.from_user.id)
+    if not staff:
+        await callback.answer("Недостаточно прав.", show_alert=True)
+        return
+
+    contact_message = callback.message.reply_to_message if callback.message else None
+    if not contact_message or not contact_message.contact:
+        await callback.answer("Не нашёл контакт — попробуйте ещё раз.", show_alert=True)
+        return
+
+    contact = contact_message.contact
+    name = f"{contact.first_name or ''} {contact.last_name or ''}".strip() or "Клиент"
+    with get_conn() as conn:
+        client_id = core_clients.get_or_create_by_phone(conn, name, contact.phone_number, source="offline")
+
+    await callback.message.edit_text(f"✅ Добавлен клиент: {name} (№{client_id})")
+    await callback.answer("Готово")
 
 
 async def _send_card(message: Message, client_id: int, caption: str, remove_keyboard: bool = False) -> None:

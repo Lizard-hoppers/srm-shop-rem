@@ -572,6 +572,35 @@ def scenario_repair_actions(db_path: str) -> None:
               repairs.complete_repair(conn, order_id_2, 1, override=True))
 
 
+def scenario_repair_attachments(db_path: str) -> None:
+    print("scenario: photo replies attach to a repair via its posted card")
+    with get_conn(db_path) as conn:
+        client_id = clients.get_or_create_by_phone(conn, "Вложения Тест", "+380990007788", source="offline")
+        order_id = repairs.create_repair(
+            conn, client_id, "Телефон", "Apple", "iPhone 12", None, "не держит заряд", "offline", None, None, 1,
+        )
+
+        check("no order found for an untracked (chat_id, message_id) pair",
+              repairs.find_order_by_message(conn, "-100masters", 999) is None)
+
+        repairs.save_order_messages(conn, order_id, [
+            ("-100topic", 42, "topic"), ("-100masters", 43, "masters_group"),
+        ])
+        check("find_order_by_message resolves the topic card back to the repair",
+              repairs.find_order_by_message(conn, "-100topic", 42) == order_id)
+        check("find_order_by_message resolves the masters-group card too",
+              repairs.find_order_by_message(conn, "-100masters", 43) == order_id)
+
+        check("no attachments yet", repairs.get_attachments(conn, order_id) == [])
+        attachment_id = repairs.add_attachment(conn, order_id, "42_abc123.jpg", "старая батарея", 1)
+        check("add_attachment returns a real row id", attachment_id > 0)
+
+        attachments = repairs.get_attachments(conn, order_id)
+        check("get_attachments returns the saved photo with its caption and who added it",
+              len(attachments) == 1 and attachments[0]["photo_path"] == "42_abc123.jpg"
+              and attachments[0]["caption"] == "старая батарея" and attachments[0]["staff_name"] == "Владелец")
+
+
 def _build_init_data(bot_token: str, user: dict, auth_date: int) -> str:
     data = {"auth_date": str(auth_date), "user": json.dumps(user, separators=(",", ":"))}
     check_string = "\n".join(f"{k}={v}" for k, v in sorted(data.items()))
@@ -873,6 +902,7 @@ def main() -> None:
         scenario_sales(db_path)
         scenario_repair_card_notify(db_path)
         scenario_repair_actions(db_path)
+        scenario_repair_attachments(db_path)
 
     scenario_timefmt()
     scenario_telegram_auth()

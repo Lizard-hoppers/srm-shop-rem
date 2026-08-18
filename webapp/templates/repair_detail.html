@@ -77,6 +77,21 @@
       </form>
     </div>
 
+    {% if attachments %}
+    <div class="panel-box" style="margin-top: 16px;">
+      <h3>📎 Вложения</h3>
+      <div style="display:flex; flex-wrap:wrap; gap:8px;">
+        {% for a in attachments %}
+        <a href="/static/repair_photos/{{ a.photo_path }}" target="_blank"
+           title="{{ a.staff_name or '—' }} · {{ a.created_at | kyiv }}{% if a.caption %} · {{ a.caption }}{% endif %}">
+          <img src="/static/repair_photos/{{ a.photo_path }}" alt="Вложение"
+               style="width:80px; height:80px; border-radius:8px; object-fit:cover;">
+        </a>
+        {% endfor %}
+      </div>
+    </div>
+    {% endif %}
+
     <div class="panel-box" style="margin-top: 16px;">
       <h3>История</h3>
       <ul class="timeline">

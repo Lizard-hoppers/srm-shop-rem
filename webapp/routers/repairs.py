@@ -86,6 +86,7 @@ def _detail_context(conn, order_id: int) -> dict:
         "repair": core_repairs.get_repair(conn, order_id),
         "history": core_repairs.get_status_history(conn, order_id),
         "parts": core_repairs.get_used_parts(conn, order_id),
+        "attachments": core_repairs.get_attachments(conn, order_id),
         "masters": core_auth.list_staff(conn),
         "products": core_inventory.list_products(conn),
         "cells": core_inventory.list_cells(conn),
