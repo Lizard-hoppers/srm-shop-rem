@@ -41,7 +41,13 @@
   </label>
   <p id="newProductScanStatus" class="meta" style="display:none;"></p>
   <label>Категория<input type="text" name="category"></label>
-  <label>Единица<input type="text" name="unit" value="шт"></label>
+  <label>Единица
+    <select name="unit">
+      {% for u in ["шт", "уп.", "компл.", "м", "пара"] %}
+      <option value="{{ u }}">{{ u }}</option>
+      {% endfor %}
+    </select>
+  </label>
   <label>Мин. остаток (сигнал дефицита)<input type="number" name="min_qty" placeholder="0"></label>
   <label>Цена продажи<input type="number" name="price"></label>
   <div class="checkbox-row">

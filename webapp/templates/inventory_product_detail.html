@@ -90,7 +90,17 @@
   </label>
   <p id="editProductScanStatus" class="meta" style="display:none;"></p>
   <label>Категория<input type="text" name="category" value="{{ product.category or '' }}"></label>
-  <label>Единица<input type="text" name="unit" value="{{ product.unit }}"></label>
+  <label>Единица
+    <select name="unit">
+      {% set standard_units = ["шт", "уп.", "компл.", "м", "пара"] %}
+      {% for u in standard_units %}
+      <option value="{{ u }}" {% if product.unit == u %}selected{% endif %}>{{ u }}</option>
+      {% endfor %}
+      {% if product.unit not in standard_units %}
+      <option value="{{ product.unit }}" selected>{{ product.unit }}</option>
+      {% endif %}
+    </select>
+  </label>
   <label>Мин. остаток (сигнал дефицита)<input type="number" name="min_qty" value="{{ product.min_qty }}"></label>
   <label>Цена продажи<input type="number" name="price" value="{{ product.price or '' }}"></label>
   <div class="checkbox-row">
