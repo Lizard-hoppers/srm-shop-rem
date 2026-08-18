@@ -37,7 +37,7 @@ CLIENT_WELCOME_BACK = "С возвращением! Вот ваша карта �
 CLIENT_REGISTERED = "Готово! Вот ваша карта скидок — покажите её в сервисе."
 
 
-@router.message(CommandStart())
+@router.message(CommandStart(), F.chat.type == "private")
 async def start(message: Message) -> None:
     with get_conn() as conn:
         staff = core_auth.get_staff_by_telegram_id(conn, message.from_user.id)
@@ -71,8 +71,14 @@ async def chat_id_cmd(message: Message) -> None:
     await message.answer(f"Chat ID: <code>{message.chat.id}</code>")
 
 
-@router.message(F.contact)
+@router.message(F.contact, F.chat.type == "private")
 async def got_contact(message: Message) -> None:
+    """Private-chat only — the bot is also a member of staff groups
+    ("Работа", "Мастера 007"), and without this filter, staff sharing a
+    *client's* contact card into a group topic (to note it for a repair,
+    say) made the bot reply there with the client-registration flow's
+    "share your own number" message, which makes no sense outside the
+    bot's own DM onboarding."""
     if not message.contact or message.contact.user_id != message.from_user.id:
         await message.answer("Пожалуйста, поделитесь своим собственным номером — кнопкой ниже.")
         return

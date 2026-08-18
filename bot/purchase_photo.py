@@ -54,8 +54,13 @@ def _draft_preview_text(items: list[dict]) -> str:
     return "\n".join(lines)
 
 
-@router.message(F.photo)
+@router.message(F.photo, F.chat.type == "private")
 async def photo_invoice(message: Message) -> None:
+    """Private-chat only, deliberately — the bot is also a member of the
+    "Работа" group (repair-card topics) and the "Мастера 007" group, and
+    without this filter it was treating every photo posted anywhere in
+    those groups (a client's contact card, a repair part for a client's
+    history, casual chat photos) as an invoice to OCR."""
     with get_conn() as conn:
         staff = core_auth.get_staff_by_telegram_id(conn, message.from_user.id)
     if not staff or staff["role"] not in _DRAFT_ROLES:
