@@ -7,7 +7,23 @@
 
 <div class="grid-2">
   <div>
-    <div class="panel-box">
+    <div class="panel-box" style="text-align: center;">
+      <img class="photo-preview" src="{{ '/static/device_photos/' ~ repair.device_photo_path if repair.device_photo_path else '' }}"
+           alt="{{ repair.device_type }}"
+           style="max-width: 240px; max-height: 240px; border-radius: 10px; object-fit: cover; {% if not repair.device_photo_path %}display:none;{% endif %}">
+      <p class="no-photo-text meta" {% if repair.device_photo_path %}style="display:none;"{% endif %}>Фото устройства ещё не добавлено.</p>
+      <form class="edit-form" style="margin-top: 10px;" data-photo-upload="/repairs/{{ repair.id }}/photo">
+        <label>{{ 'Заменить фото' if repair.device_photo_path else 'Добавить фото' }}
+          <input type="file" name="photo" accept="image/jpeg,image/png,image/webp" capture="environment" required>
+        </label>
+        <button type="submit">Загрузить</button>
+      </form>
+      <p class="photo-status meta" style="display:none;"></p>
+    </div>
+
+    <script src="/static/photo-upload.js?v={{ asset_version }}"></script>
+
+    <div class="panel-box" style="margin-top: 16px;">
       <h3>Клиент и устройство</h3>
       <p><a href="{{ link('/clients/' ~ repair.client_id) }}">{{ repair.client_name }}</a> · {% if repair.client_phone %}<a href="tel:{{ repair.client_phone }}">{{ repair.client_phone }}</a>{% else %}—{% endif %}</p>
       <p>{{ repair.device_type }} {{ repair.brand or '' }} {{ repair.model or '' }}</p>

@@ -223,6 +223,7 @@ def init_db(db_path: str = DB_PATH) -> None:
         _ensure_column(conn, "goods_receipt_items", "cell_id", "cell_id INTEGER REFERENCES storage_cells(id)")
         _ensure_column(conn, "sales_orders", "warranty_until", "warranty_until TEXT")
         _ensure_column(conn, "products", "photo_path", "photo_path TEXT")
+        _ensure_column(conn, "devices", "photo_path", "photo_path TEXT")
         device_catalog.seed(conn)
         conn.commit()
     finally:

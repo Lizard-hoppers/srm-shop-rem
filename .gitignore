@@ -9,3 +9,4 @@ venv/
 .env
 webapp/static/product_photos/
 webapp/static/repair_photos/
+webapp/static/device_photos/

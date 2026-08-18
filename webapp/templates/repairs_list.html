@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "_icons.html" as icons %}
 {% block title %}Ремонты{% endblock %}
 {% block content %}
 <div class="section-btns">
@@ -8,23 +9,26 @@
   {% endfor %}
 </div>
 
-<table class="table">
-  <thead><tr><th>Клиент</th><th>Устройство</th><th>Статус</th><th>Мастер</th><th>Канал</th><th>Создан</th></tr></thead>
-  <tbody>
-    {% for r in repairs %}
-    <tr onclick="location.href='{{ link('/repairs/' ~ r.id) }}'" class="clickable">
-      <td>{{ r.client_name }}</td>
-      <td>{{ r.device_type }} {{ r.brand or '' }} {{ r.model or '' }}</td>
-      <td><span class="pill pill-{{ r.status }}">{{ status_labels[r.status] }}</span></td>
-      <td>{{ r.master_name or '—' }}</td>
-      <td><span class="pill pill-{{ r.channel }}">{{ 'Онлайн' if r.channel == 'online' else 'Офлайн' }}</span></td>
-      <td>{{ r.created_at | kyiv }}</td>
-    </tr>
+<div class="cards">
+  {% for r in repairs %}
+  <a class="card thumb-card" href="{{ link('/repairs/' ~ r.id) }}">
+    {% if r.device_photo_path %}
+    <img class="thumb-card-photo" src="/static/device_photos/{{ r.device_photo_path }}" alt="{{ r.device_type }}">
     {% else %}
-    <tr><td colspan="6">Ремонтов пока нет.</td></tr>
-    {% endfor %}
-  </tbody>
-</table>
+    <div class="thumb-card-photo-placeholder">{{ icons.icon('box', 26) }}</div>
+    {% endif %}
+    <div class="thumb-card-name">{{ r.client_name }}</div>
+    <div class="thumb-card-meta">{{ r.device_type }} {{ r.brand or '' }} {{ r.model or '' }}</div>
+    <div class="thumb-card-meta">
+      <span class="pill pill-{{ r.status }}">{{ status_labels[r.status] }}</span>
+      <span class="pill pill-{{ r.channel }}">{{ 'Онлайн' if r.channel == 'online' else 'Офлайн' }}</span>
+    </div>
+    <div class="thumb-card-meta">{{ r.master_name or 'Мастер не назначен' }} · {{ r.created_at | kyiv }}</div>
+  </a>
+  {% else %}
+  <p class="meta">Ремонтов пока нет.</p>
+  {% endfor %}
+</div>
 
 <h2>Принять устройство в ремонт</h2>
 <form method="post" action="{{ link('/repairs') }}" class="edit-form">

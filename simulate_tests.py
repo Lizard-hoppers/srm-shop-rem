@@ -154,6 +154,12 @@ def scenario_repairs_pipeline(db_path: str) -> None:
         repair = repairs.get_repair(conn, order_id)
         check("repair created with status new", repair["status"] == "new")
 
+        check("a fresh device has no photo", repair["device_photo_path"] is None)
+        repairs.set_device_photo(conn, repair["device_id"], "1_abc123.jpg")
+        check("set_device_photo stores the filename", repairs.get_repair(conn, order_id)["device_photo_path"] == "1_abc123.jpg")
+        repairs.set_device_photo(conn, repair["device_id"], None)
+        check("set_device_photo(None) clears it", repairs.get_repair(conn, order_id)["device_photo_path"] is None)
+
         repairs.assign_master(conn, order_id, master_id)
         repair = repairs.get_repair(conn, order_id)
         check("master assigned", repair["master_id"] == master_id)
@@ -754,7 +760,7 @@ def scenario_webapp_forms(db_path: str) -> None:
         check("repairs page renders the device type datalist", 'id="deviceTypeList"' in resp.text)
         check("repairs page embeds a known seeded brand", '"Apple"' in resp.text)
 
-        client.post(f"/repairs?t={token}", data={
+        catalog_resp = client.post(f"/repairs?t={token}", data={
             "client_name": "Каталог Тест", "client_phone": "+380990002233",
             "device_type": "Экзотика", "brand": "НовыйБренд", "model": "СуперМодель X",
             "channel": "offline",
@@ -763,6 +769,49 @@ def scenario_webapp_forms(db_path: str) -> None:
             learned = device_catalog.list_all(conn)
         check("a brand-new device typed on intake is remembered in the catalog",
               any(r["brand"] == "НовыйБренд" and r["model"] == "СуперМодель X" for r in learned))
+
+        # Device photo upload mirrors the product-photo endpoint exactly
+        # (see 18.08 fix) — same size/type validation, same JSON shape, so
+        # the shared photo-upload.js works unchanged for repairs.
+        catalog_order_id = int(str(catalog_resp.url).split("/repairs/")[1].split("?")[0])
+
+        bad_device_photo_resp = client.post(
+            f"/repairs/{catalog_order_id}/photo?t={token}",
+            files={"photo": ("note.txt", b"not an image", "text/plain")},
+        )
+        check("uploading a non-image device photo is rejected with a friendly JSON error",
+              bad_device_photo_resp.status_code == 400 and bad_device_photo_resp.json()["ok"] is False)
+
+        oversized_device_resp = client.post(
+            f"/repairs/{catalog_order_id}/photo?t={token}",
+            files={"photo": ("huge.jpg", b"\xff\xd8\xff" + b"x" * (16 * 1024 * 1024), "image/jpeg")},
+        )
+        check("an oversized device photo is rejected with a friendly JSON error",
+              oversized_device_resp.status_code == 413 and oversized_device_resp.json()["ok"] is False)
+
+        good_device_photo_resp = client.post(
+            f"/repairs/{catalog_order_id}/photo?t={token}",
+            files={"photo": ("device.jpg", b"\xff\xd8\xff-fake-jpeg-bytes", "image/jpeg")},
+        )
+        good_device_photo_json = good_device_photo_resp.json()
+        with get_conn(db_path) as conn:
+            device_photo_path = repairs.get_repair(conn, catalog_order_id)["device_photo_path"]
+        check("uploading a valid device photo stores a photo_path",
+              good_device_photo_json["ok"] is True and bool(device_photo_path) and device_photo_path.endswith(".jpg"))
+        check("the JSON response's photo_url matches the stored device photo path",
+              device_photo_path in good_device_photo_json["photo_url"])
+
+        repair_card_resp = client.get(f"/repairs/{catalog_order_id}?t={token}")
+        check("the repair card now renders the uploaded device photo", device_photo_path in repair_card_resp.text)
+
+        repairs_list_resp = client.get(f"/repairs?t={token}")
+        check("the repairs list is now a card grid, not a table", 'class="cards"' in repairs_list_resp.text)
+
+        saved_device_photo_file = os.path.join("webapp", "static", "device_photos", device_photo_path or "")
+        check("the uploaded device photo file was actually written to disk",
+              device_photo_path is not None and os.path.exists(saved_device_photo_file))
+        if device_photo_path and os.path.exists(saved_device_photo_file):
+            os.remove(saved_device_photo_file)  # test hygiene — don't leave uploaded test images on disk
 
         # Sale warranty: staff picks the date themselves at checkout.
         client.post(f"/inventory/products?t={token}", data={"name": "Гарантийный товар", "sku": "WARR-1", "unit": "шт", "min_qty": "0"})

@@ -32,7 +32,8 @@ def list_repairs(
     conn: sqlite3.Connection, status: str | None = None, master_id: int | None = None
 ) -> list[sqlite3.Row]:
     query = """SELECT repair_orders.*, clients.name AS client_name, devices.device_type,
-                      devices.brand, devices.model, staff.name AS master_name
+                      devices.brand, devices.model, devices.photo_path AS device_photo_path,
+                      staff.name AS master_name
                FROM repair_orders
                JOIN clients ON clients.id = repair_orders.client_id
                JOIN devices ON devices.id = repair_orders.device_id
@@ -67,7 +68,8 @@ def get_repair(conn: sqlite3.Connection, order_id: int) -> sqlite3.Row | None:
     return conn.execute(
         """SELECT repair_orders.*, clients.name AS client_name, clients.phone AS client_phone,
                   devices.device_type, devices.brand, devices.model, devices.serial_number,
-                  devices.defect_description, staff.name AS master_name
+                  devices.defect_description, devices.photo_path AS device_photo_path,
+                  staff.name AS master_name
            FROM repair_orders
            JOIN clients ON clients.id = repair_orders.client_id
            JOIN devices ON devices.id = repair_orders.device_id
@@ -130,6 +132,10 @@ def update_status(conn: sqlite3.Connection, order_id: int, new_status: str, staf
 
 def assign_master(conn: sqlite3.Connection, order_id: int, master_id: int | None) -> None:
     conn.execute("UPDATE repair_orders SET master_id = ? WHERE id = ?", (master_id, order_id))
+
+
+def set_device_photo(conn: sqlite3.Connection, device_id: int, photo_filename: str | None) -> None:
+    conn.execute("UPDATE devices SET photo_path = ? WHERE id = ?", (photo_filename, device_id))
 
 
 def claim_repair(conn: sqlite3.Connection, order_id: int, staff_id: int) -> bool:

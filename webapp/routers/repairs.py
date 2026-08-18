@@ -1,7 +1,10 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Form, Request
-from fastapi.responses import RedirectResponse
+import os
+import uuid
+
+from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
+from fastapi.responses import JSONResponse, RedirectResponse
 
 from core import auth as core_auth
 from core import clients as core_clients
@@ -17,6 +20,10 @@ from webapp.templating import render
 router = APIRouter(prefix="/repairs")
 
 _REPAIR_WRITE_ROLES = ("owner", "admin", "master")
+
+_PHOTO_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", "device_photos")
+_PHOTO_EXT_BY_CONTENT_TYPE = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
+_MAX_PHOTO_BYTES = 15 * 1024 * 1024  # comfortably under nginx's client_max_body_size (20M)
 
 
 @router.get("")
@@ -118,6 +125,46 @@ def status_view(
         messages, core_repairs.render_card_text(repair), core_repairs.render_keyboard(order_id, repair["status"])
     )
     return RedirectResponse(link(request, f"/repairs/{order_id}"), status_code=303)
+
+
+@router.post("/{order_id}/photo")
+async def repair_photo_view(
+    order_id: int, photo: UploadFile = File(...),
+    staff=Depends(require_role(*_REPAIR_WRITE_ROLES)),
+):
+    """AJAX upload (see repair_detail.html), mirrors
+    inventory.product_photo_view exactly — same size/type validation and
+    JSON response shape, so the shared photo-upload.js works unchanged.
+    The photo lives on devices.photo_path (not repair_orders), since the
+    photo documents the device, not this particular repair pass."""
+    ext = _PHOTO_EXT_BY_CONTENT_TYPE.get(photo.content_type)
+    if not ext:
+        return JSONResponse({"ok": False, "error": "Фото должно быть JPEG, PNG или WebP."}, status_code=400)
+
+    data = await photo.read(_MAX_PHOTO_BYTES + 1)
+    if len(data) > _MAX_PHOTO_BYTES:
+        return JSONResponse({"ok": False, "error": "Фото слишком большое (максимум 15 МБ)."}, status_code=413)
+
+    with get_conn() as conn:
+        repair = core_repairs.get_repair(conn, order_id)
+        if not repair:
+            return JSONResponse({"ok": False, "error": "Ремонт не найден."}, status_code=404)
+        device_id = repair["device_id"]
+        old_photo_path = repair["device_photo_path"]
+
+    os.makedirs(_PHOTO_DIR, exist_ok=True)
+    filename = f"{device_id}_{uuid.uuid4().hex}{ext}"
+    with open(os.path.join(_PHOTO_DIR, filename), "wb") as f:
+        f.write(data)
+
+    with get_conn() as conn:
+        core_repairs.set_device_photo(conn, device_id, filename)
+    if old_photo_path:
+        old_path = os.path.join(_PHOTO_DIR, old_photo_path)
+        if os.path.exists(old_path):
+            os.remove(old_path)
+
+    return JSONResponse({"ok": True, "photo_url": f"/static/device_photos/{filename}"})
 
 
 @router.post("/{order_id}/assign")
