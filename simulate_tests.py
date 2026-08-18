@@ -790,6 +790,33 @@ def scenario_webapp_forms(db_path: str) -> None:
             renamed = conn.execute("SELECT name FROM products WHERE id = ?", (wproduct_id,)).fetchone()
         check("editing a product from its card updates the name", renamed["name"] == "Гарантийный товар PRO")
 
+        # "Добавить остаток" on the card — stock is per-cell (record_movement's
+        # ledger), not a bare number on the product, so there's no direct
+        # "set quantity" field; this is the same receive_stock() the full
+        # Приход/Склад→Движения forms use, just scoped to one product.
+        receive_resp = client.post(f"/inventory/products/{wproduct_id}/receive?t={token}", data={
+            "cell_id": str(wcell_id), "qty": "3",
+        })
+        with get_conn(db_path) as conn:
+            new_total = inventory.product_total_qty(conn, wproduct_id)
+        check("«Добавить остаток» increases stock via the normal record_movement ledger",
+              new_total == 7)  # 5 received + 1 sold earlier in this scenario, +3 here
+        check("«Добавить остаток» redirects back to the product's own card",
+              receive_resp.status_code == 200 and "Гарантийный товар PRO" in receive_resp.text)
+
+        missing_receive_resp = client.post(f"/inventory/products/{wproduct_id}/receive?t={token}", data={
+            "cell_id": "", "qty": "",
+        })
+        check("«Добавить остаток» with missing fields shows a friendly error, not a 500",
+              missing_receive_resp.status_code == 200 and "Выберите ячейку" in missing_receive_resp.text)
+
+        create_new_product_resp = client.post(f"/inventory/products?t={token}", data={
+            "name": "Свежесозданный товар", "unit": "шт", "min_qty": "0",
+        })
+        check("creating a product redirects straight to its own card, not the list",
+              create_new_product_resp.url.path.startswith("/inventory/products/")
+              and create_new_product_resp.url.path != "/inventory/products")
+
         # Photo upload is AJAX (JSON in/out) now, not a plain <form> POST —
         # a native-navigation upload just hangs blank in a WebView when the
         # request fails (e.g. nginx's client_max_body_size on a real phone

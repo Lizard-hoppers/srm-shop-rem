@@ -50,7 +50,7 @@ def products_create(
         return render(request, "inventory_products.html", staff=staff, products=rows, query=None, low_stock=None, error="Введите название товара.")
 
     with get_conn() as conn:
-        core_inventory.create_product(
+        product_id = core_inventory.create_product(
             conn,
             name=name.strip(),
             sku=sku.strip() or None,
@@ -61,7 +61,9 @@ def products_create(
             min_qty=optional_int(min_qty) or 0,
             price=optional_int(price),
         )
-    return RedirectResponse(link(request, "/inventory/products"), status_code=303)
+    # Straight to the new product's card — that's where stock actually
+    # gets added (Добавить остаток), not on this list page.
+    return RedirectResponse(link(request, f"/inventory/products/{product_id}"), status_code=303)
 
 
 @router.post("/products/scan-label")
@@ -91,7 +93,37 @@ def product_detail_view(request: Request, product_id: int, staff=Depends(require
         if not product:
             return RedirectResponse(link(request, "/inventory/products"), status_code=303)
         stock_by_cell = core_inventory.product_stock_by_cell(conn, product_id)
-    return render(request, "inventory_product_detail.html", staff=staff, product=product, stock_by_cell=stock_by_cell)
+        cells = core_inventory.list_cells(conn)
+    return render(
+        request, "inventory_product_detail.html", staff=staff,
+        product=product, stock_by_cell=stock_by_cell, cells=cells,
+    )
+
+
+@router.post("/products/{product_id}/receive")
+def product_receive_view(
+    request: Request, product_id: int, cell_id: str = Form(""), qty: str = Form(""),
+    staff=Depends(require_role(*_STOCK_WRITE_ROLES)),
+):
+    """"Добавить остаток" on the product card — the same
+    core.inventory.receive_stock() the full Приход/Склад→Движения forms
+    use, just scoped to this one product so setting initial/extra stock
+    doesn't require leaving the card. Stock is tracked per storage cell
+    (record_movement's ledger), not as a bare number on the product, so a
+    cell is required same as everywhere else stock gets adjusted."""
+    with get_conn() as conn:
+        cid, q = optional_int(cell_id), optional_int(qty)
+        if not cid or not q:
+            product = core_inventory.get_product(conn, product_id)
+            stock_by_cell = core_inventory.product_stock_by_cell(conn, product_id)
+            cells = core_inventory.list_cells(conn)
+            return render(
+                request, "inventory_product_detail.html", staff=staff,
+                product=product, stock_by_cell=stock_by_cell, cells=cells,
+                error="Выберите ячейку и укажите количество.",
+            )
+        core_inventory.receive_stock(conn, product_id, cid, q, staff["id"])
+    return RedirectResponse(link(request, f"/inventory/products/{product_id}"), status_code=303)
 
 
 @router.post("/products/{product_id}/edit")
@@ -112,9 +144,10 @@ def product_edit_view(
         if not name.strip():
             product = core_inventory.get_product(conn, product_id)
             stock_by_cell = core_inventory.product_stock_by_cell(conn, product_id)
+            cells = core_inventory.list_cells(conn)
             return render(
                 request, "inventory_product_detail.html", staff=staff, product=product,
-                stock_by_cell=stock_by_cell, error="Введите название товара.",
+                stock_by_cell=stock_by_cell, cells=cells, error="Введите название товара.",
             )
         core_inventory.update_product(
             conn, product_id,

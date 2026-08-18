@@ -77,6 +77,19 @@
   </tbody>
 </table>
 
+<form method="post" action="{{ link('/inventory/products/' ~ product.id ~ '/receive') }}" class="edit-form">
+  <label>Добавить остаток
+    <div style="display:flex; gap:6px;">
+      <select name="cell_id" style="flex:1;">
+        <option value="">— ячейка —</option>
+        {% for c in cells %}<option value="{{ c.id }}">{{ c.code }}</option>{% endfor %}
+      </select>
+      <input type="number" name="qty" placeholder="Кол-во" style="width:100px; flex:0 0 auto;">
+    </div>
+  </label>
+  <button type="submit" class="secondary">+ Добавить на склад</button>
+</form>
+
 <h2>Данные товара</h2>
 <form method="post" action="{{ link('/inventory/products/' ~ product.id ~ '/edit') }}" class="edit-form">
   <label>Название<input type="text" name="name" id="editProductName" value="{{ product.name }}" required></label>
@@ -91,15 +104,10 @@
   <p id="editProductScanStatus" class="meta" style="display:none;"></p>
   <label>Категория<input type="text" name="category" value="{{ product.category or '' }}"></label>
   <label>Единица
-    <select name="unit">
-      {% set standard_units = ["шт", "уп.", "компл.", "м", "пара"] %}
-      {% for u in standard_units %}
-      <option value="{{ u }}" {% if product.unit == u %}selected{% endif %}>{{ u }}</option>
-      {% endfor %}
-      {% if product.unit not in standard_units %}
-      <option value="{{ product.unit }}" selected>{{ product.unit }}</option>
-      {% endif %}
-    </select>
+    <input type="text" name="unit" list="unitList" value="{{ product.unit }}">
+    <datalist id="unitList">
+      <option value="шт"><option value="уп."><option value="компл."><option value="м"><option value="пара">
+    </datalist>
   </label>
   <label>Мин. остаток (сигнал дефицита)<input type="number" name="min_qty" value="{{ product.min_qty }}"></label>
   <label>Цена продажи<input type="number" name="price" value="{{ product.price or '' }}"></label>
