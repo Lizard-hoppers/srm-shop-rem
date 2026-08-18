@@ -69,6 +69,38 @@ def _send(
         return None
 
 
+def _send_photo(
+    chat_id: str | int | None, photo_bytes: bytes, filename: str, message_thread_id: str | int | None = None
+) -> int | None:
+    """Post a photo (uploaded directly, not by URL — Telegram's fetch-by-
+    URL path for sendPhoto turned out unreliable against our own domain,
+    rejecting a perfectly valid, publicly-fetchable JPEG with "wrong type
+    of the web page content"; a direct multipart upload has no such
+    dependency on Telegram being able to reach/like our server) to
+    `chat_id`, no caption. Never raises, same best-effort contract as
+    _send(). Not tracked in repair_order_messages: it's never edited
+    later, only the text card that follows it is."""
+    if not chat_id or not _BOT_TOKEN:
+        return None
+    data = {"chat_id": chat_id}
+    if message_thread_id:
+        data["message_thread_id"] = message_thread_id
+    try:
+        resp = httpx.post(
+            f"https://api.telegram.org/bot{_BOT_TOKEN}/sendPhoto",
+            data=data,
+            files={"photo": (filename, photo_bytes, "image/jpeg")},
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            logger.warning("staff photo notify failed: %s %s", resp.status_code, resp.text)
+            return None
+        return resp.json()["result"]["message_id"]
+    except httpx.HTTPError:
+        logger.warning("staff photo notify failed", exc_info=True)
+        return None
+
+
 def edit_message(chat_id: str | int, message_id: int, text: str, reply_markup: dict | None = None) -> bool:
     """Edit a previously sent message in place — used to reflect a status
     change (claimed / done) without spamming a new message per update.
@@ -105,12 +137,24 @@ def notify_staff_group(
     return _send(_STAFF_GROUP_CHAT_ID, text, message_thread_id=message_thread_id, reply_markup=reply_markup)
 
 
-def notify_repair_card(text: str, reply_markup: dict | None = None) -> list[tuple[str, int, str]]:
+def notify_repair_card(
+    text: str, reply_markup: dict | None = None, photo: tuple[bytes, str] | None = None
+) -> list[tuple[str, int, str]]:
     """Post a new-repair card everywhere staff expect to see one: the
     'Ремонт техники' topic in the main staff group, and the separate
     masters group. Returns a (chat_id, message_id, kind) tuple for every
     destination that actually sent, so the caller can persist them (see
-    core.repairs.save_order_messages) for later edits via sync_repair_cards."""
+    core.repairs.save_order_messages) for later edits via sync_repair_cards.
+
+    If photo (raw bytes, filename) is given — a device photo attached at
+    intake, see webapp.routers.repairs.create_view — it goes out first,
+    so the card never reaches staff incomplete with the photo trickling
+    in as an afterthought once someone happens to open the repair later."""
+    if photo:
+        photo_bytes, filename = photo
+        _send_photo(_STAFF_GROUP_CHAT_ID, photo_bytes, filename, message_thread_id=_REPAIR_TOPIC_ID)
+        _send_photo(_MASTERS_GROUP_CHAT_ID, photo_bytes, filename)
+
     sent: list[tuple[str, int, str]] = []
     topic_message_id = _send(_STAFF_GROUP_CHAT_ID, text, message_thread_id=_REPAIR_TOPIC_ID, reply_markup=reply_markup)
     if topic_message_id:

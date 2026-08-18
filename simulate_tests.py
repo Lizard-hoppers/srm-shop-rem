@@ -704,17 +704,53 @@ def scenario_webapp_forms(db_path: str) -> None:
     with TestClient(webapp.main.app) as client:
         # The exact bug: client_phone missing entirely from the POST body.
         resp = client.post(f"/repairs?t={token}", data={
-            "client_name": "Тест", "device_type": "Смартфон", "channel": "offline",
+            "client_name": "Тест", "device_type_0": "Смартфон", "channel": "offline",
         })
         check("missing client_phone: no raw 422", resp.status_code != 422)
-        check("missing client_phone: friendly error shown", "Заполните имя" in resp.text)
+        check("missing client_phone: friendly error shown", "Заполните имя и телефон клиента" in resp.text)
 
         # master_id/price_estimate submitted empty (exactly what an unset <select>/<input> sends).
         resp = client.post(f"/repairs?t={token}", data={
             "client_name": "Реальный Клиент", "client_phone": "+380501234567",
-            "device_type": "Ноутбук", "channel": "offline", "master_id": "", "price_estimate": "",
+            "device_type_0": "Ноутбук", "channel": "offline", "master_id": "", "price_estimate_0": "",
         })
         check("empty master_id/price_estimate: repair created (303)", resp.status_code == 303 or (resp.history and resp.history[0].status_code == 303))
+
+        # Multi-device intake: one client, two devices in the same visit
+        # ("+" Добавить ещё устройство) — each becomes its own repair order.
+        multi_resp = client.post(f"/repairs?t={token}", data={
+            "client_name": "Два Устройства", "client_phone": "+380501234599", "channel": "offline",
+            "device_count": "2",
+            "device_type_0": "Смартфон", "brand_0": "Apple", "model_0": "iPhone 11",
+            "device_type_1": "Ноутбук", "brand_1": "Dell", "model_1": "XPS 13",
+        })
+        check("multi-device intake redirects to a repair (303)",
+              multi_resp.status_code == 303 or (multi_resp.history and multi_resp.history[0].status_code == 303))
+        with get_conn(db_path) as conn:
+            two_device_client_id = conn.execute(
+                "SELECT id FROM clients WHERE phone = '+380501234599'"
+            ).fetchone()["id"]
+            two_device_repairs = repairs.list_repairs_by_client(conn, two_device_client_id)
+        check("both devices from one intake became separate repair orders", len(two_device_repairs) == 2)
+        check("both device types were recorded", {r["device_type"] for r in two_device_repairs} == {"Смартфон", "Ноутбук"})
+
+        # A device row with something filled in but no device_type is
+        # rejected rather than silently dropped or crashing.
+        incomplete_row_resp = client.post(f"/repairs?t={token}", data={
+            "client_name": "Неполная Строка", "client_phone": "+380501234588", "channel": "offline",
+            "device_count": "1", "brand_0": "Apple",
+        })
+        check("a device row with no device_type is rejected with a friendly error",
+              "Укажите тип устройства" in incomplete_row_resp.text)
+
+        # Submitting with every device row left blank is rejected too,
+        # not a silent no-op.
+        no_devices_resp = client.post(f"/repairs?t={token}", data={
+            "client_name": "Без Устройств", "client_phone": "+380501234577", "channel": "offline",
+            "device_count": "1",
+        })
+        check("submitting with no devices at all shows a friendly error",
+              "Добавьте хотя бы одно устройство" in no_devices_resp.text)
 
         resp = client.post(f"/clients?t={token}", data={"name": "", "phone": "+380501111111"})
         check("missing client name: no raw 422", resp.status_code != 422)
@@ -777,16 +813,49 @@ def scenario_webapp_forms(db_path: str) -> None:
         resp = client.get(f"/repairs?t={token}")
         check("repairs page renders the device type datalist", 'id="deviceTypeList"' in resp.text)
         check("repairs page embeds a known seeded brand", '"Apple"' in resp.text)
+        check("repairs intake form has the dynamic add-device button, not a fixed single device",
+              'id="addDeviceRowBtn"' in resp.text and 'repair-device-rows.js' in resp.text)
+        check("repairs intake form accepts a file upload (multipart, not urlencoded)",
+              'enctype="multipart/form-data"' in resp.text)
 
         catalog_resp = client.post(f"/repairs?t={token}", data={
             "client_name": "Каталог Тест", "client_phone": "+380990002233",
-            "device_type": "Экзотика", "brand": "НовыйБренд", "model": "СуперМодель X",
+            "device_type_0": "Экзотика", "brand_0": "НовыйБренд", "model_0": "СуперМодель X",
             "channel": "offline",
         })
         with get_conn(db_path) as conn:
             learned = device_catalog.list_all(conn)
         check("a brand-new device typed on intake is remembered in the catalog",
               any(r["brand"] == "НовыйБренд" and r["model"] == "СуперМодель X" for r in learned))
+
+        # Photo attached at intake time (a real <input type=file> on
+        # repairs_list.html, not the separate post-hoc /photo endpoint) —
+        # regression guard for 18.08: the photo used to only be addable
+        # AFTER the card had already gone out to the groups; it must now
+        # be on record from the moment the repair (and its card) exists.
+        intake_photo_resp = client.post(f"/repairs?t={token}", data={
+            "client_name": "С Фото На Приёме", "client_phone": "+380990002244",
+            "device_count": "1", "device_type_0": "Смартфон", "channel": "offline",
+        }, files={"photo_0": ("device.jpg", b"\xff\xd8\xff-fake-jpeg-bytes", "image/jpeg")})
+        intake_photo_order_id = int(str(intake_photo_resp.url).split("/repairs/")[1].split("?")[0])
+        with get_conn(db_path) as conn:
+            intake_photo_path = repairs.get_repair(conn, intake_photo_order_id)["device_photo_path"]
+        check("a photo attached on the intake form is on record immediately, not after a follow-up trip",
+              bool(intake_photo_path) and intake_photo_path.endswith(".jpg"))
+        intake_photo_file = os.path.join("webapp", "static", "device_photos", intake_photo_path or "")
+        check("the intake photo file was actually written to disk", os.path.exists(intake_photo_file))
+        if os.path.exists(intake_photo_file):
+            os.remove(intake_photo_file)
+
+        bad_intake_photo_resp = client.post(f"/repairs?t={token}", data={
+            "client_name": "Плохое Фото", "client_phone": "+380990002255",
+            "device_count": "1", "device_type_0": "Смартфон", "channel": "offline",
+        }, files={"photo_0": ("note.txt", b"not an image", "text/plain")})
+        check("an invalid photo on the intake form is rejected with a friendly error, no repair created",
+              "Фото устройства должно быть" in bad_intake_photo_resp.text)
+        with get_conn(db_path) as conn:
+            bad_photo_client = conn.execute("SELECT id FROM clients WHERE phone = '+380990002255'").fetchone()
+        check("rejecting the intake photo didn't leave a half-created client behind", bad_photo_client is None)
 
         # Device photo upload mirrors the product-photo endpoint exactly
         # (see 18.08 fix) — same size/type validation, same JSON shape, so
@@ -921,8 +990,8 @@ def scenario_webapp_forms(db_path: str) -> None:
         check("POST /repairs/scan-device rejects an oversized photo before ever calling OpenAI",
               oversized_device_scan_resp.status_code == 413 and oversized_device_scan_resp.json()["ok"] is False)
 
-        check("repairs intake page renders the device scan button", 'scan-fill-btn' in repairs_list_resp.text
-              and 'data-scan-endpoint="/repairs/scan-device"' in repairs_list_resp.text)
+        check("repairs intake page renders the device scan button", 'device-scan-btn' in repairs_list_resp.text
+              and 'repair-device-rows.js' in repairs_list_resp.text)
 
         # Product card (Склад → Товары → клик на товар): view, edit, photo.
         detail_resp = client.get(f"/inventory/products/{wproduct_id}?t={token}")

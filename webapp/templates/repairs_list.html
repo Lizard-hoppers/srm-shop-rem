@@ -31,32 +31,12 @@
 </div>
 
 <h2>Принять устройство в ремонт</h2>
-<form method="post" action="{{ link('/repairs') }}" class="edit-form">
+<datalist id="deviceTypeList">{% for t in device_types %}<option value="{{ t }}">{% endfor %}</datalist>
+<datalist id="deviceBrandList">{% for b in device_brands %}<option value="{{ b }}">{% endfor %}</datalist>
+
+<form method="post" action="{{ link('/repairs') }}" class="edit-form" enctype="multipart/form-data" id="repairIntakeForm">
   <label>Имя клиента<input type="text" name="client_name" required></label>
   <label>Телефон клиента<input type="text" name="client_phone" required></label>
-  <label>Тип устройства
-    <input type="text" name="device_type" id="deviceType" list="deviceTypeList" placeholder="Смартфон, ноутбук…" required>
-    <datalist id="deviceTypeList">{% for t in device_types %}<option value="{{ t }}">{% endfor %}</datalist>
-  </label>
-  <label>Бренд
-    <input type="text" name="brand" id="deviceBrand" list="deviceBrandList" placeholder="Apple, Samsung…">
-    <datalist id="deviceBrandList">{% for b in device_brands %}<option value="{{ b }}">{% endfor %}</datalist>
-  </label>
-  <label>Модель
-    <input type="text" name="model" id="deviceModel" list="deviceModelList" placeholder="Начните вводить бренд — появятся модели">
-    <datalist id="deviceModelList"></datalist>
-  </label>
-  <label>Серийный №/IMEI
-    <div style="display:flex; gap:6px;">
-      <input type="text" name="serial_number" id="deviceSerial" style="flex:1;">
-      <button type="button" class="secondary scan-fill-btn" style="flex:0 0 auto;"
-              data-scan-endpoint="/repairs/scan-device"
-              data-fields='{"device_type":"deviceType","brand":"deviceBrand","model":"deviceModel","serial_number":"deviceSerial"}'
-              data-status-target="deviceScanStatus">📷</button>
-    </div>
-  </label>
-  <p id="deviceScanStatus" class="meta" style="display:none;"></p>
-  <label>Описание неисправности<textarea name="defect_description"></textarea></label>
   <label>Канал
     <select name="channel">
       <option value="offline">Офлайн (в точке)</option>
@@ -69,33 +49,66 @@
       {% for m in masters %}<option value="{{ m.id }}">{{ m.name }}</option>{% endfor %}
     </select>
   </label>
-  <label>Оценка стоимости<input type="number" name="price_estimate"></label>
+
+  <input type="hidden" name="device_count" id="deviceCount" value="{{ device_rows | length }}">
+  <div id="deviceRows">
+    {% for i in device_rows %}
+    <div class="repair-device-row" style="display:flex; flex-direction:column; gap:12px; padding-top:12px; border-top: 1px solid var(--border);">
+      <label>Тип устройства
+        <input type="text" name="device_type_{{ i }}" class="device-type-input" list="deviceTypeList" placeholder="Смартфон, ноутбук…" required>
+      </label>
+      <label>Бренд
+        <input type="text" name="brand_{{ i }}" class="device-brand-input" list="deviceBrandList" placeholder="Apple, Samsung…">
+      </label>
+      <label>Модель
+        <input type="text" name="model_{{ i }}" class="device-model-input" list="deviceModelList_{{ i }}" placeholder="Начните вводить бренд — появятся модели">
+        <datalist id="deviceModelList_{{ i }}"></datalist>
+      </label>
+      <label>Серийный №/IMEI
+        <div style="display:flex; gap:6px;">
+          <input type="text" name="serial_number_{{ i }}" class="device-serial-input" style="flex:1;">
+          <button type="button" class="secondary device-scan-btn" style="flex:0 0 auto;">📷</button>
+        </div>
+      </label>
+      <div class="device-scan-status meta" style="display:none;"></div>
+      <label>Описание неисправности<textarea name="defect_description_{{ i }}"></textarea></label>
+      <label>Фото устройства (необязательно)<input type="file" name="photo_{{ i }}" accept="image/jpeg,image/png,image/webp" capture="environment"></label>
+      <label>Оценка стоимости<input type="number" name="price_estimate_{{ i }}"></label>
+    </div>
+    {% endfor %}
+  </div>
+  <button type="button" id="addDeviceRowBtn" class="secondary">+ Добавить ещё устройство</button>
+
   <button type="submit">Принять</button>
 </form>
 
+<template id="deviceRowTemplate">
+  <div class="repair-device-row" style="display:flex; flex-direction:column; gap:12px; padding-top:12px; border-top: 1px solid var(--border);">
+    <label>Тип устройства
+      <input type="text" name="device_type___IDX__" class="device-type-input" list="deviceTypeList" placeholder="Смартфон, ноутбук…">
+    </label>
+    <label>Бренд
+      <input type="text" name="brand___IDX__" class="device-brand-input" list="deviceBrandList" placeholder="Apple, Samsung…">
+    </label>
+    <label>Модель
+      <input type="text" name="model___IDX__" class="device-model-input" list="deviceModelList___IDX__" placeholder="Начните вводить бренд — появятся модели">
+      <datalist id="deviceModelList___IDX__"></datalist>
+    </label>
+    <label>Серийный №/IMEI
+      <div style="display:flex; gap:6px;">
+        <input type="text" name="serial_number___IDX__" class="device-serial-input" style="flex:1;">
+        <button type="button" class="secondary device-scan-btn" style="flex:0 0 auto;">📷</button>
+      </div>
+    </label>
+    <div class="device-scan-status meta" style="display:none;"></div>
+    <label>Описание неисправности<textarea name="defect_description___IDX__"></textarea></label>
+    <label>Фото устройства (необязательно)<input type="file" name="photo___IDX__" accept="image/jpeg,image/png,image/webp" capture="environment"></label>
+    <label>Оценка стоимости<input type="number" name="price_estimate___IDX__"></label>
+  </div>
+</template>
+
 <script>
-(function () {
-  var catalog = {{ device_catalog | tojson }};
-  var brandInput = document.getElementById("deviceBrand");
-  var modelList = document.getElementById("deviceModelList");
-
-  function refreshModels() {
-    var brand = brandInput.value.trim().toLowerCase();
-    var seen = {};
-    modelList.innerHTML = "";
-    catalog.forEach(function (row) {
-      if (brand && row.brand.toLowerCase() !== brand) return;
-      if (seen[row.model]) return;
-      seen[row.model] = true;
-      var opt = document.createElement("option");
-      opt.value = row.model;
-      modelList.appendChild(opt);
-    });
-  }
-
-  brandInput.addEventListener("input", refreshModels);
-  refreshModels();
-})();
+  window.REPAIR_DEVICE_CATALOG = {{ device_catalog | tojson }};
 </script>
-<script src="/static/scan-fill.js?v={{ asset_version }}"></script>
+<script src="/static/repair-device-rows.js?v={{ asset_version }}"></script>
 {% endblock %}

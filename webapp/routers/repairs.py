@@ -5,6 +5,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from fastapi.responses import JSONResponse, RedirectResponse
+from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from core import auth as core_auth
 from core import clients as core_clients
@@ -25,6 +26,39 @@ _REPAIR_WRITE_ROLES = ("owner", "admin", "master")
 _PHOTO_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", "device_photos")
 _PHOTO_EXT_BY_CONTENT_TYPE = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
 _MAX_PHOTO_BYTES = 15 * 1024 * 1024  # comfortably under nginx's client_max_body_size (20M)
+
+INITIAL_DEVICE_ROWS = 1
+
+
+def _write_device_photo(device_id: int, data: bytes, ext: str) -> str:
+    os.makedirs(_PHOTO_DIR, exist_ok=True)
+    filename = f"{device_id}_{uuid.uuid4().hex}{ext}"
+    with open(os.path.join(_PHOTO_DIR, filename), "wb") as f:
+        f.write(data)
+    return filename
+
+
+async def _validate_intake_photo(upload) -> tuple[bytes, str] | None:
+    """None if this device row's file input was left empty — perfectly
+    normal, a photo at intake is optional. Raises ValueError with a
+    user-facing message on a real but invalid upload (wrong type, too
+    big) so create_view can reject the whole submission before creating
+    anything, rather than silently dropping just that one photo."""
+    # request.form() (used here instead of typed File() params, so a
+    # dynamic device_count can drive how many photo_N fields exist) hands
+    # back Starlette's UploadFile, not fastapi.UploadFile — the two are
+    # unrelated classes in this FastAPI version, so isinstance must check
+    # against the Starlette one or every real upload silently reads as
+    # "no file chosen".
+    if not isinstance(upload, StarletteUploadFile) or not upload.filename:
+        return None
+    ext = _PHOTO_EXT_BY_CONTENT_TYPE.get(upload.content_type)
+    if not ext:
+        raise ValueError("Фото устройства должно быть JPEG, PNG или WebP.")
+    data = await upload.read(_MAX_PHOTO_BYTES + 1)
+    if len(data) > _MAX_PHOTO_BYTES:
+        raise ValueError("Фото устройства слишком большое (максимум 15 МБ).")
+    return data, ext
 
 
 @router.post("/scan-device")
@@ -63,50 +97,102 @@ def _list_context(conn, status: str | None) -> dict:
         "device_types": device_catalog.list_device_types(conn),
         "device_brands": device_catalog.list_brands(conn),
         "device_catalog": [dict(r) for r in device_catalog.list_all(conn)],
+        "device_rows": range(INITIAL_DEVICE_ROWS),
     }
 
 
 @router.post("")
-def create_view(
-    request: Request,
-    client_name: str = Form(""),
-    client_phone: str = Form(""),
-    device_type: str = Form(""),
-    brand: str = Form(""),
-    model: str = Form(""),
-    serial_number: str = Form(""),
-    defect_description: str = Form(""),
-    channel: str = Form("offline"),
-    master_id: str = Form(""),
-    price_estimate: str = Form(""),
-    staff=Depends(require_role(*_REPAIR_WRITE_ROLES)),
-):
-    # Required fields arrive as plain strings (not typed Form(...)) so a form
-    # submitted with one of them blank/missing never hits FastAPI's raw 422
-    # — it re-renders the same page with a plain-Russian error instead.
-    if not client_name.strip() or not client_phone.strip() or not device_type.strip():
+async def create_view(request: Request, staff=Depends(require_role(*_REPAIR_WRITE_ROLES))):
+    """One client can drop off several devices in the same visit —
+    "+ Добавить ещё устройство" on the intake form grows device_count
+    past INITIAL_DEVICE_ROWS, each row becoming its own repair order
+    (client/phone/channel/master shared, everything else per device).
+    Every field arrives as a plain form value (not typed Form(...)) so a
+    submission missing something never hits FastAPI's raw 422 — it
+    re-renders the same page with a plain-Russian error instead."""
+    form = await request.form()
+    client_name = (form.get("client_name") or "").strip()
+    client_phone = (form.get("client_phone") or "").strip()
+    channel = form.get("channel") or "offline"
+    master_id = form.get("master_id") or ""
+    device_count = int(form.get("device_count") or INITIAL_DEVICE_ROWS)
+
+    if not client_name or not client_phone:
         with get_conn() as conn:
             ctx = _list_context(conn, None)
-        return render(
-            request, "repairs_list.html", staff=staff, error="Заполните имя, телефон клиента и тип устройства.", **ctx
-        )
+        return render(request, "repairs_list.html", staff=staff, error="Заполните имя и телефон клиента.", **ctx)
 
+    devices = []
+    for i in range(device_count):
+        device_type = (form.get(f"device_type_{i}") or "").strip()
+        brand = (form.get(f"brand_{i}") or "").strip()
+        model = (form.get(f"model_{i}") or "").strip()
+        serial_number = (form.get(f"serial_number_{i}") or "").strip()
+        defect_description = (form.get(f"defect_description_{i}") or "").strip()
+        price_estimate = form.get(f"price_estimate_{i}") or ""
+
+        if not any((device_type, brand, model, serial_number, defect_description)):
+            continue  # untouched row past the first one — sparse rows are fine
+
+        if not device_type:
+            with get_conn() as conn:
+                ctx = _list_context(conn, None)
+            return render(
+                request, "repairs_list.html", staff=staff,
+                error=f"Укажите тип устройства для каждого добавленного устройства (устройство {i + 1}).", **ctx,
+            )
+
+        try:
+            photo = await _validate_intake_photo(form.get(f"photo_{i}"))
+        except ValueError as exc:
+            with get_conn() as conn:
+                ctx = _list_context(conn, None)
+            return render(request, "repairs_list.html", staff=staff, error=str(exc), **ctx)
+
+        devices.append({
+            "device_type": device_type, "brand": brand or None, "model": model or None,
+            "serial_number": serial_number or None, "defect_description": defect_description or None,
+            "price_estimate": optional_int(price_estimate), "photo": photo,
+        })
+
+    if not devices:
+        with get_conn() as conn:
+            ctx = _list_context(conn, None)
+        return render(request, "repairs_list.html", staff=staff, error="Добавьте хотя бы одно устройство.", **ctx)
+
+    last_order_id = None
     with get_conn() as conn:
         client_id = core_clients.get_or_create_by_phone(conn, client_name, client_phone, source=channel)
-        order_id = core_repairs.create_repair(
-            conn, client_id, device_type.strip(), brand.strip() or None, model.strip() or None,
-            serial_number.strip() or None, defect_description.strip() or None, channel,
-            optional_int(master_id), optional_int(price_estimate), staff["id"],
-        )
-        device_catalog.remember(conn, device_type, brand, model)
-        repair = core_repairs.get_repair(conn, order_id)
+        for device in devices:
+            order_id = core_repairs.create_repair(
+                conn, client_id, device["device_type"], device["brand"], device["model"],
+                device["serial_number"], device["defect_description"], channel,
+                optional_int(master_id), device["price_estimate"], staff["id"],
+            )
+            device_catalog.remember(conn, device["device_type"], device["brand"], device["model"])
 
-    keyboard = core_repairs.render_keyboard(order_id, repair["status"])
-    sent = core_notify.notify_repair_card(core_repairs.render_card_text(repair), reply_markup=keyboard)
-    if sent:
-        with get_conn() as conn:
-            core_repairs.save_order_messages(conn, order_id, sent)
-    return RedirectResponse(link(request, f"/repairs/{order_id}"), status_code=303)
+            photo_for_notify = None
+            if device["photo"]:
+                data, ext = device["photo"]
+                repair = core_repairs.get_repair(conn, order_id)
+                filename = _write_device_photo(repair["device_id"], data, ext)
+                core_repairs.set_device_photo(conn, repair["device_id"], filename)
+                photo_for_notify = (data, filename)
+
+            # The card only goes out once its device is fully on record —
+            # photo included, if there is one — never text-first with the
+            # photo trickling in later via a separate trip to the card.
+            repair = core_repairs.get_repair(conn, order_id)
+            keyboard = core_repairs.render_keyboard(order_id, repair["status"])
+            sent = core_notify.notify_repair_card(
+                core_repairs.render_card_text(repair), reply_markup=keyboard, photo=photo_for_notify
+            )
+            if sent:
+                core_repairs.save_order_messages(conn, order_id, sent)
+
+            last_order_id = order_id
+
+    return RedirectResponse(link(request, f"/repairs/{last_order_id}"), status_code=303)
 
 
 def _detail_context(conn, order_id: int) -> dict:
@@ -173,10 +259,7 @@ async def repair_photo_view(
         device_id = repair["device_id"]
         old_photo_path = repair["device_photo_path"]
 
-    os.makedirs(_PHOTO_DIR, exist_ok=True)
-    filename = f"{device_id}_{uuid.uuid4().hex}{ext}"
-    with open(os.path.join(_PHOTO_DIR, filename), "wb") as f:
-        f.write(data)
+    filename = _write_device_photo(device_id, data, ext)
 
     with get_conn() as conn:
         core_repairs.set_device_photo(conn, device_id, filename)
