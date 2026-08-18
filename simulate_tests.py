@@ -754,6 +754,10 @@ def scenario_webapp_forms(db_path: str) -> None:
         resp = client.get(f"/clients/find?t={token}&code=garbage-not-a-code")
         check("scanning an unknown code: no raw error, friendly message", resp.status_code != 422 and "не распознан" in resp.text)
 
+        clients_list_resp = client.get(f"/clients?t={token}")
+        check("the clients list is now a card grid, not a table", 'class="cards"' in clients_list_resp.text)
+        check("a client's card links to their detail page", f"/clients/{client_id}" in clients_list_resp.text)
+
         # Device catalog autocomplete: seeded suggestions render, and a
         # brand-new device typed on intake gets remembered for next time.
         resp = client.get(f"/repairs?t={token}")

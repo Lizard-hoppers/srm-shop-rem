@@ -14,21 +14,21 @@
   <button type="submit">Найти</button>
 </form>
 
-<table class="table">
-  <thead><tr><th>Имя</th><th>Телефон</th><th>Источник</th><th>Добавлен</th></tr></thead>
-  <tbody>
-    {% for c in clients %}
-    <tr onclick="location.href='{{ link('/clients/' ~ c.id) }}'" class="clickable">
-      <td>{{ c.name }}</td>
-      <td>{% if c.phone %}<a href="tel:{{ c.phone }}" onclick="event.stopPropagation()">{{ c.phone }}</a>{% else %}—{% endif %}</td>
-      <td>{{ 'Онлайн' if c.source == 'online' else 'Офлайн' }}</td>
-      <td>{{ c.created_at | kyiv }}</td>
-    </tr>
-    {% else %}
-    <tr><td colspan="4">Клиентов пока нет.</td></tr>
-    {% endfor %}
-  </tbody>
-</table>
+<div class="cards">
+  {% for c in clients %}
+  <a class="card thumb-card" href="{{ link('/clients/' ~ c.id) }}">
+    <div class="thumb-card-photo-placeholder">{{ icons.icon('users', 26) }}</div>
+    <div class="thumb-card-name">{{ c.name }}</div>
+    <div class="thumb-card-meta">{{ c.phone or 'Без телефона' }}</div>
+    <div class="thumb-card-meta">
+      <span class="pill pill-{{ c.source }}">{{ 'Онлайн' if c.source == 'online' else 'Офлайн' }}</span>
+    </div>
+    <div class="thumb-card-meta">В базе с {{ c.created_at | kyiv }}</div>
+  </a>
+  {% else %}
+  <p class="meta">Клиентов пока нет.</p>
+  {% endfor %}
+</div>
 
 <h2>Добавить клиента</h2>
 <form method="post" action="{{ link('/clients') }}" class="inline-form">
