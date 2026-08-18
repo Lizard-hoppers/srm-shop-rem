@@ -75,7 +75,7 @@ def create_view(
         device_catalog.remember(conn, device_type, brand, model)
         repair = core_repairs.get_repair(conn, order_id)
 
-    core_notify.notify_staff_group(_repair_card_text(repair))
+    core_notify.notify_repair_card(_repair_card_text(repair))
     return RedirectResponse(link(request, f"/repairs/{order_id}"), status_code=303)
 
 

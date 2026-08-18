@@ -321,10 +321,10 @@ def scenario_repair_card_notify(db_path: str) -> None:
     # No CRM_STAFF_GROUP_CHAT_ID in the test env — must no-op, never raise.
     raised = False
     try:
-        notify.notify_staff_group("test")
+        notify.notify_repair_card("test")
     except Exception:
         raised = True
-    check("notify_staff_group is a silent no-op when unconfigured", not raised)
+    check("notify_repair_card is a silent no-op when unconfigured", not raised)
 
 
 def _build_init_data(bot_token: str, user: dict, auth_date: int) -> str:
