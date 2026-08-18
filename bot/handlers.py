@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from aiogram import F, Router
-from aiogram.filters import CommandStart
+from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     BufferedInputFile,
     InlineKeyboardButton,
@@ -60,6 +60,15 @@ async def start(message: Message) -> None:
         one_time_keyboard=True,
     )
     await message.answer(CLIENT_ASK_PHONE, reply_markup=keyboard)
+
+
+@router.message(Command("chatid"))
+async def chat_id_cmd(message: Message) -> None:
+    """Onboarding helper: add the bot to the staff group as admin, send this
+    there, and put the returned id into CRM_STAFF_GROUP_CHAT_ID in .env —
+    that's the chat new-repair cards get posted to. Commands reach the bot
+    in groups regardless of privacy mode, so no extra bot setup is needed."""
+    await message.answer(f"Chat ID: <code>{message.chat.id}</code>")
 
 
 @router.message(F.contact)

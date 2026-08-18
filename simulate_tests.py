@@ -298,6 +298,35 @@ def scenario_sales(db_path: str) -> None:
         check("warranty_until defaults to null when not given", sale2["warranty_until"] is None)
 
 
+def scenario_repair_card_notify(db_path: str) -> None:
+    print("scenario: repair staff-group card + notify")
+    from core import notify
+    from webapp.routers.repairs import _repair_card_text
+
+    with get_conn(db_path) as conn:
+        client_id = clients.get_or_create_by_phone(conn, "Карточка <script>", "+380990004455", source="offline")
+        order_id = repairs.create_repair(
+            conn, client_id, "Смартфон", "Apple", "iPhone 12", "SN123",
+            "Не <включается>", "offline", None, 500, 1,
+        )
+        repair = repairs.get_repair(conn, order_id)
+
+    text = _repair_card_text(repair)
+    check("repair card escapes HTML in client name", "&lt;script&gt;" in text and "<script>" not in text)
+    check("repair card escapes HTML in defect description", "&lt;включается&gt;" in text)
+    check("repair card shows the device line", "Смартфон Apple iPhone 12" in text)
+    check("repair card shows 'не назначен' when no master is assigned", "не назначен" in text)
+    check("repair card shows the order id", f"№{order_id}" in text)
+
+    # No CRM_STAFF_GROUP_CHAT_ID in the test env — must no-op, never raise.
+    raised = False
+    try:
+        notify.notify_staff_group("test")
+    except Exception:
+        raised = True
+    check("notify_staff_group is a silent no-op when unconfigured", not raised)
+
+
 def _build_init_data(bot_token: str, user: dict, auth_date: int) -> str:
     data = {"auth_date": str(auth_date), "user": json.dumps(user, separators=(",", ":"))}
     check_string = "\n".join(f"{k}={v}" for k, v in sorted(data.items()))
@@ -489,6 +518,7 @@ def main() -> None:
         scenario_device_catalog(db_path)
         scenario_purchases(db_path)
         scenario_sales(db_path)
+        scenario_repair_card_notify(db_path)
 
     scenario_timefmt()
     scenario_telegram_auth()

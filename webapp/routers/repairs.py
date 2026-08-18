@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import html
+
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import RedirectResponse
 
@@ -7,6 +9,7 @@ from core import auth as core_auth
 from core import clients as core_clients
 from core import device_catalog
 from core import inventory as core_inventory
+from core import notify as core_notify
 from core import repairs as core_repairs
 from core.inventory import InsufficientStockError
 from core.storage import get_conn
@@ -70,7 +73,36 @@ def create_view(
             optional_int(master_id), optional_int(price_estimate), staff["id"],
         )
         device_catalog.remember(conn, device_type, brand, model)
+        repair = core_repairs.get_repair(conn, order_id)
+
+    core_notify.notify_staff_group(_repair_card_text(repair))
     return RedirectResponse(link(request, f"/repairs/{order_id}"), status_code=303)
+
+
+def _repair_card_text(repair) -> str:
+    """HTML-formatted card for the staff group chat. User-supplied fields
+    are escaped — this goes out with parse_mode=HTML, and a device model or
+    defect description is free text a client or master can type anything
+    into (see the repairs_list.html device-catalog XSS fix — same class of
+    input, different sink)."""
+    device = " ".join(filter(None, [repair["device_type"], repair["brand"], repair["model"]]))
+    channel_label = "Онлайн" if repair["channel"] == "online" else "Офлайн"
+    master_label = html.escape(repair["master_name"]) if repair["master_name"] else "не назначен"
+    price_label = f"{repair['price_estimate']} грн" if repair["price_estimate"] else "не указана"
+
+    lines = [
+        f"🔧 <b>Новый ремонт №{repair['id']}</b>",
+        "",
+        f"Клиент: {html.escape(repair['client_name'])}",
+        f"Телефон: {html.escape(repair['client_phone'] or '—')}",
+        f"Устройство: {html.escape(device)}",
+    ]
+    if repair["defect_description"]:
+        lines.append(f"Неисправность: {html.escape(repair['defect_description'])}")
+    lines.append(f"Мастер: {master_label}")
+    lines.append(f"Оценка: {price_label}")
+    lines.append(f"Канал: {channel_label}")
+    return "\n".join(lines)
 
 
 def _detail_context(conn, order_id: int) -> dict:
