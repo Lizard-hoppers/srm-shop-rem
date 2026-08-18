@@ -51,8 +51,9 @@
   <label>SKU
     <div style="display:flex; gap:6px;">
       <input type="text" name="sku" id="editProductSku" value="{{ product.sku or '' }}" style="flex:1;">
-      <button type="button" class="secondary scan-label-btn" style="flex:0 0 auto;"
-              data-name-target="editProductName" data-sku-target="editProductSku"
+      <button type="button" class="secondary scan-fill-btn" style="flex:0 0 auto;"
+              data-scan-endpoint="/inventory/products/scan-label"
+              data-fields='{"name":"editProductName","sku":"editProductSku"}'
               data-status-target="editProductScanStatus">📷</button>
     </div>
   </label>
@@ -73,5 +74,6 @@
   <button type="submit">Сохранить</button>
 </form>
 
+<script src="/static/scan-fill.js?v={{ asset_version }}"></script>
 <script src="/static/product-scan.js?v={{ asset_version }}"></script>
 {% endblock %}

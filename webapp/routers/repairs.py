@@ -12,6 +12,7 @@ from core import device_catalog
 from core import inventory as core_inventory
 from core import notify as core_notify
 from core import repairs as core_repairs
+from core import vision_ocr
 from core.inventory import InsufficientStockError
 from core.storage import get_conn
 from webapp.deps import link, optional_int, require_role, require_staff
@@ -24,6 +25,26 @@ _REPAIR_WRITE_ROLES = ("owner", "admin", "master")
 _PHOTO_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", "device_photos")
 _PHOTO_EXT_BY_CONTENT_TYPE = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
 _MAX_PHOTO_BYTES = 15 * 1024 * 1024  # comfortably under nginx's client_max_body_size (20M)
+
+
+@router.post("/scan-device")
+async def scan_device_view(photo: UploadFile = File(...), staff=Depends(require_role(*_REPAIR_WRITE_ROLES))):
+    """Scan-to-fill button next to Серийный №/IMEI on the intake form
+    (repairs_list.html): photo of the device (box label, back-panel
+    engraving, or an "About phone" settings screen) -> OpenAI vision ->
+    best-effort device_type/brand/model/serial_number to fill in
+    client-side. No repair exists yet at this point — read-only, never
+    writes to the DB."""
+    photo_bytes = await photo.read(_MAX_PHOTO_BYTES + 1)
+    if len(photo_bytes) > _MAX_PHOTO_BYTES:
+        return JSONResponse({"ok": False, "error": "Фото слишком большое (максимум 15 МБ)."}, status_code=413)
+
+    try:
+        result = vision_ocr.extract_device_info(photo_bytes)
+    except vision_ocr.VisionOcrError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
+
+    return JSONResponse({"ok": True, **result})
 
 
 @router.get("")

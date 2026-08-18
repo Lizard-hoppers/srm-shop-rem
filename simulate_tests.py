@@ -857,6 +857,24 @@ def scenario_webapp_forms(db_path: str) -> None:
         check("POST /inventory/products/scan-label rejects an oversized photo before ever calling OpenAI",
               oversized_label_resp.status_code == 413 and oversized_label_resp.json()["ok"] is False)
 
+        # Scan-to-fill device-info button (repair intake, next to Серийный №/IMEI).
+        device_scan_resp = client.post(
+            f"/repairs/scan-device?t={token}",
+            files={"photo": ("device.jpg", b"fake-bytes", "image/jpeg")},
+        )
+        check("POST /repairs/scan-device without an API key returns a structured error, not a 500",
+              device_scan_resp.status_code == 502 and device_scan_resp.json()["ok"] is False)
+
+        oversized_device_scan_resp = client.post(
+            f"/repairs/scan-device?t={token}",
+            files={"photo": ("huge.jpg", b"x" * (16 * 1024 * 1024), "image/jpeg")},
+        )
+        check("POST /repairs/scan-device rejects an oversized photo before ever calling OpenAI",
+              oversized_device_scan_resp.status_code == 413 and oversized_device_scan_resp.json()["ok"] is False)
+
+        check("repairs intake page renders the device scan button", 'scan-fill-btn' in repairs_list_resp.text
+              and 'data-scan-endpoint="/repairs/scan-device"' in repairs_list_resp.text)
+
         # Product card (Склад → Товары → клик на товар): view, edit, photo.
         detail_resp = client.get(f"/inventory/products/{wproduct_id}?t={token}")
         check("product detail page renders", detail_resp.status_code == 200 and "Гарантийный товар" in detail_resp.text)

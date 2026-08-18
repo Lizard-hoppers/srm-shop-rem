@@ -46,7 +46,16 @@
     <input type="text" name="model" id="deviceModel" list="deviceModelList" placeholder="Начните вводить бренд — появятся модели">
     <datalist id="deviceModelList"></datalist>
   </label>
-  <label>Серийный №/IMEI<input type="text" name="serial_number"></label>
+  <label>Серийный №/IMEI
+    <div style="display:flex; gap:6px;">
+      <input type="text" name="serial_number" id="deviceSerial" style="flex:1;">
+      <button type="button" class="secondary scan-fill-btn" style="flex:0 0 auto;"
+              data-scan-endpoint="/repairs/scan-device"
+              data-fields='{"device_type":"deviceType","brand":"deviceBrand","model":"deviceModel","serial_number":"deviceSerial"}'
+              data-status-target="deviceScanStatus">📷</button>
+    </div>
+  </label>
+  <p id="deviceScanStatus" class="meta" style="display:none;"></p>
   <label>Описание неисправности<textarea name="defect_description"></textarea></label>
   <label>Канал
     <select name="channel">
@@ -88,4 +97,5 @@
   refreshModels();
 })();
 </script>
+<script src="/static/scan-fill.js?v={{ asset_version }}"></script>
 {% endblock %}

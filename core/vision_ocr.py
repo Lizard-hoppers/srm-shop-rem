@@ -41,6 +41,25 @@ _LABEL_PROMPT = (
 )
 
 
+_DEVICE_PROMPT = (
+    "На фото — устройство, которое сдают в ремонт (телефон, ноутбук, "
+    "планшет и т.п.). На фото может быть этикетка на коробке, гравировка "
+    "или наклейка на задней панели устройства, либо экран настроек "
+    "«Об устройстве»/«О телефоне». Определи по фото: тип устройства — "
+    "ОБЯЗАТЕЛЬНО на русском языке, с большой буквы, одно слово в "
+    "именительном падеже (например: Смартфон, Ноутбук, Планшет, "
+    "Наушники), бренд как он написан на устройстве латиницей (например: "
+    "Apple, Samsung, Xiaomi), модель (например: iPhone 13, Galaxy A54) и "
+    "серийный номер или IMEI (обычно длинная последовательность цифр "
+    "рядом с подписью IMEI, S/N или Serial Number — если на фото два "
+    "IMEI, возьми первый). Верни СТРОГО JSON вида "
+    '{"device_type": "..." или null, "brand": "..." или null, '
+    '"model": "..." или null, "serial_number": "..." или null}. Если '
+    "что-то из этого не видно на фото или читается нечётко — null, не "
+    "выдумывай значения."
+)
+
+
 class VisionOcrError(Exception):
     pass
 
@@ -119,4 +138,23 @@ def extract_product_label(photo_bytes: bytes) -> dict:
     return {
         "name": name.strip() if isinstance(name, str) and name.strip() else None,
         "sku": sku.strip() if isinstance(sku, str) and sku.strip() else None,
+    }
+
+
+def extract_device_info(photo_bytes: bytes) -> dict:
+    """Best-effort {"device_type", "brand", "model", "serial_number"} (any
+    may be None) from a photo of a device being taken in for repair — a
+    box label, back-panel engraving, or a Settings/'About phone' screen.
+    Used by the scan button next to Серийный №/IMEI on repair intake."""
+    data = _call_vision_json(_DEVICE_PROMPT, photo_bytes)
+
+    def _clean(key: str) -> str | None:
+        value = data.get(key)
+        return value.strip() if isinstance(value, str) and value.strip() else None
+
+    return {
+        "device_type": _clean("device_type"),
+        "brand": _clean("brand"),
+        "model": _clean("model"),
+        "serial_number": _clean("serial_number"),
     }
