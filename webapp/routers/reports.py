@@ -6,14 +6,14 @@ from core import inventory as core_inventory
 from core import reports as core_reports
 from core import repairs as core_repairs
 from core.storage import get_conn
-from webapp.deps import require_staff
+from webapp.deps import require_role
 from webapp.templating import render
 
 router = APIRouter(prefix="/reports")
 
 
 @router.get("")
-def reports_view(request: Request, staff=Depends(require_staff)):
+def reports_view(request: Request, staff=Depends(require_role("owner", "admin"))):
     with get_conn() as conn:
         by_status = core_reports.repairs_by_status(conn)
         by_master = core_reports.repairs_by_master(conn)

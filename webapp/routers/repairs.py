@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import RedirectResponse
 
@@ -12,10 +10,12 @@ from core import inventory as core_inventory
 from core import repairs as core_repairs
 from core.inventory import InsufficientStockError
 from core.storage import get_conn
-from webapp.deps import link, optional_int, require_staff
+from webapp.deps import link, optional_int, require_role, require_staff
 from webapp.templating import render
 
 router = APIRouter(prefix="/repairs")
+
+_REPAIR_WRITE_ROLES = ("owner", "admin", "master")
 
 
 @router.get("")
@@ -33,7 +33,7 @@ def _list_context(conn, status: str | None) -> dict:
         "statuses": core_repairs.STATUSES,
         "device_types": device_catalog.list_device_types(conn),
         "device_brands": device_catalog.list_brands(conn),
-        "device_catalog_json": json.dumps([dict(r) for r in device_catalog.list_all(conn)]),
+        "device_catalog": [dict(r) for r in device_catalog.list_all(conn)],
     }
 
 
@@ -50,7 +50,7 @@ def create_view(
     channel: str = Form("offline"),
     master_id: str = Form(""),
     price_estimate: str = Form(""),
-    staff=Depends(require_staff),
+    staff=Depends(require_role(*_REPAIR_WRITE_ROLES)),
 ):
     # Required fields arrive as plain strings (not typed Form(...)) so a form
     # submitted with one of them blank/missing never hits FastAPI's raw 422
@@ -97,7 +97,8 @@ def detail_view(request: Request, order_id: int, staff=Depends(require_staff)):
 
 @router.post("/{order_id}/status")
 def status_view(
-    request: Request, order_id: int, status: str = Form(...), comment: str = Form(""), staff=Depends(require_staff)
+    request: Request, order_id: int, status: str = Form(...), comment: str = Form(""),
+    staff=Depends(require_role(*_REPAIR_WRITE_ROLES)),
 ):
     with get_conn() as conn:
         core_repairs.update_status(conn, order_id, status, staff["id"], comment.strip() or None)
@@ -105,7 +106,10 @@ def status_view(
 
 
 @router.post("/{order_id}/assign")
-def assign_view(request: Request, order_id: int, master_id: str = Form(""), staff=Depends(require_staff)):
+def assign_view(
+    request: Request, order_id: int, master_id: str = Form(""),
+    staff=Depends(require_role(*_REPAIR_WRITE_ROLES)),
+):
     with get_conn() as conn:
         core_repairs.assign_master(conn, order_id, optional_int(master_id))
     return RedirectResponse(link(request, f"/repairs/{order_id}"), status_code=303)
@@ -115,7 +119,7 @@ def assign_view(request: Request, order_id: int, master_id: str = Form(""), staf
 def price_view(
     request: Request, order_id: int,
     price_estimate: str = Form(""), price_final: str = Form(""),
-    warranty_until: str = Form(""), staff=Depends(require_staff),
+    warranty_until: str = Form(""), staff=Depends(require_role(*_REPAIR_WRITE_ROLES)),
 ):
     with get_conn() as conn:
         core_repairs.set_price(conn, order_id, optional_int(price_estimate), optional_int(price_final))
@@ -127,7 +131,7 @@ def price_view(
 def add_part_view(
     request: Request, order_id: int,
     product_id: str = Form(""), cell_id: str = Form(""), qty: str = Form(""),
-    staff=Depends(require_staff),
+    staff=Depends(require_role(*_REPAIR_WRITE_ROLES)),
 ):
     with get_conn() as conn:
         pid, cid, q = optional_int(product_id), optional_int(cell_id), optional_int(qty)

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import HTTPException, Request
+from fastapi import Depends, HTTPException, Request
 
 from core import auth
 from core.session_token import read_token
@@ -32,6 +32,19 @@ def require_staff(request: Request):
     if not staff:
         raise HTTPException(status_code=303, headers={"Location": "/miniapp"})
     return staff
+
+
+def require_role(*roles: str):
+    """Like require_staff, but also rejects staff whose role isn't in `roles`.
+    Use on routes where the wrong role acting isn't just a UX mismatch but an
+    actual privilege boundary (financial reports, stock write-off/transfer)."""
+
+    def dependency(staff=Depends(require_staff)):
+        if staff["role"] not in roles:
+            raise HTTPException(status_code=403, detail="Недостаточно прав для этого действия.")
+        return staff
+
+    return dependency
 
 
 def link(request: Request, path: str) -> str:

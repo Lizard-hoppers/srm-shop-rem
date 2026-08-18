@@ -6,10 +6,12 @@ from fastapi.responses import RedirectResponse
 from core import inventory as core_inventory
 from core.inventory import InsufficientStockError
 from core.storage import get_conn
-from webapp.deps import link, optional_int, require_staff
+from webapp.deps import link, optional_int, require_role, require_staff
 from webapp.templating import render
 
 router = APIRouter(prefix="/inventory")
+
+_STOCK_WRITE_ROLES = ("owner", "admin", "storekeeper")
 
 
 @router.get("/products")
@@ -32,7 +34,7 @@ def products_create(
     price: str = Form(""),
     is_repair_part: bool = Form(False),
     is_sellable: bool = Form(False),
-    staff=Depends(require_staff),
+    staff=Depends(require_role(*_STOCK_WRITE_ROLES)),
 ):
     if not name.strip():
         with get_conn() as conn:
@@ -67,7 +69,7 @@ def cells_create(
     code: str = Form(""),
     zone: str = Form(""),
     note: str = Form(""),
-    staff=Depends(require_staff),
+    staff=Depends(require_role(*_STOCK_WRITE_ROLES)),
 ):
     if not code.strip():
         with get_conn() as conn:
@@ -101,7 +103,7 @@ def movements_receive(
     cell_id: str = Form(""),
     qty: str = Form(""),
     comment: str = Form(""),
-    staff=Depends(require_staff),
+    staff=Depends(require_role(*_STOCK_WRITE_ROLES)),
 ):
     with get_conn() as conn:
         pid, cid, q = optional_int(product_id), optional_int(cell_id), optional_int(qty)
@@ -119,7 +121,7 @@ def movements_writeoff(
     cell_id: str = Form(""),
     qty: str = Form(""),
     comment: str = Form(""),
-    staff=Depends(require_staff),
+    staff=Depends(require_role(*_STOCK_WRITE_ROLES)),
 ):
     with get_conn() as conn:
         pid, cid, q = optional_int(product_id), optional_int(cell_id), optional_int(qty)
@@ -141,7 +143,7 @@ def movements_transfer(
     from_cell_id: str = Form(""),
     to_cell_id: str = Form(""),
     qty: str = Form(""),
-    staff=Depends(require_staff),
+    staff=Depends(require_role(*_STOCK_WRITE_ROLES)),
 ):
     with get_conn() as conn:
         pid, fcid, tcid, q = optional_int(product_id), optional_int(from_cell_id), optional_int(to_cell_id), optional_int(qty)

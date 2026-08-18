@@ -36,7 +36,7 @@ def create_view(
 
     with get_conn() as conn:
         client_id = core_clients.create_client(
-            conn, name=name.strip(), phone=phone.strip() or None, notes=notes.strip() or None
+            conn, name=name.strip(), phone=core_clients.normalize_phone(phone) or None, notes=notes.strip() or None
         )
     return RedirectResponse(link(request, f"/clients/{client_id}"), status_code=303)
 
@@ -91,6 +91,6 @@ def edit_view(
                 repair_history=repair_history, sales_history=sales_history, error="Введите имя клиента.",
             )
         core_clients.update_client(
-            conn, client_id, name=name.strip(), phone=phone.strip() or None, notes=notes.strip() or None
+            conn, client_id, name=name.strip(), phone=core_clients.normalize_phone(phone) or None, notes=notes.strip() or None
         )
     return RedirectResponse(link(request, f"/clients/{client_id}"), status_code=303)

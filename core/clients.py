@@ -53,11 +53,23 @@ def get_client_devices(conn: sqlite3.Connection, client_id: int) -> list[sqlite3
 
 
 def normalize_phone(phone: str) -> str:
-    """+380501234567 and 380501234567 (how Telegram sends shared contacts,
-    no leading +) should match the same client — pick one canonical form."""
-    phone = phone.strip()
-    if phone and not phone.startswith("+") and phone.replace(" ", "").isdigit():
-        phone = "+" + phone
+    """Canonicalize to one form so the same person always matches the same
+    client record, whatever format the number arrived in:
+      +380501234567  already canonical
+      380501234567   how Telegram sends a shared contact, no leading +
+      0501234567     how staff type it at the counter (local format)
+    """
+    phone = phone.strip().replace(" ", "").replace("-", "")
+    if not phone:
+        return phone
+    if phone.startswith("+"):
+        return phone
+    if phone.startswith("380") and phone[3:].isdigit():
+        return "+" + phone
+    if phone.startswith("0") and phone.isdigit() and len(phone) == 10:
+        return "+380" + phone[1:]
+    if phone.isdigit():
+        return "+" + phone
     return phone
 
 

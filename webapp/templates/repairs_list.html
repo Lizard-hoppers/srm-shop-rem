@@ -62,7 +62,7 @@
 
 <script>
 (function () {
-  var catalog = {{ device_catalog_json | safe }};
+  var catalog = {{ device_catalog | tojson }};
   var brandInput = document.getElementById("deviceBrand");
   var modelList = document.getElementById("deviceModelList");
 
