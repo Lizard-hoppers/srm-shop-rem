@@ -845,6 +845,37 @@ def scenario_webapp_forms(db_path: str) -> None:
         })
         check("sale with warranty page shows the chosen date in дд.мм.гггг format", "17.08.2027" in sale_resp.text)
 
+        # Продажи: "+" dynamic rows (regression guard for 18.08 — checkout
+        # used to hard-cap at 3 positions), product search by name/SKU (not
+        # a <select>), and a sale can never invent a product that isn't in
+        # the catalog the way Приход invents new stock items.
+        sales_list_resp = client.get(f"/sales?t={token}")
+        check("sales page renders the dynamic add-row button, not a fixed 3-slot form",
+              'id="addSaleRowBtn"' in sales_list_resp.text and 'sale-rows.js' in sales_list_resp.text)
+
+        beyond_cap_resp = client.post(f"/sales?t={token}", data={
+            "channel": "offline", "row_count": "4",
+            "product_id_0": str(wproduct_id), "qty_0": "1", "price_0": "1000",
+            "product_id_3": str(wproduct_id), "qty_3": "1", "price_3": "1000",
+        })
+        check("a 4th row (past the old hardcoded 3-row cap) is still processed",
+              beyond_cap_resp.status_code == 303 or (beyond_cap_resp.history and beyond_cap_resp.history[0].status_code == 303))
+        with get_conn(db_path) as conn:
+            beyond_cap_order_id = int(str(beyond_cap_resp.url).split("/sales/")[1].split("?")[0])
+            beyond_cap_items = sales.get_sale_items(conn, beyond_cap_order_id)
+        check("both rows (0 and 3) landed as separate sale items", len(beyond_cap_items) == 2)
+
+        unresolved_resp = client.post(f"/sales?t={token}", data={
+            "channel": "offline",
+            "product_name_0": "Товар которого нет в базе", "qty_0": "1", "price_0": "500",
+        })
+        check("a typed name that never resolved to a real product is rejected with a friendly error, not sold blind",
+              "Не найден в каталоге" in unresolved_resp.text)
+
+        empty_resp = client.post(f"/sales?t={token}", data={"channel": "offline"})
+        check("submitting the checkout with no items shows a friendly error, not a silent no-op",
+              "Добавьте хотя бы один товар" in empty_resp.text)
+
         # In-app camera scan (purchases_list.html "📷 Сканировать накладную"):
         # no OPENAI_API_KEY in the test env, so this must degrade to a
         # structured JSON error rather than a raw 500 — same contract as
@@ -914,7 +945,7 @@ def scenario_webapp_forms(db_path: str) -> None:
         with get_conn(db_path) as conn:
             new_total = inventory.product_total_qty(conn, wproduct_id)
         check("«Добавить остаток» increases stock via the normal record_movement ledger",
-              new_total == 7)  # 5 received + 1 sold earlier in this scenario, +3 here
+              new_total == 5)  # 5 received + 3 sold earlier in this scenario (1 warranty sale + 2 "+"-row sale), +3 here
         check("«Добавить остаток» redirects back to the product's own card",
               receive_resp.status_code == 200 and "Гарантийный товар PRO" in receive_resp.text)
 

@@ -22,9 +22,24 @@
 </table>
 
 <h2>Новая продажа</h2>
-<form method="post" action="{{ link('/sales') }}" class="edit-form">
-  <label>Имя клиента (необязательно)<input type="text" name="client_name"></label>
-  <label>Телефон клиента (необязательно)<input type="text" name="client_phone"></label>
+<form method="post" action="{{ link('/sales') }}" class="edit-form" id="saleForm">
+  <datalist id="saleProductList"></datalist>
+  <input type="hidden" name="row_count" id="saleRowCount" value="{{ item_rows | length }}">
+  <div id="saleRows">
+    {% for i in item_rows %}
+    <div class="sale-row" style="display:flex; gap:6px; flex-wrap:wrap; align-items:center; padding-top:8px; border-top: 1px solid var(--border);">
+      <input type="text" class="product-search" list="saleProductList" name="product_name_{{ i }}"
+             placeholder="Товар — название или SKU" style="flex:2;">
+      <input type="hidden" class="product-id-input" name="product_id_{{ i }}">
+      <button type="button" class="secondary sale-scan-btn" style="flex:0 0 auto;">📷</button>
+      <input type="number" name="qty_{{ i }}" placeholder="Кол-во" style="width:80px;">
+      <input type="number" name="price_{{ i }}" placeholder="Цена за шт" style="width:110px;">
+      <div class="sale-row-hint meta" style="display:none; flex-basis:100%;"></div>
+    </div>
+    {% endfor %}
+  </div>
+  <button type="button" id="addSaleRowBtn" class="secondary">+ Добавить позицию</button>
+
   <label>Канал
     <select name="channel">
       <option value="offline">Офлайн (в точке)</option>
@@ -33,16 +48,28 @@
   </label>
   <label>Гарантия до (необязательно)<input type="date" name="warranty_until"></label>
 
-  {% for i in item_rows %}
-  <div style="display:flex; gap:6px; flex-wrap:wrap; padding-top:8px; border-top: 1px solid var(--border);">
-    <select name="product_id_{{ i }}" style="flex:2;">
-      <option value="">— товар —</option>
-      {% for p in products %}<option value="{{ p.id }}">{{ p.name }} {% if p.price %}({{ p.price }}){% endif %}</option>{% endfor %}
-    </select>
-    <input type="number" name="qty_{{ i }}" placeholder="Кол-во" style="width:80px;">
-    <input type="number" name="price_{{ i }}" placeholder="Цена за шт" style="width:110px;">
-  </div>
-  {% endfor %}
+  <h3>Контакты клиента (необязательно)</h3>
+  <label>Имя клиента<input type="text" name="client_name"></label>
+  <label>Телефон клиента<input type="text" name="client_phone"></label>
+
   <button type="submit">Оформить продажу</button>
 </form>
+
+<template id="saleRowTemplate">
+  <div class="sale-row" style="display:flex; gap:6px; flex-wrap:wrap; align-items:center; padding-top:8px; border-top: 1px solid var(--border);">
+    <input type="text" class="product-search" list="saleProductList" name="product_name___IDX__"
+           placeholder="Товар — название или SKU" style="flex:2;">
+    <input type="hidden" class="product-id-input" name="product_id___IDX__">
+    <button type="button" class="secondary sale-scan-btn" style="flex:0 0 auto;">📷</button>
+    <input type="number" name="qty___IDX__" placeholder="Кол-во" style="width:80px;">
+    <input type="number" name="price___IDX__" placeholder="Цена за шт" style="width:110px;">
+    <div class="sale-row-hint meta" style="display:none; flex-basis:100%;"></div>
+  </div>
+</template>
+
+<script>
+  window.SALE_PRODUCTS = {{ products_for_picker | tojson }};
+  window.SALE_DEFAULT_PRICE_BY_PRODUCT = {{ default_price_by_product | tojson }};
+</script>
+<script src="/static/sale-rows.js?v={{ asset_version }}"></script>
 {% endblock %}
