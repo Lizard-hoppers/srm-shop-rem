@@ -1,8 +1,9 @@
 /* Shared row-management JS for the goods-receipt intake form
    (purchases_list.html) and the photo-draft review page
-   (purchase_draft.html) — same product picker / dynamic rows / paste
-   logic on both, driven by a few globals the page sets before including
-   this script:
+   (purchase_draft.html) — same product picker / dynamic rows / paste /
+   in-app camera-scan logic on both (scan/parse buttons only wire up if
+   their elements exist on the page — purchase_draft.html has neither),
+   driven by a few globals the page sets before including this script:
      window.PURCHASE_PRODUCTS       [{id, label}, ...]
      window.PURCHASE_DEFAULT_CELLS  {product_id: cell_id, ...}
      window.PURCHASE_INITIAL_ROWS   optional [{product_id, name_guess, qty, unit_cost}, ...]
@@ -79,6 +80,13 @@
     resolveRow(search);
   }
 
+  function renderParsedRows(parsedRows) {
+    rowsContainer.innerHTML = "";
+    nextIndex = 0;
+    parsedRows.forEach(function (row) { fillRow(addRow(), row); });
+    if (!parsedRows.length) addRow();
+  }
+
   var parseBtn = document.getElementById("parseInvoiceBtn");
   if (parseBtn) {
     parseBtn.addEventListener("click", function () {
@@ -90,12 +98,44 @@
         body: JSON.stringify({ text: text }),
       })
         .then(function (r) { return r.json(); })
+        .then(function (data) { renderParsedRows((data && data.rows) || []); });
+    });
+  }
+
+  var scanBtn = document.getElementById("scanInvoiceBtn");
+  var photoInput = document.getElementById("invoicePhotoInput");
+  var scanStatus = document.getElementById("scanStatus");
+  if (scanBtn && photoInput) {
+    scanBtn.addEventListener("click", function () { photoInput.click(); });
+    photoInput.addEventListener("change", function () {
+      var file = photoInput.files[0];
+      if (!file) return;
+      scanBtn.disabled = true;
+      if (scanStatus) {
+        scanStatus.style.display = "block";
+        scanStatus.textContent = "📷 Распознаю накладную…";
+      }
+      var formData = new FormData();
+      formData.append("photo", file);
+      fetch(window.location.pathname + "/scan" + window.location.search, {
+        method: "POST",
+        body: formData,
+      })
+        .then(function (r) { return r.json(); })
         .then(function (data) {
-          var parsedRows = (data && data.rows) || [];
-          rowsContainer.innerHTML = "";
-          nextIndex = 0;
-          parsedRows.forEach(function (row) { fillRow(addRow(), row); });
-          if (!parsedRows.length) addRow();
+          if (data && data.error) {
+            if (scanStatus) scanStatus.textContent = "⚠️ " + data.error;
+            return;
+          }
+          if (scanStatus) scanStatus.style.display = "none";
+          renderParsedRows((data && data.rows) || []);
+        })
+        .catch(function () {
+          if (scanStatus) scanStatus.textContent = "⚠️ Не удалось отправить фото.";
+        })
+        .finally(function () {
+          scanBtn.disabled = false;
+          photoInput.value = "";
         });
     });
   }

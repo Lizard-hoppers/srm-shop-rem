@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Form, Request
+from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from fastapi.responses import JSONResponse, RedirectResponse
 
 from core import inventory as core_inventory
 from core import purchase_import as core_purchase_import
 from core import purchases as core_purchases
+from core import vision_ocr
 from core.storage import get_conn
 from webapp.deps import link, require_role
 from webapp.templating import render
@@ -113,6 +114,28 @@ async def parse_invoice_view(request: Request, staff=Depends(require_role(*_PURC
     body = await request.json()
     with get_conn() as conn:
         rows = core_purchase_import.parse_invoice_text(conn, body.get("text", ""))
+    return JSONResponse({"rows": rows})
+
+
+@router.post("/scan")
+async def scan_invoice_view(
+    photo: UploadFile = File(...), staff=Depends(require_role(*_PURCHASE_ROLES)),
+):
+    """Photo taken right in the Mini App (camera capture on the intake
+    form, purchases_list.html) -> OpenAI vision -> matched draft rows, the
+    same JSON shape /purchases/parse returns so the frontend reuses the
+    exact same row-rendering code. No purchase_drafts row here — unlike
+    the bot DM flow (bot/purchase_photo.py), this happens synchronously on
+    the page the staff member is already reviewing/submitting, so there's
+    nothing to persist for later. Read-only: never writes to the DB."""
+    photo_bytes = await photo.read()
+    try:
+        raw_items = vision_ocr.extract_invoice_items(photo_bytes)
+    except vision_ocr.VisionOcrError as exc:
+        return JSONResponse({"rows": [], "error": str(exc)}, status_code=502)
+
+    with get_conn() as conn:
+        rows = core_purchase_import.match_items(conn, raw_items)
     return JSONResponse({"rows": rows})
 
 

@@ -706,6 +706,14 @@ def scenario_webapp_forms(db_path: str) -> None:
         })
         check("sale with warranty page shows the chosen date in дд.мм.гггг format", "17.08.2027" in sale_resp.text)
 
+        # In-app camera scan (purchases_list.html "📷 Сканировать накладную"):
+        # no OPENAI_API_KEY in the test env, so this must degrade to a
+        # structured JSON error rather than a raw 500 — same contract as
+        # every other "external dependency unavailable" path in this app.
+        scan_resp = client.post(f"/purchases/scan?t={token}", files={"photo": ("invoice.jpg", b"fake-bytes", "image/jpeg")})
+        check("POST /purchases/scan without an API key returns a structured error, not a 500",
+              scan_resp.status_code == 502 and "rows" in scan_resp.json() and "error" in scan_resp.json())
+
 
 def main() -> None:
     with tempfile.TemporaryDirectory() as tmp:

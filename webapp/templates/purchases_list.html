@@ -35,7 +35,12 @@
       <label>Вставить накладную (скопировано из Excel/таблицы поставщика)
         <textarea id="invoiceText" rows="3" placeholder="Название&#9;Кол-во&#9;Цена — по одной позиции на строку"></textarea>
       </label>
-      <button type="button" id="parseInvoiceBtn" class="secondary">Разобрать →</button>
+      <div style="display:flex; gap:6px;">
+        <button type="button" id="parseInvoiceBtn" class="secondary">Разобрать →</button>
+        <button type="button" id="scanInvoiceBtn" class="secondary">📷 Сканировать накладную</button>
+      </div>
+      <input type="file" accept="image/*" capture="environment" id="invoicePhotoInput" style="display:none;">
+      <div id="scanStatus" style="display:none; color: var(--text-muted); font-size: 0.9em;"></div>
 
       <datalist id="productList"></datalist>
       <input type="hidden" name="row_count" id="rowCount" value="{{ item_rows | length }}">
