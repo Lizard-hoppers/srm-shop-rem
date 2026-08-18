@@ -82,3 +82,21 @@ def parse_invoice_text(conn: sqlite3.Connection, text: str) -> list[dict]:
             "product_id": _match_product(name_guess, products),
         })
     return rows
+
+
+def match_items(conn: sqlite3.Connection, items: list[dict]) -> list[dict]:
+    """Resolve product_id for already-structured items — e.g. from
+    core.vision_ocr's photo OCR, which returns {"name", "qty",
+    "unit_cost"} dicts directly rather than raw text to split into
+    columns. Same catalog-matching heuristic as parse_invoice_text(),
+    just skipping the line-splitting step."""
+    products = conn.execute("SELECT id, name, sku FROM products WHERE active = 1").fetchall()
+    return [
+        {
+            "name_guess": (item.get("name") or "").strip(),
+            "qty": item.get("qty"),
+            "unit_cost": item.get("unit_cost"),
+            "product_id": _match_product(item.get("name") or "", products),
+        }
+        for item in items
+    ]

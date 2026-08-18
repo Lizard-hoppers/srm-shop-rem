@@ -288,6 +288,85 @@ def scenario_purchase_import(db_path: str) -> None:
     check("blank lines in the pasted text are skipped", len(blank_lines_skipped) == 1)
 
 
+def scenario_purchase_drafts_and_vision(db_path: str) -> None:
+    print("scenario: photo-of-invoice drafts + vision OCR error handling")
+    from core import purchase_import, vision_ocr
+
+    with get_conn(db_path) as conn:
+        matched = purchase_import.match_items(conn, [
+            {"name": "SKU-CHG", "qty": 4, "unit_cost": 260},
+            {"name": "Совсем незнакомый товар", "qty": 1, "unit_cost": None},
+        ])
+        check("match_items resolves a known SKU from a structured item", matched[0]["product_id"] is not None)
+        check("match_items leaves an unknown item unresolved", matched[1]["product_id"] is None)
+
+        draft_id = purchases.create_draft(conn, 1, matched)
+        draft = purchases.get_draft(conn, draft_id)
+        check("create_draft stores a pending draft", draft is not None and draft["status"] == "pending")
+        check("get_draft_items round-trips the matched items", purchases.get_draft_items(conn, draft_id) == matched)
+
+        purchases.mark_draft_applied(conn, draft_id)
+        check("mark_draft_applied flips status to applied", purchases.get_draft(conn, draft_id)["status"] == "applied")
+
+    # vision_ocr must never silently return an empty/garbage result — every
+    # failure mode raises VisionOcrError for the bot handler to catch and
+    # tell staff to retry/enter manually, rather than acting on nothing.
+    raised_no_key = False
+    try:
+        vision_ocr.extract_invoice_items(b"fake-bytes")
+    except vision_ocr.VisionOcrError:
+        raised_no_key = True
+    check("extract_invoice_items raises without an API key configured", raised_no_key)
+
+    class _OkResponse:
+        status_code = 200
+        text = "ok"
+
+        def json(self):
+            return {"choices": [{"message": {"content":
+                '{"items": [{"name": "Кабель", "qty": 2, "unit_cost": 90}, {"name": "  "}]}'
+            }}]}
+
+    class _BadShapeResponse:
+        status_code = 200
+        text = "ok"
+
+        def json(self):
+            return {"choices": [{"message": {"content": "не json"}}]}
+
+    class _ErrorResponse:
+        status_code = 500
+        text = "server error"
+
+    orig_post = httpx.post
+    orig_key = vision_ocr._API_KEY
+    vision_ocr._API_KEY = "test-key"
+    try:
+        httpx.post = lambda url, headers, json, timeout: _OkResponse()
+        items = vision_ocr.extract_invoice_items(b"fake-bytes")
+        check("extract_invoice_items parses a well-formed OpenAI response and drops blank names",
+              items == [{"name": "Кабель", "qty": 2, "unit_cost": 90}])
+
+        httpx.post = lambda url, headers, json, timeout: _BadShapeResponse()
+        raised_bad_shape = False
+        try:
+            vision_ocr.extract_invoice_items(b"fake-bytes")
+        except vision_ocr.VisionOcrError:
+            raised_bad_shape = True
+        check("extract_invoice_items raises on unparseable model output", raised_bad_shape)
+
+        httpx.post = lambda url, headers, json, timeout: _ErrorResponse()
+        raised_http_error = False
+        try:
+            vision_ocr.extract_invoice_items(b"fake-bytes")
+        except vision_ocr.VisionOcrError:
+            raised_http_error = True
+        check("extract_invoice_items raises on a non-200 response", raised_http_error)
+    finally:
+        httpx.post = orig_post
+        vision_ocr._API_KEY = orig_key
+
+
 def scenario_sales(db_path: str) -> None:
     print("scenario: offline sale deducts stock from a cell with enough qty")
     with get_conn(db_path) as conn:
@@ -641,6 +720,7 @@ def main() -> None:
         scenario_device_catalog(db_path)
         scenario_purchases(db_path)
         scenario_purchase_import(db_path)
+        scenario_purchase_drafts_and_vision(db_path)
         scenario_sales(db_path)
         scenario_repair_card_notify(db_path)
         scenario_repair_actions(db_path)

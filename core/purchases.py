@@ -4,6 +4,7 @@ purchase paper trail never drift apart.
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 
 from core.inventory import record_movement
@@ -80,3 +81,27 @@ def get_receipt_items(conn: sqlite3.Connection, receipt_id: int) -> list[sqlite3
            WHERE receipt_id = ?""",
         (receipt_id,),
     ).fetchall()
+
+
+# ---- photo-of-invoice drafts (Уровень 3) ----
+
+def create_draft(conn: sqlite3.Connection, staff_id: int, items: list[dict]) -> int:
+    """items: core.purchase_import.match_items() output — a list of
+    {"name_guess", "qty", "unit_cost", "product_id"} dicts."""
+    return conn.execute(
+        "INSERT INTO purchase_drafts (staff_id, items_json) VALUES (?, ?)",
+        (staff_id, json.dumps(items, ensure_ascii=False)),
+    ).lastrowid
+
+
+def get_draft(conn: sqlite3.Connection, draft_id: int) -> sqlite3.Row | None:
+    return conn.execute("SELECT * FROM purchase_drafts WHERE id = ?", (draft_id,)).fetchone()
+
+
+def get_draft_items(conn: sqlite3.Connection, draft_id: int) -> list[dict]:
+    draft = get_draft(conn, draft_id)
+    return json.loads(draft["items_json"]) if draft else []
+
+
+def mark_draft_applied(conn: sqlite3.Connection, draft_id: int) -> None:
+    conn.execute("UPDATE purchase_drafts SET status = 'applied' WHERE id = ?", (draft_id,))

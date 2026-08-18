@@ -154,6 +154,20 @@ CREATE TABLE IF NOT EXISTS goods_receipt_items (
     unit_cost INTEGER
 );
 
+-- A photo-of-invoice OCR result, pending human review before it ever
+-- touches stock. items_json is a list of {name_guess, qty, unit_cost,
+-- product_id} dicts (core.purchase_import.match_items() shape) — kept as
+-- JSON rather than a separate items table since a draft is short-lived
+-- and gets converted into a real goods_receipts row (or discarded), never
+-- queried/reported on independently.
+CREATE TABLE IF NOT EXISTS purchase_drafts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    staff_id INTEGER NOT NULL REFERENCES staff(id),
+    items_json TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'applied')),
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS sales_orders (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     client_id INTEGER REFERENCES clients(id),
