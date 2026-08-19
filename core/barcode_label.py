@@ -63,7 +63,7 @@ def generate_label_png(sku: str, name: str, price: int | None) -> bytes:
     barcode_buf = io.BytesIO()
     barcode_obj.write(barcode_buf, options={
         "module_height": 12.0, "quiet_zone": 2.0,
-        "font_size": 9, "text_distance": 8.0, "write_text": True,
+        "font_size": 9, "text_distance": 4.0, "write_text": True,
     })
     barcode_buf.seek(0)
     barcode_img = Image.open(barcode_buf).convert("RGB")
