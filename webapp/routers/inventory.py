@@ -4,9 +4,10 @@ import os
 import uuid
 
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 
 from core import inventory as core_inventory
+from core import qr as core_qr
 from core import vision_ocr
 from core.inventory import InsufficientStockError
 from core.storage import get_conn
@@ -98,6 +99,12 @@ def product_detail_view(request: Request, product_id: int, staff=Depends(require
         request, "inventory_product_detail.html", staff=staff,
         product=product, stock_by_cell=stock_by_cell, cells=cells,
     )
+
+
+@router.get("/products/{product_id}/qr.png")
+def product_qr_view(product_id: int, staff=Depends(require_staff)):
+    png = core_qr.generate_png(core_qr.product_code(product_id))
+    return Response(content=png, media_type="image/png")
 
 
 @router.post("/products/{product_id}/receive")

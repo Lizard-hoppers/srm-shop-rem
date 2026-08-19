@@ -20,6 +20,12 @@
 
 <script src="/static/photo-upload.js?v={{ asset_version }}"></script>
 
+<div class="panel-box" style="margin-top: 16px; text-align: center;">
+  <h3>QR-код товара № {{ product.id }}</h3>
+  <img src="{{ link('/inventory/products/' ~ product.id ~ '/qr.png') }}" alt="QR товара" style="width: 160px; height: 160px; border-radius: 10px; background: #fff; padding: 8px;">
+  <p class="meta">Наклейте на полку/деталь — сканируется в «Ещё» → «Сканировать QR», сразу открывает эту карточку.</p>
+</div>
+
 <h2>Остаток по ячейкам</h2>
 <table class="table">
   <thead><tr><th>Ячейка</th><th>Кол-во</th></tr></thead>

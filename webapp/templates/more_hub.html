@@ -10,6 +10,10 @@
   </div>
 </div>
 
+<div class="btn-row">
+  <button type="button" id="scanQrBtn" onclick="scanCrmQr()" style="display:none;">📷 Сканировать QR</button>
+</div>
+
 <div class="nav-list">
   <a class="card nav-card" href="{{ link('/clients') }}">
     <div class="card-icon">{{ icons.icon('users', 18) }}</div>
@@ -28,4 +32,21 @@
     <div class="chevron">{{ icons.icon('chevron', 18) }}</div>
   </a>
 </div>
+
+<script>
+(function () {
+  var tg = window.Telegram ? window.Telegram.WebApp : null;
+  var btn = document.getElementById("scanQrBtn");
+  if (tg && tg.isVersionAtLeast && tg.isVersionAtLeast("6.4")) {
+    btn.style.display = "inline-block";
+  }
+  window.scanCrmQr = function () {
+    if (!tg) return;
+    tg.showScanQrPopup({ text: "Наведите камеру на QR-код товара или клиента" }, function (text) {
+      tg.closeScanQrPopup();
+      window.location.href = "/more/find?t={{ token }}&code=" + encodeURIComponent(text);
+    });
+  };
+})();
+</script>
 {% endblock %}
