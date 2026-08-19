@@ -846,6 +846,17 @@ def scenario_webapp_forms(db_path: str) -> None:
         more_resp = client.get(f"/more?t={token}")
         check("Ещё renders the QR scanner button", 'scanQrBtn' in more_resp.text and '/more/find' in more_resp.text)
 
+        # Physical USB/Bluetooth scanner support (19.08) — a keyboard-
+        # wedge scanner just "types" into whatever field has focus, so a
+        # plain GET form hitting the same /more/find the camera scanner
+        # uses is all that's needed; no JS, no new backend logic.
+        check("Ещё renders a plain text field for a physical scanner, not just the camera button",
+              'name="code"' in more_resp.text and 'action="/more/find"' in more_resp.text)
+
+        hw_scan_resp = client.get(f"/more/find?t={token}&code=BARCODE-PROD-1")
+        check("a physical scanner's input (a plain GET with code=) resolves exactly like a camera scan",
+              f"/inventory/products/{barcode_product_id}" in str(hw_scan_resp.url))
+
         clients_list_resp = client.get(f"/clients?t={token}")
         check("the clients list is now a card grid, not a table", 'class="cards"' in clients_list_resp.text)
         check("a client's card links to their detail page", f"/clients/{client_id}" in clients_list_resp.text)

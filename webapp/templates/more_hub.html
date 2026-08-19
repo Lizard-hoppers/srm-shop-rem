@@ -14,6 +14,18 @@
   <button type="button" id="scanQrBtn" onclick="scanCrmQr()" style="display:none;">📷 Сканировать код</button>
 </div>
 
+<form method="get" action="/more/find" class="search-bar">
+  <input type="hidden" name="t" value="{{ token }}">
+  <input type="text" name="code" placeholder="Или наведите USB/Bluetooth-сканер сюда и считайте код"
+         autocomplete="off" {% if error %}autofocus{% endif %}>
+  <button type="submit">Найти</button>
+</form>
+<p class="meta" style="margin-top: -6px; margin-bottom: 14px;">
+  Физический сканер штрих-кодов работает как клавиатура — кликните в поле выше один раз и считайте
+  код, откроется нужная карточка (как при сканировании камерой). Также сканер сработает в любом
+  текстовом поле поиска по товару — например, в поиске на «Склад → Товары».
+</p>
+
 <div class="nav-list">
   <a class="card nav-card" href="{{ link('/clients') }}">
     <div class="card-icon">{{ icons.icon('users', 18) }}</div>
