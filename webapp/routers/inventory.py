@@ -102,18 +102,23 @@ def product_detail_view(request: Request, product_id: int, staff=Depends(require
 
 
 @router.get("/products/{product_id}/barcode.png")
-def product_barcode_view(product_id: int, staff=Depends(require_staff)):
+def product_barcode_view(product_id: int, compact: bool = False, staff=Depends(require_staff)):
     """Regenerated fresh from the DB on every request — editing the name
     or price and hitting Сохранить is the only "reissue" step needed,
     the next view/print already reflects it. Encodes the product's own
     SKU verbatim (never an app-invented id), so scanning either this
     label or the part's original manufacturer barcode finds the same
-    product (core.inventory.get_product_by_sku)."""
+    product (core.inventory.get_product_by_sku).
+
+    ?compact=1 drops the product name — used by the print view (tap the
+    barcode to flip it, "Печать этикетки") sized for a physical
+    Xprinter XP-420B 30x20mm label, where a wrapped name would just
+    crowd out the barcode."""
     with get_conn() as conn:
         product = core_inventory.get_product(conn, product_id)
     if not product or not product["sku"]:
         raise HTTPException(status_code=404, detail="У товара нет SKU для штрих-кода.")
-    png = barcode_label.generate_label_png(product["sku"], product["name"], product["price"])
+    png = barcode_label.generate_label_png(product["sku"], product["name"], product["price"], compact=compact)
     return Response(content=png, media_type="image/png")
 
 

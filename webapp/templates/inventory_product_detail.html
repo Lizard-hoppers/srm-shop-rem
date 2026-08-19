@@ -23,12 +23,43 @@
 {% if product.sku %}
 <div class="panel-box" style="margin-top: 16px; text-align: center;">
   <h3>Штрих-код товара</h3>
-  <img src="{{ link('/inventory/products/' ~ product.id ~ '/barcode.png') }}" alt="Штрих-код товара"
-       style="max-width: 100%; width: 320px; border-radius: 10px; background: #fff; padding: 8px;">
-  <p class="meta">Наклейте на полку/деталь — сканируется в «Ещё» → «Сканировать код», сразу открывает эту
-    карточку. Название и цена на этикетке всегда берутся из текущих данных, обновлять вручную не нужно —
-    просто сохраните изменения и распечатайте заново.</p>
+  <div class="barcode-flip" id="barcodeFlip">
+    <div class="barcode-flip-inner">
+      <div class="barcode-flip-front">
+        <img src="{{ link('/inventory/products/' ~ product.id ~ '/barcode.png') }}" alt="Штрих-код товара"
+             style="max-width: 100%; width: 320px; border-radius: 10px; background: #fff; padding: 8px;">
+      </div>
+      <div class="barcode-flip-back">
+        <p class="meta" style="margin: 0;">Xprinter XP-420B · этикетка 30×20 мм</p>
+        <button type="button" class="barcode-print-btn" id="printBarcodeBtn">🖨 Печать этикетки</button>
+        <p class="meta" style="margin: 0;">Подключите принтер к компьютеру по USB и откройте эту карточку в
+          браузере на нём — кнопка выше вызовет обычную печать, выберите Xprinter в списке принтеров.</p>
+      </div>
+    </div>
+  </div>
+  <p class="meta">Тапните по штрих-коду, чтобы распечатать этикетку. Наклейте на полку/деталь — сканируется в
+    «Склад» → «Сканировать код», сразу открывает эту карточку. Название и цена на этикетке всегда берутся из
+    текущих данных, обновлять вручную не нужно — просто сохраните изменения и распечатайте заново.</p>
 </div>
+
+<div id="printLabelArea">
+  <img src="{{ link('/inventory/products/' ~ product.id ~ '/barcode.png?compact=1') }}" alt="Штрих-код для печати">
+</div>
+
+<script>
+(function () {
+  var flip = document.getElementById("barcodeFlip");
+  var printBtn = document.getElementById("printBarcodeBtn");
+  flip.addEventListener("click", function (e) {
+    if (e.target.closest("#printBarcodeBtn")) return;
+    flip.classList.toggle("flipped");
+  });
+  printBtn.addEventListener("click", function (e) {
+    e.stopPropagation();
+    window.print();
+  });
+})();
+</script>
 {% else %}
 <div class="panel-box" style="margin-top: 16px; text-align: center;">
   <h3>Штрих-код товара</h3>

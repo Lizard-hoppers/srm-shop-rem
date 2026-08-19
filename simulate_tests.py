@@ -824,6 +824,18 @@ def scenario_webapp_forms(db_path: str) -> None:
         product_card_resp = client.get(f"/inventory/products/{barcode_product_id}?t={token}")
         check("the product card shows its own barcode", f"/inventory/products/{barcode_product_id}/barcode.png" in product_card_resp.text)
 
+        # Tap-to-flip print view (19.08, Xprinter XP-420B 30x20mm labels).
+        check("the product card renders the flip-to-print barcode card",
+              'id="barcodeFlip"' in product_card_resp.text and 'id="printBarcodeBtn"' in product_card_resp.text)
+        check("the product card embeds a compact (no name) barcode for the print-only area",
+              f"/inventory/products/{barcode_product_id}/barcode.png?compact=1" in product_card_resp.text)
+
+        compact_barcode_resp = client.get(f"/inventory/products/{barcode_product_id}/barcode.png?t={token}&compact=1")
+        check("compact barcode.png returns 200", compact_barcode_resp.status_code == 200)
+        check("compact barcode.png body is a real PNG", compact_barcode_resp.content[:8] == b"\x89PNG\r\n\x1a\n")
+        check("compact barcode is smaller than the full one (no name block)",
+              len(compact_barcode_resp.content) < len(product_barcode_resp.content))
+
         no_sku_resp = client.post(f"/inventory/products?t={token}", data={"name": "Товар Без SKU", "unit": "шт", "min_qty": "0"})
         no_sku_product_id = int(str(no_sku_resp.url).split("/inventory/products/")[1].split("?")[0])
         no_sku_card_resp = client.get(f"/inventory/products/{no_sku_product_id}?t={token}")
