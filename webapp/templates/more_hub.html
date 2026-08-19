@@ -11,7 +11,7 @@
 </div>
 
 <div class="btn-row">
-  <button type="button" id="scanQrBtn" onclick="scanCrmQr()" style="display:none;">📷 Сканировать QR</button>
+  <button type="button" id="scanQrBtn" onclick="scanCrmQr()" style="display:none;">📷 Сканировать код</button>
 </div>
 
 <div class="nav-list">
@@ -42,7 +42,7 @@
   }
   window.scanCrmQr = function () {
     if (!tg) return;
-    tg.showScanQrPopup({ text: "Наведите камеру на QR-код товара или клиента" }, function (text) {
+    tg.showScanQrPopup({ text: "Наведите камеру на штрих-код товара или QR-код клиента" }, function (text) {
       tg.closeScanQrPopup();
       window.location.href = "/more/find?t={{ token }}&code=" + encodeURIComponent(text);
     });

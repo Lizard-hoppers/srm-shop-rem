@@ -20,11 +20,21 @@
 
 <script src="/static/photo-upload.js?v={{ asset_version }}"></script>
 
+{% if product.sku %}
 <div class="panel-box" style="margin-top: 16px; text-align: center;">
-  <h3>QR-код товара № {{ product.id }}</h3>
-  <img src="{{ link('/inventory/products/' ~ product.id ~ '/qr.png') }}" alt="QR товара" style="width: 160px; height: 160px; border-radius: 10px; background: #fff; padding: 8px;">
-  <p class="meta">Наклейте на полку/деталь — сканируется в «Ещё» → «Сканировать QR», сразу открывает эту карточку.</p>
+  <h3>Штрих-код товара</h3>
+  <img src="{{ link('/inventory/products/' ~ product.id ~ '/barcode.png') }}" alt="Штрих-код товара"
+       style="max-width: 100%; width: 320px; border-radius: 10px; background: #fff; padding: 8px;">
+  <p class="meta">Наклейте на полку/деталь — сканируется в «Ещё» → «Сканировать код», сразу открывает эту
+    карточку. Название и цена на этикетке всегда берутся из текущих данных, обновлять вручную не нужно —
+    просто сохраните изменения и распечатайте заново.</p>
 </div>
+{% else %}
+<div class="panel-box" style="margin-top: 16px; text-align: center;">
+  <h3>Штрих-код товара</h3>
+  <p class="meta">У товара нет SKU — впишите его в форме ниже (это и есть номер штрих-кода), чтобы этикетка появилась.</p>
+</div>
+{% endif %}
 
 <h2>Остаток по ячейкам</h2>
 <table class="table">

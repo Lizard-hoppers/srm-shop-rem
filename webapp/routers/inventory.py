@@ -3,11 +3,11 @@ from __future__ import annotations
 import os
 import uuid
 
-from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 
+from core import barcode_label
 from core import inventory as core_inventory
-from core import qr as core_qr
 from core import vision_ocr
 from core.inventory import InsufficientStockError
 from core.storage import get_conn
@@ -101,9 +101,19 @@ def product_detail_view(request: Request, product_id: int, staff=Depends(require
     )
 
 
-@router.get("/products/{product_id}/qr.png")
-def product_qr_view(product_id: int, staff=Depends(require_staff)):
-    png = core_qr.generate_png(core_qr.product_code(product_id))
+@router.get("/products/{product_id}/barcode.png")
+def product_barcode_view(product_id: int, staff=Depends(require_staff)):
+    """Regenerated fresh from the DB on every request — editing the name
+    or price and hitting Сохранить is the only "reissue" step needed,
+    the next view/print already reflects it. Encodes the product's own
+    SKU verbatim (never an app-invented id), so scanning either this
+    label or the part's original manufacturer barcode finds the same
+    product (core.inventory.get_product_by_sku)."""
+    with get_conn() as conn:
+        product = core_inventory.get_product(conn, product_id)
+    if not product or not product["sku"]:
+        raise HTTPException(status_code=404, detail="У товара нет SKU для штрих-кода.")
+    png = barcode_label.generate_label_png(product["sku"], product["name"], product["price"])
     return Response(content=png, media_type="image/png")
 
 

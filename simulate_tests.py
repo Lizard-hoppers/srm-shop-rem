@@ -24,7 +24,7 @@ import urllib.parse
 import httpx
 import jinja2
 
-from core import auth, clients, device_catalog, inventory, purchases, qr, repairs, sales, timefmt
+from core import auth, barcode_label, clients, device_catalog, inventory, purchases, qr, repairs, sales, timefmt
 from core.session_token import make_token, read_token
 from core.storage import get_conn, init_db
 from core.telegram_auth import validate_init_data
@@ -230,15 +230,23 @@ def scenario_client_qr(db_path: str) -> None:
         check("QR PNG has a real PNG header", png[:8] == b"\x89PNG\r\n\x1a\n")
         check("QR PNG is a plausible image size", len(png) > 200)
 
-        # Product QR codes (18.08) — same shape, different prefix, so the
-        # two kinds never collide when a code is scanned without knowing
-        # in advance what it is.
+        # Product barcodes (19.08) — a real Code128 of the product's own
+        # SKU, not an app-invented id (Павел wanted scanning to match a
+        # part's existing barcode digits), so lookup is by exact SKU via
+        # core.inventory.get_product_by_sku(), not a parsed prefix.
         product_id = inventory.create_product(conn, "Экран iPhone 12", "SKU-SCR12", "Экраны", "шт", True, False, min_qty=1, price=None)
-        product_qr_code = qr.product_code(product_id)
-        check("product code has the expected prefix", product_qr_code == f"CRMPID:{product_id}")
-        check("product code round-trips back to the product id", qr.parse_product_code(product_qr_code) == product_id)
-        check("a client code is not mistaken for a product code", qr.parse_product_code(code) is None)
-        check("a product code is not mistaken for a client code", qr.parse_client_code(product_qr_code) is None)
+        found = inventory.get_product_by_sku(conn, "SKU-SCR12")
+        check("get_product_by_sku finds the product by its exact SKU", found is not None and found["id"] == product_id)
+        check("get_product_by_sku is exact, not a substring match", inventory.get_product_by_sku(conn, "SKU-SCR") is None)
+        check("get_product_by_sku returns None for an unknown SKU", inventory.get_product_by_sku(conn, "no-such-sku") is None)
+        check("get_product_by_sku returns None for an empty string", inventory.get_product_by_sku(conn, "") is None)
+
+        label_png = barcode_label.generate_label_png("2716140063024", "Дисплей Xiaomi Redmi 9A/9AT/9C", 350)
+        check("barcode label PNG has a real PNG header", label_png[:8] == b"\x89PNG\r\n\x1a\n")
+        check("barcode label PNG is a plausible image size", len(label_png) > 2000)
+
+        no_price_label_png = barcode_label.generate_label_png("SKU-SCR12", "Экран iPhone 12", None)
+        check("barcode label renders fine with no price set", no_price_label_png[:8] == b"\x89PNG\r\n\x1a\n")
 
         # A bot contact-share sends the phone without a leading '+'; a
         # staff-typed "+380675554433" and a bot-shared "380675554433" must
@@ -800,23 +808,32 @@ def scenario_webapp_forms(db_path: str) -> None:
         resp = client.get(f"/clients/find?t={token}&code=garbage-not-a-code")
         check("scanning an unknown code: no raw error, friendly message", resp.status_code != 422 and "не распознан" in resp.text)
 
-        # Cross-entity QR scanner on Ещё (18.08) — /more/find tries every
-        # known code kind and jumps straight to wherever that thing lives,
-        # unlike /clients/find which only ever recognizes a client code.
-        qr_product_resp = client.post(f"/inventory/products?t={token}", data={"name": "QR Товар", "sku": "QR-PROD-1", "unit": "шт", "min_qty": "0"})
-        qr_product_id = int(str(qr_product_resp.url).split("/inventory/products/")[1].split("?")[0])
+        # Cross-entity scanner on Ещё (18.08, barcodes for products
+        # 19.08) — /more/find tries every known code kind and jumps
+        # straight to wherever that thing lives, unlike /clients/find
+        # which only ever recognizes a client QR code.
+        barcode_product_resp = client.post(f"/inventory/products?t={token}", data={"name": "Штрихкод Товар", "sku": "BARCODE-PROD-1", "unit": "шт", "min_qty": "0", "price": "500"})
+        barcode_product_id = int(str(barcode_product_resp.url).split("/inventory/products/")[1].split("?")[0])
 
-        product_qr_resp = client.get(f"/inventory/products/{qr_product_id}/qr.png?t={token}")
-        check("product qr.png returns 200", product_qr_resp.status_code == 200)
-        check("product qr.png has image content-type", product_qr_resp.headers.get("content-type", "").startswith("image/"))
-        check("product qr.png body is a real PNG", product_qr_resp.content[:8] == b"\x89PNG\r\n\x1a\n")
+        product_barcode_resp = client.get(f"/inventory/products/{barcode_product_id}/barcode.png?t={token}")
+        check("product barcode.png returns 200", product_barcode_resp.status_code == 200)
+        check("product barcode.png has image content-type", product_barcode_resp.headers.get("content-type", "").startswith("image/"))
+        check("product barcode.png body is a real PNG", product_barcode_resp.content[:8] == b"\x89PNG\r\n\x1a\n")
 
-        product_card_resp = client.get(f"/inventory/products/{qr_product_id}?t={token}")
-        check("the product card shows its own QR code", f"/inventory/products/{qr_product_id}/qr.png" in product_card_resp.text)
+        product_card_resp = client.get(f"/inventory/products/{barcode_product_id}?t={token}")
+        check("the product card shows its own barcode", f"/inventory/products/{barcode_product_id}/barcode.png" in product_card_resp.text)
 
-        find_product_resp = client.get(f"/more/find?t={token}&code=CRMPID:{qr_product_id}")
-        check("scanning a product's QR on Ещё jumps straight to that product's card",
-              f"/inventory/products/{qr_product_id}" in str(find_product_resp.url))
+        no_sku_resp = client.post(f"/inventory/products?t={token}", data={"name": "Товар Без SKU", "unit": "шт", "min_qty": "0"})
+        no_sku_product_id = int(str(no_sku_resp.url).split("/inventory/products/")[1].split("?")[0])
+        no_sku_card_resp = client.get(f"/inventory/products/{no_sku_product_id}?t={token}")
+        check("a product with no SKU shows a hint instead of a broken barcode image",
+              "нет SKU" in no_sku_card_resp.text and f"/inventory/products/{no_sku_product_id}/barcode.png" not in no_sku_card_resp.text)
+        no_sku_barcode_resp = client.get(f"/inventory/products/{no_sku_product_id}/barcode.png?t={token}")
+        check("requesting a barcode for a product with no SKU 404s instead of crashing", no_sku_barcode_resp.status_code == 404)
+
+        find_product_resp = client.get(f"/more/find?t={token}&code=BARCODE-PROD-1")
+        check("scanning a product's barcode on Ещё jumps straight to that product's card",
+              f"/inventory/products/{barcode_product_id}" in str(find_product_resp.url))
 
         find_client_resp = client.get(f"/more/find?t={token}&code=CRMCID:{client_id}")
         check("the same Ещё scanner also recognizes a client QR code",

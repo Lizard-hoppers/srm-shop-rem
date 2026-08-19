@@ -28,6 +28,16 @@ def get_product(conn: sqlite3.Connection, product_id: int) -> sqlite3.Row | None
     return conn.execute("SELECT * FROM products WHERE id = ?", (product_id,)).fetchone()
 
 
+def get_product_by_sku(conn: sqlite3.Connection, sku: str) -> sqlite3.Row | None:
+    """Exact SKU lookup — how a scanned barcode (the product's own SKU
+    digits, see core.barcode_label) resolves back to a product, as
+    opposed to list_products()'s fuzzy LIKE search for the UI's search box."""
+    sku = sku.strip()
+    if not sku:
+        return None
+    return conn.execute("SELECT * FROM products WHERE sku = ?", (sku,)).fetchone()
+
+
 def create_product(
     conn: sqlite3.Connection,
     name: str,

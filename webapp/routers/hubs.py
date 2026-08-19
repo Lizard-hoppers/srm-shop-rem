@@ -27,18 +27,20 @@ def more_hub(request: Request, staff=Depends(require_staff)):
 
 @router.get("/more/find")
 def more_find(request: Request, code: str = "", staff=Depends(require_staff)):
-    """Cross-entity QR scan-to-find (Ещё → «Сканировать QR») — unlike
-    /clients/find (client codes only, used by the Clients page's own
+    """Cross-entity scan-to-find (Ещё → «Сканировать код») — unlike
+    /clients/find (client QR codes only, used by the Clients page's own
     scanner), this tries every known code kind and jumps straight to
-    wherever that thing actually lives, e.g. a product's own card, which
-    already lists exactly which cell(s) hold its stock."""
+    wherever that thing actually lives. A product resolves by exact SKU
+    match — the scanned value is the part's own barcode digits, not an
+    app-invented id (see core.barcode_label) — landing on the product's
+    own card, which already lists exactly which cell(s) hold its stock."""
     with get_conn() as conn:
-        product_id = core_qr.parse_product_code(code)
-        if product_id and core_inventory.get_product(conn, product_id):
-            return RedirectResponse(link(request, f"/inventory/products/{product_id}"), status_code=303)
+        product = core_inventory.get_product_by_sku(conn, code)
+        if product:
+            return RedirectResponse(link(request, f"/inventory/products/{product['id']}"), status_code=303)
 
         client_id = core_qr.parse_client_code(code)
         if client_id and core_clients.get_client(conn, client_id):
             return RedirectResponse(link(request, f"/clients/{client_id}"), status_code=303)
 
-    return render(request, "more_hub.html", staff=staff, error="QR-код не распознан — ничего не найдено.")
+    return render(request, "more_hub.html", staff=staff, error="Код не распознан — ничего не найдено.")
