@@ -31,9 +31,9 @@
       </div>
       <div class="barcode-flip-back">
         <p class="meta" style="margin: 0;">Xprinter XP-420B · этикетка 30×20 мм</p>
-        <button type="button" class="barcode-print-btn" id="printBarcodeBtn">🖨 Печать этикетки</button>
-        <p class="meta" style="margin: 0;">Подключите принтер к компьютеру по USB и откройте эту карточку в
-          браузере на нём — кнопка выше вызовет обычную печать, выберите Xprinter в списке принтеров.</p>
+        <button type="button" class="barcode-print-btn" id="printAgentBtn">📡 Отправить на печать</button>
+        <p class="barcode-print-status meta" style="display:none; margin: 0;"></p>
+        <button type="button" class="secondary" id="printBrowserBtn" style="font-size: 12px;">🖨 Печать через браузер (USB)</button>
       </div>
     </div>
   </div>
@@ -49,14 +49,62 @@
 <script>
 (function () {
   var flip = document.getElementById("barcodeFlip");
-  var printBtn = document.getElementById("printBarcodeBtn");
+  var agentBtn = document.getElementById("printAgentBtn");
+  var browserBtn = document.getElementById("printBrowserBtn");
+  var status = document.querySelector(".barcode-print-status");
+
   flip.addEventListener("click", function (e) {
-    if (e.target.closest("#printBarcodeBtn")) return;
+    if (e.target.closest("#printAgentBtn") || e.target.closest("#printBrowserBtn")) return;
     flip.classList.toggle("flipped");
   });
-  printBtn.addEventListener("click", function (e) {
+
+  browserBtn.addEventListener("click", function (e) {
     e.stopPropagation();
     window.print();
+  });
+
+  function pollStatus(jobId, attemptsLeft) {
+    if (attemptsLeft <= 0) {
+      status.textContent = "⏳ Пока не подтверждено — проверьте, запущен ли агент печати на компьютере.";
+      return;
+    }
+    fetch("/inventory/print-jobs/" + jobId + "/status" + window.location.search)
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (data.ok && data.status === "printed") {
+          status.textContent = "Напечатано ✅";
+        } else if (data.ok && data.status === "failed") {
+          status.textContent = "⚠️ Агент сообщил об ошибке печати.";
+        } else {
+          setTimeout(function () { pollStatus(jobId, attemptsLeft - 1); }, 2000);
+        }
+      })
+      .catch(function () {
+        setTimeout(function () { pollStatus(jobId, attemptsLeft - 1); }, 2000);
+      });
+  }
+
+  agentBtn.addEventListener("click", function (e) {
+    e.stopPropagation();
+    agentBtn.disabled = true;
+    status.style.display = "block";
+    status.textContent = "Отправляю в очередь печати…";
+    fetch("/inventory/products/{{ product.id }}/print-label" + window.location.search, { method: "POST" })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (data.ok) {
+          status.textContent = "В очереди, ждём агента…";
+          pollStatus(data.job_id, 15);
+        } else {
+          status.textContent = "⚠️ " + (data.error || "Не удалось поставить в очередь.");
+        }
+      })
+      .catch(function () {
+        status.textContent = "⚠️ Не удалось отправить запрос.";
+      })
+      .finally(function () {
+        agentBtn.disabled = false;
+      });
   });
 })();
 </script>

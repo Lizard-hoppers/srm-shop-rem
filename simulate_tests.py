@@ -12,8 +12,19 @@ os.environ.setdefault("CRM_SECRET_KEY", "test-secret-not-for-production")
 # webapp.main's startup hook calls core.storage.init_db() with no override,
 # so it always targets whatever CRM_DB_PATH resolved to at process start —
 # point that at a throwaway file too, before core.storage is ever imported.
+#
+# This MUST be an unconditional overwrite, not setdefault(): incident
+# 19.08 — running this suite with the real .env sourced (to exercise
+# PRINT_AGENT_TOKEN for real) left CRM_DB_PATH already set to the live
+# crm.sqlite3 in the shell environment, setdefault() silently kept that
+# value, and the whole scenario_webapp_forms HTTP suite ran straight
+# against production — 6 fake repairs/devices/2 fake clients written for
+# real, plus real Telegram cards sent to Работа/Мастера 007 (both
+# cleaned up by hand afterward). The module docstring above says "never
+# against a live crm.sqlite3" — setdefault() didn't actually guarantee
+# that; this does.
 _WEBAPP_TEST_DB = os.path.join(tempfile.gettempdir(), "crm_simulate_tests_webapp.sqlite3")
-os.environ.setdefault("CRM_DB_PATH", _WEBAPP_TEST_DB)
+os.environ["CRM_DB_PATH"] = _WEBAPP_TEST_DB
 
 import hashlib
 import hmac
@@ -826,7 +837,7 @@ def scenario_webapp_forms(db_path: str) -> None:
 
         # Tap-to-flip print view (19.08, Xprinter XP-420B 30x20mm labels).
         check("the product card renders the flip-to-print barcode card",
-              'id="barcodeFlip"' in product_card_resp.text and 'id="printBarcodeBtn"' in product_card_resp.text)
+              'id="barcodeFlip"' in product_card_resp.text and 'id="printAgentBtn"' in product_card_resp.text)
         check("the product card embeds a compact (no name) barcode for the print-only area",
               f"/inventory/products/{barcode_product_id}/barcode.png?compact=1" in product_card_resp.text)
 
@@ -836,6 +847,49 @@ def scenario_webapp_forms(db_path: str) -> None:
         check("compact barcode is smaller than the full one (no name block)",
               len(compact_barcode_resp.content) < len(product_barcode_resp.content))
 
+        # Print queue (19.08) — the CRM server can't reach a printer
+        # behind Павел's router directly, so "Отправить на печать"
+        # enqueues a job that print_agent.py (running on his LAN) polls
+        # for, fetches the label from, and acks.
+        enqueue_resp = client.post(f"/inventory/products/{barcode_product_id}/print-label?t={token}")
+        check("enqueuing a print job succeeds and returns a job id",
+              enqueue_resp.status_code == 200 and enqueue_resp.json()["ok"] is True)
+        print_job_id = enqueue_resp.json()["job_id"]
+
+        status_resp = client.get(f"/inventory/print-jobs/{print_job_id}/status?t={token}")
+        check("a fresh job starts out pending", status_resp.json() == {"ok": True, "status": "pending"})
+
+        import os as _os  # noqa: E402 -- PRINT_AGENT_TOKEN is read at import time in webapp.routers.print_agent
+        agent_token = _os.environ.get("PRINT_AGENT_TOKEN")
+
+        no_token_resp = client.get(f"/print-agent/jobs")
+        check("the print agent endpoint rejects a request with no token", no_token_resp.status_code == 403)
+
+        wrong_token_resp = client.get(f"/print-agent/jobs?token=not-the-real-token")
+        check("the print agent endpoint rejects a request with the wrong token", wrong_token_resp.status_code == 403)
+
+        if agent_token:
+            jobs_resp = client.get(f"/print-agent/jobs?token={agent_token}")
+            check("the agent can list pending jobs with the right token",
+                  jobs_resp.status_code == 200 and any(j["id"] == print_job_id for j in jobs_resp.json()["jobs"]))
+
+            label_resp = client.get(f"/print-agent/jobs/{print_job_id}/label.png?token={agent_token}")
+            check("the agent can fetch the compact label PNG for its job",
+                  label_resp.status_code == 200 and label_resp.content[:8] == b"\x89PNG\r\n\x1a\n")
+
+            ack_resp = client.post(f"/print-agent/jobs/{print_job_id}/ack?token={agent_token}&ok=true")
+            check("the agent can ack a job as printed", ack_resp.status_code == 200 and ack_resp.json()["ok"] is True)
+
+            after_ack_status = client.get(f"/inventory/print-jobs/{print_job_id}/status?t={token}")
+            check("staff polling sees the job flip to printed after the agent acks it",
+                  after_ack_status.json() == {"ok": True, "status": "printed"})
+
+            no_longer_pending_resp = client.get(f"/print-agent/jobs?token={agent_token}")
+            check("an acked job no longer shows up as pending for the agent",
+                  print_job_id not in [j["id"] for j in no_longer_pending_resp.json()["jobs"]])
+        else:
+            print("  (skipped agent-token checks — PRINT_AGENT_TOKEN not set in this shell)")
+
         no_sku_resp = client.post(f"/inventory/products?t={token}", data={"name": "Товар Без SKU", "unit": "шт", "min_qty": "0"})
         no_sku_product_id = int(str(no_sku_resp.url).split("/inventory/products/")[1].split("?")[0])
         no_sku_card_resp = client.get(f"/inventory/products/{no_sku_product_id}?t={token}")
@@ -843,6 +897,10 @@ def scenario_webapp_forms(db_path: str) -> None:
               "нет SKU" in no_sku_card_resp.text and f"/inventory/products/{no_sku_product_id}/barcode.png" not in no_sku_card_resp.text)
         no_sku_barcode_resp = client.get(f"/inventory/products/{no_sku_product_id}/barcode.png?t={token}")
         check("requesting a barcode for a product with no SKU 404s instead of crashing", no_sku_barcode_resp.status_code == 404)
+
+        no_sku_enqueue_resp = client.post(f"/inventory/products/{no_sku_product_id}/print-label?t={token}")
+        check("enqueuing a print job for a product with no SKU is rejected, not silently queued",
+              no_sku_enqueue_resp.status_code == 400 and no_sku_enqueue_resp.json()["ok"] is False)
 
         find_product_resp = client.get(f"/warehouse/find?t={token}&code=BARCODE-PROD-1")
         check("scanning a product's barcode on Склад jumps straight to that product's card",

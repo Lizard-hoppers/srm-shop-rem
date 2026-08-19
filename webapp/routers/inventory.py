@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse, RedirectResponse, Response
 
 from core import barcode_label
 from core import inventory as core_inventory
+from core import print_queue
 from core import vision_ocr
 from core.inventory import InsufficientStockError
 from core.storage import get_conn
@@ -120,6 +121,29 @@ def product_barcode_view(product_id: int, compact: bool = False, staff=Depends(r
         raise HTTPException(status_code=404, detail="У товара нет SKU для штрих-кода.")
     png = barcode_label.generate_label_png(product["sku"], product["name"], product["price"], compact=compact)
     return Response(content=png, media_type="image/png")
+
+
+@router.post("/products/{product_id}/print-label")
+def product_print_label_view(product_id: int, staff=Depends(require_role(*_STOCK_WRITE_ROLES))):
+    """Enqueues a print job for print_agent.py (running on a Linux box
+    on the same LAN as the Xprinter) to pick up — the CRM server has no
+    network path to a printer behind a shop/home router, so this can
+    only ask, not print directly. See core.print_queue."""
+    with get_conn() as conn:
+        product = core_inventory.get_product(conn, product_id)
+        if not product or not product["sku"]:
+            return JSONResponse({"ok": False, "error": "У товара нет SKU для штрих-кода."}, status_code=400)
+        job_id = print_queue.create_job(conn, product_id, staff["id"])
+    return JSONResponse({"ok": True, "job_id": job_id})
+
+
+@router.get("/print-jobs/{job_id}/status")
+def print_job_status_view(job_id: int, staff=Depends(require_staff)):
+    with get_conn() as conn:
+        status = print_queue.job_status(conn, job_id)
+    if not status:
+        return JSONResponse({"ok": False, "error": "Задание не найдено."}, status_code=404)
+    return JSONResponse({"ok": True, "status": status})
 
 
 @router.post("/products/{product_id}/receive")

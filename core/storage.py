@@ -205,6 +205,22 @@ CREATE TABLE IF NOT EXISTS device_catalog (
     model TEXT NOT NULL,
     UNIQUE(device_type, brand, model)
 );
+
+-- A barcode-label print request, polled and fulfilled by the small
+-- print_agent.py script Павел runs on a Linux box on the same LAN as
+-- the Xprinter XP-420B (19.08) — the CRM server itself has no network
+-- path to a printer sitting behind a shop/home router, so printing is
+-- queue+poll rather than the server pushing to the printer directly.
+CREATE TABLE IF NOT EXISTS print_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_id INTEGER NOT NULL REFERENCES products(id),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','printed','failed')),
+    staff_id INTEGER REFERENCES staff(id),
+    error TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    printed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_print_jobs_status ON print_jobs(status);
 """
 
 
