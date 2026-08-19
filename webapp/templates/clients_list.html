@@ -49,7 +49,7 @@
 (function () {
   var tg = window.Telegram ? window.Telegram.WebApp : null;
   var btn = document.getElementById("scanQrBtn");
-  if (tg && tg.isVersionAtLeast && tg.isVersionAtLeast("6.4")) {
+  if (tg && typeof tg.showScanQrPopup === "function") {
     btn.style.display = "inline-block";
   }
   window.scanClientQr = function () {
