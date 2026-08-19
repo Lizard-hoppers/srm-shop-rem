@@ -2,6 +2,22 @@
 {% import "_icons.html" as icons %}
 {% block title %}Склад{% endblock %}
 {% block content %}
+<div class="btn-row">
+  <button type="button" id="scanQrBtn" onclick="scanCrmQr()" style="display:none;">📷 Сканировать код</button>
+</div>
+
+<form method="get" action="/warehouse/find" class="search-bar">
+  <input type="hidden" name="t" value="{{ token }}">
+  <input type="text" name="code" placeholder="Или наведите USB/Bluetooth-сканер сюда и считайте код"
+         autocomplete="off" {% if error %}autofocus{% endif %}>
+  <button type="submit">Найти</button>
+</form>
+<p class="meta" style="margin-top: -6px; margin-bottom: 14px;">
+  Физический сканер штрих-кодов работает как клавиатура — кликните в поле выше один раз и считайте
+  код, откроется нужная карточка (как при сканировании камерой). Также сканер сработает в любом
+  текстовом поле поиска по товару — например, в поиске на «Товары» ниже.
+</p>
+
 <div class="nav-list">
   <a class="card nav-card" href="{{ link('/inventory/products') }}">
     <div class="card-icon">{{ icons.icon('archive', 18) }}</div>
@@ -36,4 +52,21 @@
     <div class="chevron">{{ icons.icon('chevron', 18) }}</div>
   </a>
 </div>
+
+<script>
+(function () {
+  var tg = window.Telegram ? window.Telegram.WebApp : null;
+  var btn = document.getElementById("scanQrBtn");
+  if (tg && typeof tg.showScanQrPopup === "function") {
+    btn.style.display = "inline-block";
+  }
+  window.scanCrmQr = function () {
+    if (!tg) return;
+    tg.showScanQrPopup({ text: "Наведите камеру на штрих-код товара или QR-код клиента" }, function (text) {
+      tg.closeScanQrPopup();
+      window.location.href = "/warehouse/find?t={{ token }}&code=" + encodeURIComponent(text);
+    });
+  };
+})();
+</script>
 {% endblock %}

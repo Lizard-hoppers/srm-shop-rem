@@ -808,10 +808,11 @@ def scenario_webapp_forms(db_path: str) -> None:
         resp = client.get(f"/clients/find?t={token}&code=garbage-not-a-code")
         check("scanning an unknown code: no raw error, friendly message", resp.status_code != 422 and "не распознан" in resp.text)
 
-        # Cross-entity scanner on Ещё (18.08, barcodes for products
-        # 19.08) — /more/find tries every known code kind and jumps
-        # straight to wherever that thing lives, unlike /clients/find
-        # which only ever recognizes a client QR code.
+        # Cross-entity scanner, now on Склад (18.08 on Ещё, barcodes for
+        # products + moved to Склад 19.08) — /warehouse/find tries every
+        # known code kind and jumps straight to wherever that thing
+        # lives, unlike /clients/find which only ever recognizes a
+        # client QR code.
         barcode_product_resp = client.post(f"/inventory/products?t={token}", data={"name": "Штрихкод Товар", "sku": "BARCODE-PROD-1", "unit": "шт", "min_qty": "0", "price": "500"})
         barcode_product_id = int(str(barcode_product_resp.url).split("/inventory/products/")[1].split("?")[0])
 
@@ -831,29 +832,31 @@ def scenario_webapp_forms(db_path: str) -> None:
         no_sku_barcode_resp = client.get(f"/inventory/products/{no_sku_product_id}/barcode.png?t={token}")
         check("requesting a barcode for a product with no SKU 404s instead of crashing", no_sku_barcode_resp.status_code == 404)
 
-        find_product_resp = client.get(f"/more/find?t={token}&code=BARCODE-PROD-1")
-        check("scanning a product's barcode on Ещё jumps straight to that product's card",
+        find_product_resp = client.get(f"/warehouse/find?t={token}&code=BARCODE-PROD-1")
+        check("scanning a product's barcode on Склад jumps straight to that product's card",
               f"/inventory/products/{barcode_product_id}" in str(find_product_resp.url))
 
-        find_client_resp = client.get(f"/more/find?t={token}&code=CRMCID:{client_id}")
-        check("the same Ещё scanner also recognizes a client QR code",
+        find_client_resp = client.get(f"/warehouse/find?t={token}&code=CRMCID:{client_id}")
+        check("the same Склад scanner also recognizes a client QR code",
               f"/clients/{client_id}" in str(find_client_resp.url))
 
-        find_garbage_resp = client.get(f"/more/find?t={token}&code=not-a-real-code")
-        check("an unrecognized code on the Ещё scanner: no raw error, friendly message",
+        find_garbage_resp = client.get(f"/warehouse/find?t={token}&code=not-a-real-code")
+        check("an unrecognized code on the Склад scanner: no raw error, friendly message",
               find_garbage_resp.status_code != 422 and "не распознан" in find_garbage_resp.text)
 
-        more_resp = client.get(f"/more?t={token}")
-        check("Ещё renders the QR scanner button", 'scanQrBtn' in more_resp.text and '/more/find' in more_resp.text)
+        warehouse_resp = client.get(f"/warehouse?t={token}")
+        check("Склад renders the QR scanner button", 'scanQrBtn' in warehouse_resp.text and '/warehouse/find' in warehouse_resp.text)
+        check("Ещё no longer carries the scanner (moved to Склад)",
+              'scanQrBtn' not in client.get(f"/more?t={token}").text)
 
         # Physical USB/Bluetooth scanner support (19.08) — a keyboard-
         # wedge scanner just "types" into whatever field has focus, so a
-        # plain GET form hitting the same /more/find the camera scanner
-        # uses is all that's needed; no JS, no new backend logic.
-        check("Ещё renders a plain text field for a physical scanner, not just the camera button",
-              'name="code"' in more_resp.text and 'action="/more/find"' in more_resp.text)
+        # plain GET form hitting the same /warehouse/find the camera
+        # scanner uses is all that's needed; no JS, no new backend logic.
+        check("Склад renders a plain text field for a physical scanner, not just the camera button",
+              'name="code"' in warehouse_resp.text and 'action="/warehouse/find"' in warehouse_resp.text)
 
-        hw_scan_resp = client.get(f"/more/find?t={token}&code=BARCODE-PROD-1")
+        hw_scan_resp = client.get(f"/warehouse/find?t={token}&code=BARCODE-PROD-1")
         check("a physical scanner's input (a plain GET with code=) resolves exactly like a camera scan",
               f"/inventory/products/{barcode_product_id}" in str(hw_scan_resp.url))
 

@@ -20,20 +20,18 @@ def warehouse_hub(request: Request, staff=Depends(require_staff)):
     return render(request, "warehouse_hub.html", staff=staff)
 
 
-@router.get("/more")
-def more_hub(request: Request, staff=Depends(require_staff)):
-    return render(request, "more_hub.html", staff=staff)
-
-
-@router.get("/more/find")
-def more_find(request: Request, code: str = "", staff=Depends(require_staff)):
-    """Cross-entity scan-to-find (Ещё → «Сканировать код») — unlike
+@router.get("/warehouse/find")
+def warehouse_find(request: Request, code: str = "", staff=Depends(require_staff)):
+    """Cross-entity scan-to-find (Склад → «Сканировать код») — unlike
     /clients/find (client QR codes only, used by the Clients page's own
     scanner), this tries every known code kind and jumps straight to
     wherever that thing actually lives. A product resolves by exact SKU
     match — the scanned value is the part's own barcode digits, not an
     app-invented id (see core.barcode_label) — landing on the product's
-    own card, which already lists exactly which cell(s) hold its stock."""
+    own card, which already lists exactly which cell(s) hold its stock.
+    Lives under Склад (moved from Ещё 19.08 — most scans are for a
+    product, so Склад reads more naturally), but still recognizes a
+    client QR code too, same as before."""
     with get_conn() as conn:
         product = core_inventory.get_product_by_sku(conn, code)
         if product:
@@ -43,4 +41,9 @@ def more_find(request: Request, code: str = "", staff=Depends(require_staff)):
         if client_id and core_clients.get_client(conn, client_id):
             return RedirectResponse(link(request, f"/clients/{client_id}"), status_code=303)
 
-    return render(request, "more_hub.html", staff=staff, error="Код не распознан — ничего не найдено.")
+    return render(request, "warehouse_hub.html", staff=staff, error="Код не распознан — ничего не найдено.")
+
+
+@router.get("/more")
+def more_hub(request: Request, staff=Depends(require_staff)):
+    return render(request, "more_hub.html", staff=staff)
