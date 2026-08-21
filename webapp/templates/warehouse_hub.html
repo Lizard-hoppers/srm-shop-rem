@@ -1,54 +1,52 @@
 {% extends "base.html" %}
 {% import "_icons.html" as icons %}
-{% block title %}Склад{% endblock %}
+{% block title %}{{ t('nav_warehouse') }}{% endblock %}
 {% block content %}
 <div class="btn-row">
-  <button type="button" id="scanPhotoBtn">📷 Сканировать код</button>
+  <button type="button" id="scanPhotoBtn">{{ t('warehouse_scan_btn') }}</button>
 </div>
 <p id="scanPhotoStatus" class="meta" style="display:none;"></p>
 
 <form method="get" action="/warehouse/find" class="search-bar">
   <input type="hidden" name="t" value="{{ token }}">
-  <input type="text" name="code" placeholder="Или наведите USB/Bluetooth-сканер сюда и считайте код"
+  <input type="text" name="code" placeholder="{{ t('warehouse_find_placeholder') }}"
          autocomplete="off" {% if error %}autofocus{% endif %}>
-  <button type="submit">Найти</button>
+  <button type="submit">{{ t('find_btn') }}</button>
 </form>
 <p class="meta" style="margin-top: -6px; margin-bottom: 14px;">
-  Физический сканер штрих-кодов работает как клавиатура — кликните в поле выше один раз и считайте
-  код, откроется нужная карточка (как при сканировании камерой). Также сканер сработает в любом
-  текстовом поле поиска по товару — например, в поиске на «Товары» ниже.
+  {{ t('warehouse_scanner_hint') }}
 </p>
 
 <div class="nav-list">
   <a class="card nav-card" href="{{ link('/inventory/products') }}">
     <div class="card-icon">{{ icons.icon('archive', 18) }}</div>
     <div class="nav-card-body">
-      <div class="nav-card-title">Товары</div>
-      <div class="nav-card-sub">Каталог товаров и комплектующих, остатки</div>
+      <div class="nav-card-title">{{ t('warehouse_nav_products_title') }}</div>
+      <div class="nav-card-sub">{{ t('warehouse_nav_products_sub') }}</div>
     </div>
     <div class="chevron">{{ icons.icon('chevron', 18) }}</div>
   </a>
   <a class="card nav-card" href="{{ link('/inventory/cells') }}">
     <div class="card-icon">{{ icons.icon('box', 18) }}</div>
     <div class="nav-card-body">
-      <div class="nav-card-title">Ячейки</div>
-      <div class="nav-card-sub">Места хранения на складе</div>
+      <div class="nav-card-title">{{ t('warehouse_nav_cells_title') }}</div>
+      <div class="nav-card-sub">{{ t('warehouse_nav_cells_sub') }}</div>
     </div>
     <div class="chevron">{{ icons.icon('chevron', 18) }}</div>
   </a>
   <a class="card nav-card" href="{{ link('/purchases') }}">
     <div class="card-icon">{{ icons.icon('truck', 18) }}</div>
     <div class="nav-card-body">
-      <div class="nav-card-title">Приход</div>
-      <div class="nav-card-sub">Поставщики и накладные</div>
+      <div class="nav-card-title">{{ t('warehouse_nav_purchases_title') }}</div>
+      <div class="nav-card-sub">{{ t('warehouse_nav_purchases_sub') }}</div>
     </div>
     <div class="chevron">{{ icons.icon('chevron', 18) }}</div>
   </a>
   <a class="card nav-card" href="{{ link('/inventory/movements') }}">
     <div class="card-icon">{{ icons.icon('repeat', 18) }}</div>
     <div class="nav-card-body">
-      <div class="nav-card-title">Движения склада</div>
-      <div class="nav-card-sub">Приход, списание, перемещение между ячейками</div>
+      <div class="nav-card-title">{{ t('warehouse_nav_movements_title') }}</div>
+      <div class="nav-card-sub">{{ t('warehouse_nav_movements_sub') }}</div>
     </div>
     <div class="chevron">{{ icons.icon('chevron', 18) }}</div>
   </a>

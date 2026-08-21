@@ -1,41 +1,41 @@
 {% extends "base.html" %}
 {% import "_icons.html" as icons %}
-{% block title %}Приход по фото{% endblock %}
+{% block title %}{{ t('purchase_draft_title') }}{% endblock %}
 {% block content %}
-<a class="back-link" href="{{ link('/purchases') }}">{{ icons.icon('back', 16) }} Приход</a>
+<a class="back-link" href="{{ link('/purchases') }}">{{ icons.icon('back', 16) }} {{ t('warehouse_nav_purchases_title') }}</a>
 
-<h3>Проверьте позиции, распознанные с фото</h3>
-<p style="color: var(--text-muted);">Строки предзаполнены — поправьте, что нужно, и оприходуйте как обычно.</p>
+<h3>{{ t('draft_review_title') }}</h3>
+<p style="color: var(--text-muted);">{{ t('draft_review_hint') }}</p>
 
 <form method="post" action="{{ link('/purchases/draft/' ~ draft.id) }}" class="edit-form" id="receiptForm">
-  <label>Поставщик
+  <label>{{ t('col_supplier') }}
     <select name="supplier_id">
-      <option value="">Без поставщика</option>
+      <option value="">{{ t('no_supplier_option') }}</option>
       {% for s in suppliers %}<option value="{{ s.id }}">{{ s.name }}</option>{% endfor %}
     </select>
   </label>
-  <label>Номер накладной<input type="text" name="invoice_no"></label>
+  <label>{{ t('invoice_no_label') }}<input type="text" name="invoice_no"></label>
 
   <datalist id="productList"></datalist>
   <input type="hidden" name="row_count" id="rowCount" value="0">
   <div id="purchaseRows"></div>
-  <button type="button" id="addRowBtn" class="secondary">+ Добавить позицию</button>
-  <button type="submit">Оприходовать</button>
+  <button type="button" id="addRowBtn" class="secondary">{{ t('sales_add_row_btn') }}</button>
+  <button type="submit">{{ t('receive_submit_btn') }}</button>
 </form>
 
 <template id="rowTemplate">
   <div class="purchase-row" style="display:flex; gap:6px; flex-wrap:wrap; padding-top:8px; border-top: 1px solid var(--border);">
     <input type="text" class="product-search" list="productList" name="product_name___IDX__"
-           placeholder="Товар — название или SKU" style="flex:2;">
+           placeholder="{{ t('sales_product_placeholder') }}" style="flex:2;">
     <input type="hidden" class="product-id-input" name="product_id___IDX__">
     <select name="cell_id___IDX__" class="cell-select" style="flex:1;">
-      <option value="">— ячейка —</option>
+      <option value="">{{ t('cell_placeholder') }}</option>
       {% for c in cells %}<option value="{{ c.id }}">{{ c.code }}</option>{% endfor %}
     </select>
-    <input type="number" name="qty___IDX__" placeholder="Кол-во" style="width:80px;">
-    <input type="number" name="unit_cost___IDX__" placeholder="Цена закупки" style="width:110px;">
+    <input type="number" name="qty___IDX__" placeholder="{{ t('qty_col') }}" style="width:80px;">
+    <input type="number" name="unit_cost___IDX__" placeholder="{{ t('col_unit_cost') }}" style="width:110px;">
     <div class="new-product-hint" style="display:none; flex-basis:100%; color: var(--accent-2); font-size: 0.9em;">
-      🆕 нет в каталоге — будет создан новый товар с этим названием
+      {{ t('new_product_hint') }}
     </div>
   </div>
 </template>

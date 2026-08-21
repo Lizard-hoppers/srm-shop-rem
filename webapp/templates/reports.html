@@ -1,68 +1,68 @@
 {% extends "base.html" %}
 {% import "_icons.html" as icons %}
-{% block title %}Отчёты{% endblock %}
+{% block title %}{{ t('more_reports') }}{% endblock %}
 {% block content %}
-<a class="back-link" href="{{ link('/more') }}">{{ icons.icon('back', 16) }} Ещё</a>
+<a class="back-link" href="{{ link('/more') }}">{{ icons.icon('back', 16) }} {{ t('nav_more') }}</a>
 
 <div class="stat-row">
   <div class="stat">
     <div class="stat-num">{{ revenue }}</div>
-    <div class="stat-label">выручка по выданным ремонтам</div>
+    <div class="stat-label">{{ t('stat_revenue') }}</div>
   </div>
   <div class="stat">
     <div class="stat-num">{{ avg_days if avg_days is not none else '—' }}</div>
-    <div class="stat-label">среднее время ремонта, дн.</div>
+    <div class="stat-label">{{ t('stat_avg_days') }}</div>
   </div>
   <div class="stat">
     <div class="stat-num">{{ low_stock|length }}</div>
-    <div class="stat-label">позиций с дефицитом на складе</div>
+    <div class="stat-label">{{ t('stat_low_stock') }}</div>
   </div>
 </div>
 
-<h2>Ремонты по статусам</h2>
+<h2>{{ t('repairs_by_status_title') }}</h2>
 <table class="table">
-  <thead><tr><th>Статус</th><th>Кол-во</th></tr></thead>
+  <thead><tr><th>{{ t('col_status') }}</th><th>{{ t('col_count') }}</th></tr></thead>
   <tbody>
     {% for r in by_status %}
-    <tr><td><span class="pill pill-{{ r.status }}">{{ status_labels.get(r.status, r.status) }}</span></td><td>{{ r.n }}</td></tr>
+    <tr><td><span class="pill pill-{{ r.status }}">{{ t('status_' ~ r.status) }}</span></td><td>{{ r.n }}</td></tr>
     {% else %}
-    <tr><td colspan="2">Данных пока нет.</td></tr>
+    <tr><td colspan="2">{{ t('no_data_yet') }}</td></tr>
     {% endfor %}
   </tbody>
 </table>
 
-<h2>Выработка мастеров</h2>
+<h2>{{ t('masters_output_title') }}</h2>
 <table class="table">
-  <thead><tr><th>Мастер</th><th>Всего ремонтов</th><th>Выдано</th></tr></thead>
+  <thead><tr><th>{{ t('master_label') }}</th><th>{{ t('col_total_repairs') }}</th><th>{{ t('col_issued') }}</th></tr></thead>
   <tbody>
     {% for m in by_master %}
     <tr><td>{{ m.master_name }}</td><td>{{ m.total }}</td><td>{{ m.issued }}</td></tr>
     {% else %}
-    <tr><td colspan="3">Данных пока нет.</td></tr>
+    <tr><td colspan="3">{{ t('no_data_yet') }}</td></tr>
     {% endfor %}
   </tbody>
 </table>
 
-<h2>Продажи по каналам</h2>
+<h2>{{ t('sales_by_channel_title') }}</h2>
 <table class="table">
-  <thead><tr><th>Канал</th><th>Заказов</th><th>Выручка</th></tr></thead>
+  <thead><tr><th>{{ t('channel_label') }}</th><th>{{ t('col_orders') }}</th><th>{{ t('col_revenue') }}</th></tr></thead>
   <tbody>
     {% for c in by_channel %}
-    <tr><td><span class="pill pill-{{ c.channel }}">{{ 'Онлайн' if c.channel == 'online' else 'Офлайн' }}</span></td><td>{{ c.orders }}</td><td>{{ c.revenue }}</td></tr>
+    <tr><td><span class="pill pill-{{ c.channel }}">{{ t('channel_online') if c.channel == 'online' else t('channel_offline') }}</span></td><td>{{ c.orders }}</td><td>{{ c.revenue }}</td></tr>
     {% else %}
-    <tr><td colspan="3">Данных пока нет.</td></tr>
+    <tr><td colspan="3">{{ t('no_data_yet') }}</td></tr>
     {% endfor %}
   </tbody>
 </table>
 
-<h2>Дефицит на складе</h2>
+<h2>{{ t('low_stock_title') }}</h2>
 <table class="table">
-  <thead><tr><th>Товар</th><th>Остаток</th><th>Мин.</th></tr></thead>
+  <thead><tr><th>{{ t('col_product') }}</th><th>{{ t('col_stock') }}</th><th>{{ t('col_min') }}</th></tr></thead>
   <tbody>
     {% for p in low_stock %}
     <tr class="row-warn"><td>{{ p.name }}</td><td>{{ p.total_qty }}</td><td>{{ p.min_qty }}</td></tr>
     {% else %}
-    <tr><td colspan="3">Дефицита нет.</td></tr>
+    <tr><td colspan="3">{{ t('no_deficit') }}</td></tr>
     {% endfor %}
   </tbody>
 </table>

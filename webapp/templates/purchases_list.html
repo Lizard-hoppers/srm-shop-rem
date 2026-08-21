@@ -1,11 +1,11 @@
 {% extends "base.html" %}
 {% import "_icons.html" as icons %}
-{% block title %}Приход{% endblock %}
+{% block title %}{{ t('warehouse_nav_purchases_title') }}{% endblock %}
 {% block content %}
-<a class="back-link" href="{{ link('/warehouse') }}">{{ icons.icon('back', 16) }} Склад</a>
+<a class="back-link" href="{{ link('/warehouse') }}">{{ icons.icon('back', 16) }} {{ t('nav_warehouse') }}</a>
 
 <table class="table">
-  <thead><tr><th>Поставщик</th><th>Накладная</th><th>Кто принял</th><th>Дата</th></tr></thead>
+  <thead><tr><th>{{ t('col_supplier') }}</th><th>{{ t('col_invoice') }}</th><th>{{ t('col_who_accepted') }}</th><th>{{ t('col_date') }}</th></tr></thead>
   <tbody>
     {% for r in receipts %}
     <tr onclick="location.href='{{ link('/purchases/' ~ r.id) }}'" class="clickable">
@@ -15,29 +15,29 @@
       <td>{{ r.created_at | kyiv }}</td>
     </tr>
     {% else %}
-    <tr><td colspan="4">Приходов пока нет.</td></tr>
+    <tr><td colspan="4">{{ t('purchases_empty') }}</td></tr>
     {% endfor %}
   </tbody>
 </table>
 
 <div class="grid-2">
   <div class="panel-box">
-    <h3>Новый приход</h3>
+    <h3>{{ t('new_receipt_title') }}</h3>
     <form method="post" action="{{ link('/purchases') }}" class="edit-form" id="receiptForm">
-      <label>Поставщик
+      <label>{{ t('col_supplier') }}
         <select name="supplier_id">
-          <option value="">Без поставщика</option>
+          <option value="">{{ t('no_supplier_option') }}</option>
           {% for s in suppliers %}<option value="{{ s.id }}">{{ s.name }}</option>{% endfor %}
         </select>
       </label>
-      <label>Номер накладной<input type="text" name="invoice_no"></label>
+      <label>{{ t('invoice_no_label') }}<input type="text" name="invoice_no"></label>
 
-      <label>Вставить накладную (скопировано из Excel/таблицы поставщика)
-        <textarea id="invoiceText" rows="3" placeholder="Название&#9;Кол-во&#9;Цена — по одной позиции на строку"></textarea>
+      <label>{{ t('paste_invoice_label') }}
+        <textarea id="invoiceText" rows="3" placeholder="{{ t('paste_invoice_placeholder') }}"></textarea>
       </label>
       <div style="display:flex; gap:6px;">
-        <button type="button" id="parseInvoiceBtn" class="secondary">Разобрать →</button>
-        <button type="button" id="scanInvoiceBtn" class="secondary">📷 Сканировать накладную</button>
+        <button type="button" id="parseInvoiceBtn" class="secondary">{{ t('parse_btn') }}</button>
+        <button type="button" id="scanInvoiceBtn" class="secondary">{{ t('scan_invoice_btn') }}</button>
       </div>
       <input type="file" accept="image/*" capture="environment" id="invoicePhotoInput" style="display:none;">
       <div id="scanStatus" style="display:none; color: var(--text-muted); font-size: 0.9em;"></div>
@@ -48,31 +48,31 @@
         {% for i in item_rows %}
         <div class="purchase-row" style="display:flex; gap:6px; flex-wrap:wrap; padding-top:8px; border-top: 1px solid var(--border);">
           <input type="text" class="product-search" list="productList" name="product_name_{{ i }}"
-                 placeholder="Товар — название или SKU" style="flex:2;">
+                 placeholder="{{ t('sales_product_placeholder') }}" style="flex:2;">
           <input type="hidden" class="product-id-input" name="product_id_{{ i }}">
           <select name="cell_id_{{ i }}" class="cell-select" style="flex:1;">
-            <option value="">— ячейка —</option>
+            <option value="">{{ t('cell_placeholder') }}</option>
             {% for c in cells %}<option value="{{ c.id }}">{{ c.code }}</option>{% endfor %}
           </select>
-          <input type="number" name="qty_{{ i }}" placeholder="Кол-во" style="width:80px;">
-          <input type="number" name="unit_cost_{{ i }}" placeholder="Цена закупки" style="width:110px;">
+          <input type="number" name="qty_{{ i }}" placeholder="{{ t('qty_col') }}" style="width:80px;">
+          <input type="number" name="unit_cost_{{ i }}" placeholder="{{ t('col_unit_cost') }}" style="width:110px;">
           <div class="new-product-hint" style="display:none; flex-basis:100%; color: var(--accent-2); font-size: 0.9em;">
-            🆕 нет в каталоге — будет создан новый товар с этим названием
+            {{ t('new_product_hint') }}
           </div>
         </div>
         {% endfor %}
       </div>
-      <button type="button" id="addRowBtn" class="secondary">+ Добавить позицию</button>
-      <button type="submit">Оприходовать</button>
+      <button type="button" id="addRowBtn" class="secondary">{{ t('sales_add_row_btn') }}</button>
+      <button type="submit">{{ t('receive_submit_btn') }}</button>
     </form>
   </div>
 
   <div class="panel-box">
-    <h3>Новый поставщик</h3>
+    <h3>{{ t('new_supplier_title') }}</h3>
     <form method="post" action="{{ link('/purchases/suppliers') }}" class="edit-form">
-      <label>Название<input type="text" name="name" required></label>
-      <label>Контакт<input type="text" name="contact"></label>
-      <button type="submit">Добавить</button>
+      <label>{{ t('name_label') }}<input type="text" name="name" required></label>
+      <label>{{ t('contact_label') }}<input type="text" name="contact"></label>
+      <button type="submit">{{ t('add_btn') }}</button>
     </form>
   </div>
 </div>
@@ -80,16 +80,16 @@
 <template id="rowTemplate">
   <div class="purchase-row" style="display:flex; gap:6px; flex-wrap:wrap; padding-top:8px; border-top: 1px solid var(--border);">
     <input type="text" class="product-search" list="productList" name="product_name___IDX__"
-           placeholder="Товар — название или SKU" style="flex:2;">
+           placeholder="{{ t('sales_product_placeholder') }}" style="flex:2;">
     <input type="hidden" class="product-id-input" name="product_id___IDX__">
     <select name="cell_id___IDX__" class="cell-select" style="flex:1;">
-      <option value="">— ячейка —</option>
+      <option value="">{{ t('cell_placeholder') }}</option>
       {% for c in cells %}<option value="{{ c.id }}">{{ c.code }}</option>{% endfor %}
     </select>
-    <input type="number" name="qty___IDX__" placeholder="Кол-во" style="width:80px;">
-    <input type="number" name="unit_cost___IDX__" placeholder="Цена закупки" style="width:110px;">
+    <input type="number" name="qty___IDX__" placeholder="{{ t('qty_col') }}" style="width:80px;">
+    <input type="number" name="unit_cost___IDX__" placeholder="{{ t('col_unit_cost') }}" style="width:110px;">
     <div class="new-product-hint" style="display:none; flex-basis:100%; color: var(--accent-2); font-size: 0.9em;">
-      🆕 нет в каталоге — будет создан новый товар с этим названием
+      {{ t('new_product_hint') }}
     </div>
   </div>
 </template>

@@ -1,13 +1,13 @@
 {% extends "base.html" %}
 {% import "_icons.html" as icons %}
-{% block title %}Товары{% endblock %}
+{% block title %}{{ t('warehouse_nav_products_title') }}{% endblock %}
 {% block content %}
-<a class="back-link" href="{{ link('/warehouse') }}">{{ icons.icon('back', 16) }} Склад</a>
+<a class="back-link" href="{{ link('/warehouse') }}">{{ icons.icon('back', 16) }} {{ t('nav_warehouse') }}</a>
 <form method="get" class="search-bar">
   <input type="hidden" name="t" value="{{ token }}">
-  <input type="text" name="q" value="{{ query or '' }}" placeholder="Поиск по названию или SKU">
-  <button type="submit">Найти</button>
-  {% if low_stock %}<span class="badge">только с низким остатком</span>{% endif %}
+  <input type="text" name="q" value="{{ query or '' }}" placeholder="{{ t('products_search_placeholder') }}">
+  <button type="submit">{{ t('find_btn') }}</button>
+  {% if low_stock %}<span class="badge">{{ t('products_low_stock_badge') }}</span>{% endif %}
 </form>
 
 <div class="cards">
@@ -20,18 +20,18 @@
     <div class="thumb-card-photo-placeholder">{{ icons.icon('box', 26) }}</div>
     {% endif %}
     <div class="thumb-card-name">{{ p.name }}</div>
-    <div class="thumb-card-meta">{{ p.sku or 'без SKU' }}{% if p.category %} · {{ p.category }}{% endif %}</div>
-    <div class="thumb-card-meta">Остаток: {{ p.total_qty }} {{ p.unit }} (мин. {{ p.min_qty }})</div>
+    <div class="thumb-card-meta">{{ p.sku or t('product_no_sku') }}{% if p.category %} · {{ p.category }}{% endif %}</div>
+    <div class="thumb-card-meta">{{ t('product_stock_prefix') }} {{ p.total_qty }} {{ p.unit }} ({{ t('product_min_short') }} {{ p.min_qty }})</div>
   </a>
   {% else %}
-  <p class="meta">Товаров пока нет.</p>
+  <p class="meta">{{ t('products_empty') }}</p>
   {% endfor %}
 </div>
 
-<h2>Добавить товар</h2>
+<h2>{{ t('products_add_title') }}</h2>
 <form method="post" action="{{ link('/inventory/products') }}" class="edit-form">
-  <label>Название<input type="text" name="name" id="newProductName" required></label>
-  <label>SKU
+  <label>{{ t('name_label') }}<input type="text" name="name" id="newProductName" required></label>
+  <label>{{ t('product_sku_label') }}
     <div style="display:flex; gap:6px;">
       <input type="text" name="sku" id="newProductSku" style="flex:1;">
       <button type="button" class="secondary scan-fill-btn" style="flex:0 0 auto;"
@@ -41,20 +41,20 @@
     </div>
   </label>
   <p id="newProductScanStatus" class="meta" style="display:none;"></p>
-  <label>Категория<input type="text" name="category"></label>
-  <label>Единица
+  <label>{{ t('product_category_label') }}<input type="text" name="category"></label>
+  <label>{{ t('product_unit_label') }}
     <input type="text" name="unit" list="unitList" value="шт">
     <datalist id="unitList">
       <option value="шт"><option value="уп."><option value="компл."><option value="м"><option value="пара">
     </datalist>
   </label>
-  <label>Мин. остаток (сигнал дефицита)<input type="number" name="min_qty" placeholder="0"></label>
-  <label>Цена продажи<input type="number" name="price"></label>
+  <label>{{ t('product_min_qty_label') }}<input type="number" name="min_qty" placeholder="0"></label>
+  <label>{{ t('product_price_label') }}<input type="number" name="price"></label>
   <div class="checkbox-row">
-    <label class="checkbox-label"><input type="checkbox" name="is_repair_part" checked> Деталь для ремонта</label>
-    <label class="checkbox-label"><input type="checkbox" name="is_sellable" checked> Товар на продажу</label>
+    <label class="checkbox-label"><input type="checkbox" name="is_repair_part" checked> {{ t('product_is_repair_part') }}</label>
+    <label class="checkbox-label"><input type="checkbox" name="is_sellable" checked> {{ t('product_is_sellable') }}</label>
   </div>
-  <button type="submit">Добавить</button>
+  <button type="submit">{{ t('add_btn') }}</button>
 </form>
 
 <script src="/static/scan-fill.js?v={{ asset_version }}"></script>

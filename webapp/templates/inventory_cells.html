@@ -1,24 +1,24 @@
 {% extends "base.html" %}
 {% import "_icons.html" as icons %}
-{% block title %}Ячейки{% endblock %}
+{% block title %}{{ t('warehouse_nav_cells_title') }}{% endblock %}
 {% block content %}
-<a class="back-link" href="{{ link('/warehouse') }}">{{ icons.icon('back', 16) }} Склад</a>
+<a class="back-link" href="{{ link('/warehouse') }}">{{ icons.icon('back', 16) }} {{ t('nav_warehouse') }}</a>
 <table class="table">
-  <thead><tr><th>Код</th><th>Зона/стеллаж</th><th>Заметка</th></tr></thead>
+  <thead><tr><th>{{ t('col_code') }}</th><th>{{ t('col_zone') }}</th><th>{{ t('col_note') }}</th></tr></thead>
   <tbody>
     {% for c in cells %}
     <tr><td>{{ c.code }}</td><td>{{ c.zone or '—' }}</td><td>{{ c.note or '' }}</td></tr>
     {% else %}
-    <tr><td colspan="3">Ячеек пока нет.</td></tr>
+    <tr><td colspan="3">{{ t('cells_empty') }}</td></tr>
     {% endfor %}
   </tbody>
 </table>
 
-<h2>Добавить ячейку</h2>
+<h2>{{ t('cells_add_title') }}</h2>
 <form method="post" action="{{ link('/inventory/cells') }}" class="inline-form">
-  <input type="text" name="code" placeholder="Код ячейки, напр. A1-03" required>
-  <input type="text" name="zone" placeholder="Зона/стеллаж">
-  <input type="text" name="note" placeholder="Заметка">
-  <button type="submit">Добавить</button>
+  <input type="text" name="code" placeholder="{{ t('cell_code_placeholder') }}" required>
+  <input type="text" name="zone" placeholder="{{ t('col_zone') }}">
+  <input type="text" name="note" placeholder="{{ t('col_note') }}">
+  <button type="submit">{{ t('add_btn') }}</button>
 </form>
 {% endblock %}

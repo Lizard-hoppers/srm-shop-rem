@@ -2,18 +2,18 @@
 {% import "_icons.html" as icons %}
 {% block title %}{{ product.name }}{% endblock %}
 {% block content %}
-<a class="back-link" href="{{ link('/inventory/products') }}">{{ icons.icon('back', 16) }} Товары</a>
+<a class="back-link" href="{{ link('/inventory/products') }}">{{ icons.icon('back', 16) }} {{ t('warehouse_nav_products_title') }}</a>
 
 <div class="panel-box" style="text-align: center;">
   <img class="photo-preview" src="{{ '/static/product_photos/' ~ product.photo_path if product.photo_path else '' }}"
        alt="{{ product.name }}"
        style="max-width: 240px; max-height: 240px; border-radius: 10px; object-fit: cover; {% if not product.photo_path %}display:none;{% endif %}">
-  <p class="no-photo-text meta" {% if product.photo_path %}style="display:none;"{% endif %}>Фото ещё не добавлено.</p>
+  <p class="no-photo-text meta" {% if product.photo_path %}style="display:none;"{% endif %}>{{ t('product_no_photo') }}</p>
   <form class="edit-form" style="margin-top: 10px;" data-photo-upload="/inventory/products/{{ product.id }}/photo">
-    <label>{{ 'Заменить фото' if product.photo_path else 'Добавить фото' }}
+    <label>{{ t('photo_replace') if product.photo_path else t('photo_add') }}
       <input type="file" name="photo" accept="image/jpeg,image/png,image/webp" capture="environment" required>
     </label>
-    <button type="submit">Загрузить</button>
+    <button type="submit">{{ t('upload_btn') }}</button>
   </form>
   <p class="photo-status meta" style="display:none;"></p>
 </div>
@@ -22,28 +22,26 @@
 
 {% if product.sku %}
 <div class="panel-box" style="margin-top: 16px; text-align: center;">
-  <h3>Штрих-код товара</h3>
+  <h3>{{ t('barcode_title') }}</h3>
   <div class="barcode-flip" id="barcodeFlip">
     <div class="barcode-flip-inner">
       <div class="barcode-flip-front">
-        <img src="{{ link('/inventory/products/' ~ product.id ~ '/barcode.png') }}" alt="Штрих-код товара"
+        <img src="{{ link('/inventory/products/' ~ product.id ~ '/barcode.png') }}" alt="{{ t('barcode_title') }}"
              style="max-width: 100%; width: 320px; border-radius: 10px; background: #fff; padding: 8px;">
       </div>
       <div class="barcode-flip-back">
-        <p class="meta" style="margin: 0;">Xprinter XP-420B · этикетка 30×20 мм</p>
-        <button type="button" class="barcode-print-btn" id="printAgentBtn">📡 Отправить на печать</button>
+        <p class="meta" style="margin: 0;">{{ t('barcode_printer_label') }}</p>
+        <button type="button" class="barcode-print-btn" id="printAgentBtn">{{ t('barcode_print_agent_btn') }}</button>
         <p class="barcode-print-status meta" style="display:none; margin: 0;"></p>
-        <button type="button" class="secondary" id="printBrowserBtn" style="font-size: 12px;">🖨 Печать через браузер (USB)</button>
+        <button type="button" class="secondary" id="printBrowserBtn" style="font-size: 12px;">{{ t('barcode_print_browser_btn') }}</button>
       </div>
     </div>
   </div>
-  <p class="meta">Тапните по штрих-коду, чтобы распечатать этикетку. Наклейте на полку/деталь — сканируется в
-    «Склад» → «Сканировать код», сразу открывает эту карточку. Название и цена на этикетке всегда берутся из
-    текущих данных, обновлять вручную не нужно — просто сохраните изменения и распечатайте заново.</p>
+  <p class="meta">{{ t('barcode_hint') }}</p>
 </div>
 
 <div id="printLabelArea">
-  <img src="{{ link('/inventory/products/' ~ product.id ~ '/barcode.png?compact=1') }}" alt="Штрих-код для печати">
+  <img src="{{ link('/inventory/products/' ~ product.id ~ '/barcode.png?compact=1') }}" alt="{{ t('barcode_title') }}">
 </div>
 
 <script>
@@ -110,42 +108,40 @@
 </script>
 {% else %}
 <div class="panel-box" style="margin-top: 16px; text-align: center;">
-  <h3>Штрих-код товара</h3>
-  <p class="meta">У товара нет SKU — впишите его в форме ниже (это и есть номер штрих-кода), чтобы этикетка появилась.</p>
+  <h3>{{ t('barcode_title') }}</h3>
+  <p class="meta">{{ t('barcode_no_sku_hint') }}</p>
 </div>
 {% endif %}
 
-<h2>Остаток по ячейкам</h2>
+<h2>{{ t('stock_by_cell_title') }}</h2>
 <table class="table">
-  <thead><tr><th>Ячейка</th><th>Кол-во</th></tr></thead>
+  <thead><tr><th>{{ t('cell_col') }}</th><th>{{ t('qty_col') }}</th></tr></thead>
   <tbody>
     {% for s in stock_by_cell %}
     <tr><td>{{ s.code }}</td><td>{{ s.qty }} {{ product.unit }}</td></tr>
     {% else %}
-    <tr><td colspan="2">На складе нет.</td></tr>
+    <tr><td colspan="2">{{ t('stock_empty') }}</td></tr>
     {% endfor %}
   </tbody>
 </table>
 
 <form method="post" action="{{ link('/inventory/products/' ~ product.id ~ '/receive') }}" class="edit-form">
-  <label>Добавить остаток
+  <label>{{ t('add_stock_label') }}
     <div style="display:flex; gap:6px;">
       <select name="cell_id" style="flex:1;">
-        <option value="">— ячейка —</option>
+        <option value="">{{ t('cell_placeholder') }}</option>
         {% for c in cells %}<option value="{{ c.id }}">{{ c.code }}</option>{% endfor %}
       </select>
-      <input type="number" name="qty" placeholder="Кол-во" style="width:100px; flex:0 0 auto;">
+      <input type="number" name="qty" placeholder="{{ t('qty_col') }}" style="width:100px; flex:0 0 auto;">
     </div>
   </label>
-  <button type="submit" class="secondary">+ Добавить на склад</button>
+  <button type="submit" class="secondary">{{ t('add_to_stock_btn') }}</button>
 </form>
 
-<h2>Поставщики этого товара</h2>
-<p class="meta">Одна и та же деталь может приходить от разных поставщиков вперемешку в одну ячейку — если
-  партия оказалась бракованной, выберите поставщика по накладной ниже (или из выпадающего списка в форме
-  возврата, если накладную найти не получается) и оформите возврат.</p>
+<h2>{{ t('suppliers_section_title') }}</h2>
+<p class="meta">{{ t('suppliers_section_hint') }}</p>
 <table class="table">
-  <thead><tr><th>Дата</th><th>Поставщик</th><th>Накладная</th><th>Кол-во</th><th>Цена за ед.</th><th></th></tr></thead>
+  <thead><tr><th>{{ t('col_date') }}</th><th>{{ t('col_supplier') }}</th><th>{{ t('col_invoice') }}</th><th>{{ t('qty_col') }}</th><th>{{ t('col_unit_cost') }}</th><th></th></tr></thead>
   <tbody>
     {% for r in receipt_history %}
     <tr>
@@ -158,33 +154,33 @@
         {% if r.supplier_id %}
         <button type="button" class="secondary supplier-return-pick"
                 style="font-size:12px; padding:4px 8px;"
-                data-supplier-id="{{ r.supplier_id }}" data-receipt-id="{{ r.receipt_id }}">↩ Возврат</button>
+                data-supplier-id="{{ r.supplier_id }}" data-receipt-id="{{ r.receipt_id }}">{{ t('return_btn') }}</button>
         {% endif %}
       </td>
     </tr>
     {% else %}
-    <tr><td colspan="6">Приходов по этому товару ещё не было.</td></tr>
+    <tr><td colspan="6">{{ t('no_receipts_yet') }}</td></tr>
     {% endfor %}
   </tbody>
 </table>
 
 <form method="post" action="{{ link('/inventory/products/' ~ product.id ~ '/supplier-return') }}" class="edit-form" id="supplierReturnForm">
-  <label>Оформить возврат поставщику
+  <label>{{ t('return_form_label') }}
     <select name="supplier_id" id="returnSupplierId" required>
-      <option value="">— поставщик —</option>
+      <option value="">{{ t('supplier_placeholder') }}</option>
       {% for s in suppliers %}<option value="{{ s.id }}">{{ s.name }}</option>{% endfor %}
     </select>
   </label>
   <input type="hidden" name="receipt_id" id="returnReceiptId">
   <div style="display:flex; gap:6px;">
     <select name="cell_id" style="flex:1;">
-      <option value="">— ячейка —</option>
+      <option value="">{{ t('cell_placeholder') }}</option>
       {% for c in cells %}<option value="{{ c.id }}">{{ c.code }}</option>{% endfor %}
     </select>
-    <input type="number" name="qty" placeholder="Кол-во" style="width:100px; flex:0 0 auto;">
+    <input type="number" name="qty" placeholder="{{ t('qty_col') }}" style="width:100px; flex:0 0 auto;">
   </div>
-  <label>Причина<input type="text" name="reason" placeholder="Брак, не работает…"></label>
-  <button type="submit" class="secondary">↩ Оформить возврат</button>
+  <label>{{ t('col_reason') }}<input type="text" name="reason" placeholder="{{ t('reason_placeholder') }}"></label>
+  <button type="submit" class="secondary">{{ t('return_submit_btn') }}</button>
 </form>
 <script>
 (function () {
@@ -199,9 +195,9 @@
 </script>
 
 {% if returns %}
-<h2>История возвратов</h2>
+<h2>{{ t('returns_history_title') }}</h2>
 <table class="table">
-  <thead><tr><th>Дата</th><th>Поставщик</th><th>Кол-во</th><th>Причина</th><th>Кто</th></tr></thead>
+  <thead><tr><th>{{ t('col_date') }}</th><th>{{ t('col_supplier') }}</th><th>{{ t('qty_col') }}</th><th>{{ t('col_reason') }}</th><th>{{ t('col_who') }}</th></tr></thead>
   <tbody>
     {% for ret in returns %}
     <tr>
@@ -216,10 +212,10 @@
 </table>
 {% endif %}
 
-<h2>Данные товара</h2>
+<h2>{{ t('product_data_title') }}</h2>
 <form method="post" action="{{ link('/inventory/products/' ~ product.id ~ '/edit') }}" class="edit-form">
-  <label>Название<input type="text" name="name" id="editProductName" value="{{ product.name }}" required></label>
-  <label>SKU
+  <label>{{ t('name_label') }}<input type="text" name="name" id="editProductName" value="{{ product.name }}" required></label>
+  <label>{{ t('product_sku_label') }}
     <div style="display:flex; gap:6px;">
       <input type="text" name="sku" id="editProductSku" value="{{ product.sku or '' }}" style="flex:1;">
       <button type="button" class="secondary scan-fill-btn" style="flex:0 0 auto;"
@@ -229,20 +225,20 @@
     </div>
   </label>
   <p id="editProductScanStatus" class="meta" style="display:none;"></p>
-  <label>Категория<input type="text" name="category" value="{{ product.category or '' }}"></label>
-  <label>Единица
+  <label>{{ t('product_category_label') }}<input type="text" name="category" value="{{ product.category or '' }}"></label>
+  <label>{{ t('product_unit_label') }}
     <input type="text" name="unit" list="unitList" value="{{ product.unit }}">
     <datalist id="unitList">
       <option value="шт"><option value="уп."><option value="компл."><option value="м"><option value="пара">
     </datalist>
   </label>
-  <label>Мин. остаток (сигнал дефицита)<input type="number" name="min_qty" value="{{ product.min_qty }}"></label>
-  <label>Цена продажи<input type="number" name="price" value="{{ product.price or '' }}"></label>
+  <label>{{ t('product_min_qty_label') }}<input type="number" name="min_qty" value="{{ product.min_qty }}"></label>
+  <label>{{ t('product_price_label') }}<input type="number" name="price" value="{{ product.price or '' }}"></label>
   <div class="checkbox-row">
-    <label class="checkbox-label"><input type="checkbox" name="is_repair_part" {% if product.is_repair_part %}checked{% endif %}> Деталь для ремонта</label>
-    <label class="checkbox-label"><input type="checkbox" name="is_sellable" {% if product.is_sellable %}checked{% endif %}> Товар на продажу</label>
+    <label class="checkbox-label"><input type="checkbox" name="is_repair_part" {% if product.is_repair_part %}checked{% endif %}> {{ t('product_is_repair_part') }}</label>
+    <label class="checkbox-label"><input type="checkbox" name="is_sellable" {% if product.is_sellable %}checked{% endif %}> {{ t('product_is_sellable') }}</label>
   </div>
-  <button type="submit">Сохранить</button>
+  <button type="submit">{{ t('save_btn') }}</button>
 </form>
 
 <script src="/static/scan-fill.js?v={{ asset_version }}"></script>

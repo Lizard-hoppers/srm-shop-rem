@@ -1117,10 +1117,7 @@ def scenario_webapp_forms(db_path: str) -> None:
         check("Ещё no longer carries the scanner (moved to Склад)",
               'scanPhotoBtn' not in client.get(f"/more?t={token}").text)
 
-        # Settings — язык интерфейса (19.08). Infrastructure + the most-
-        # visible screens (nav, home dashboard, Ещё) first, per Павел;
-        # the rest of the app stays Russian-only until it gets its own
-        # translation pass, so this only checks what's actually wired up.
+        # Settings — язык интерфейса (19.08, full app coverage 21.08).
         more_for_settings_resp = client.get(f"/more?t={token}")
         check("Ещё shows a Настройки card linking to /settings",
               "/settings" in more_for_settings_resp.text)
@@ -1145,6 +1142,41 @@ def scenario_webapp_forms(db_path: str) -> None:
               bad_lang_resp.status_code == 303 or (bad_lang_resp.history and bad_lang_resp.history[0].status_code == 303))
         check("the previous (uk) choice is still in effect after the rejected value",
               "Ремонти" in client.get(f"/?t={token}").text)
+
+        # 21.08 — the rest of the app (Продажи, Склад, Приход, Клиенты,
+        # Отчёты, Касса) got its i18n pass too; spot-check one distinctive
+        # uk string per page (not just the shared tabbar) with the ru
+        # equivalent absent, same shape as the tabbar check above.
+        uk_sales = client.get(f"/sales?t={token}")
+        check("Продажи: uk page shows a translated heading, not the ru one",
+              "Новий продаж" in uk_sales.text and "Новая продажа" not in uk_sales.text)
+
+        uk_warehouse = client.get(f"/warehouse?t={token}")
+        check("Склад hub: uk nav card titles, not ru",
+              "Товари" in uk_warehouse.text and "Товары" not in uk_warehouse.text)
+
+        uk_products = client.get(f"/inventory/products?t={token}")
+        check("Товары: uk add-product heading, not ru",
+              "Додати товар" in uk_products.text and "Добавить товар" not in uk_products.text)
+
+        uk_cells = client.get(f"/inventory/cells?t={token}")
+        check("Ячейки: uk page title, not ru", "Комірки" in uk_cells.text and "Ячейки" not in uk_cells.text)
+
+        uk_purchases = client.get(f"/purchases?t={token}")
+        check("Приход: uk heading, not ru",
+              "Новий прихід" in uk_purchases.text and "Новый приход" not in uk_purchases.text)
+
+        uk_clients = client.get(f"/clients?t={token}")
+        check("Клиенты: uk add-client heading, not ru",
+              "Додати клієнта" in uk_clients.text and "Добавить клиента" not in uk_clients.text)
+
+        uk_reports = client.get(f"/reports?t={token}")
+        check("Отчёты: uk section heading, not ru",
+              "Ремонти за статусами" in uk_reports.text and "Ремонты по статусам" not in uk_reports.text)
+
+        uk_cash = client.get(f"/cash?t={token}")
+        check("Касса: uk balance label, not ru",
+              "готівка в касі зараз" in uk_cash.text and "наличка в кассе сейчас" not in uk_cash.text)
 
         # reset — later checks in this same scenario assume Russian text
         client.post(f"/settings/language?t={token}", data={"language": "ru"})

@@ -1,33 +1,33 @@
 {% extends "base.html" %}
 {% import "_icons.html" as icons %}
-{% block title %}Клиенты{% endblock %}
+{% block title %}{{ t('more_clients') }}{% endblock %}
 {% block content %}
-<a class="back-link" href="{{ link('/more') }}">{{ icons.icon('back', 16) }} Ещё</a>
+<a class="back-link" href="{{ link('/more') }}">{{ icons.icon('back', 16) }} {{ t('nav_more') }}</a>
 
-<h2>Добавить клиента</h2>
+<h2>{{ t('clients_add_title') }}</h2>
 <form method="post" action="{{ link('/clients') }}" class="inline-form">
-  <input type="text" name="name" placeholder="Имя" required>
-  <input type="text" name="phone" placeholder="Телефон" value="+380">
-  <input type="text" name="notes" placeholder="Заметка">
-  <button type="submit">Добавить</button>
+  <input type="text" name="name" placeholder="{{ t('name_placeholder') }}" required>
+  <input type="text" name="phone" placeholder="{{ t('phone_placeholder') }}" value="+380">
+  <input type="text" name="notes" placeholder="{{ t('note_placeholder') }}">
+  <button type="submit">{{ t('add_btn') }}</button>
 </form>
 
-<h2>Клиенты</h2>
+<h2>{{ t('more_clients') }}</h2>
 <div class="btn-row">
-  <button type="button" id="scanQrBtn" onclick="scanClientQr()" style="display:none;">📷 Сканировать QR</button>
+  <button type="button" id="scanQrBtn" onclick="scanClientQr()" style="display:none;">{{ t('scan_qr_btn') }}</button>
 </div>
 
 <div class="section-btns">
-  <a href="{{ link('/clients' ~ ('?q=' ~ (query | urlencode) if query else '')) }}"><button type="button" class="secondary" {% if not source %}style="border-color: var(--accent); color: var(--accent-2);"{% endif %}>Все</button></a>
-  <a href="{{ link('/clients?source=offline' ~ ('&q=' ~ (query | urlencode) if query else '')) }}"><button type="button" class="secondary" {% if source == 'offline' %}style="border-color: var(--accent); color: var(--accent-2);"{% endif %}>Офлайн</button></a>
-  <a href="{{ link('/clients?source=online' ~ ('&q=' ~ (query | urlencode) if query else '')) }}"><button type="button" class="secondary" {% if source == 'online' %}style="border-color: var(--accent); color: var(--accent-2);"{% endif %}>Онлайн</button></a>
+  <a href="{{ link('/clients' ~ ('?q=' ~ (query | urlencode) if query else '')) }}"><button type="button" class="secondary" {% if not source %}style="border-color: var(--accent); color: var(--accent-2);"{% endif %}>{{ t('filter_all') }}</button></a>
+  <a href="{{ link('/clients?source=offline' ~ ('&q=' ~ (query | urlencode) if query else '')) }}"><button type="button" class="secondary" {% if source == 'offline' %}style="border-color: var(--accent); color: var(--accent-2);"{% endif %}>{{ t('channel_offline') }}</button></a>
+  <a href="{{ link('/clients?source=online' ~ ('&q=' ~ (query | urlencode) if query else '')) }}"><button type="button" class="secondary" {% if source == 'online' %}style="border-color: var(--accent); color: var(--accent-2);"{% endif %}>{{ t('channel_online') }}</button></a>
 </div>
 
 <form method="get" class="search-bar">
   <input type="hidden" name="t" value="{{ token }}">
   <input type="hidden" name="source" value="{{ source or '' }}">
-  <input type="text" name="q" value="{{ query or '' }}" placeholder="Поиск по имени или телефону">
-  <button type="submit">Найти</button>
+  <input type="text" name="q" value="{{ query or '' }}" placeholder="{{ t('clients_search_placeholder') }}">
+  <button type="submit">{{ t('find_btn') }}</button>
 </form>
 
 <div class="cards">
@@ -37,15 +37,15 @@
     <div class="thumb-card-photo-placeholder">{{ icons.icon('users', 26) }}</div>
     <div class="thumb-card-name">{{ c.name }}</div>
     <div class="thumb-card-meta">
-      {% if c.phone %}<a class="stretched-link-exception" href="tel:{{ c.phone }}">{{ c.phone }}</a>{% else %}Без телефона{% endif %}
+      {% if c.phone %}<a class="stretched-link-exception" href="tel:{{ c.phone }}">{{ c.phone }}</a>{% else %}{{ t('no_phone') }}{% endif %}
     </div>
     <div class="thumb-card-meta">
-      <span class="pill pill-{{ c.source }}">{{ 'Онлайн' if c.source == 'online' else 'Офлайн' }}</span>
+      <span class="pill pill-{{ c.source }}">{{ t('channel_online') if c.source == 'online' else t('channel_offline') }}</span>
     </div>
-    <div class="thumb-card-meta">В базе с {{ c.created_at | kyiv }}</div>
+    <div class="thumb-card-meta">{{ t('in_base_since') }} {{ c.created_at | kyiv }}</div>
   </div>
   {% else %}
-  <p class="meta">Клиентов пока нет.</p>
+  <p class="meta">{{ t('clients_empty') }}</p>
   {% endfor %}
 </div>
 

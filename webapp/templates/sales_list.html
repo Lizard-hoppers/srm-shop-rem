@@ -1,28 +1,28 @@
 {% extends "base.html" %}
-{% block title %}Продажи{% endblock %}
+{% block title %}{{ t('nav_sales') }}{% endblock %}
 {% block content %}
 {% if error %}<div class="flash flash-error">{{ error }}</div>{% endif %}
 
 <table class="table">
-  <thead><tr><th>Клиент</th><th>Канал</th><th>Оплата</th><th>Сумма</th><th>Гарантия</th><th>Продавец</th><th>Дата</th></tr></thead>
+  <thead><tr><th>{{ t('sales_col_client') }}</th><th>{{ t('channel_label') }}</th><th>{{ t('sales_col_payment') }}</th><th>{{ t('sales_col_amount') }}</th><th>{{ t('sales_col_warranty') }}</th><th>{{ t('sales_col_seller') }}</th><th>{{ t('col_date') }}</th></tr></thead>
   <tbody>
     {% for s in sales %}
     <tr onclick="location.href='{{ link('/sales/' ~ s.id) }}'" class="clickable">
-      <td>{{ s.client_name or 'Без клиента' }}</td>
-      <td><span class="pill pill-{{ s.channel }}">{{ 'Онлайн' if s.channel == 'online' else 'Офлайн' }}</span></td>
-      <td>{{ cash_methods.get(s.payment_method, '—') }}</td>
+      <td>{{ s.client_name or t('sales_client_none') }}</td>
+      <td><span class="pill pill-{{ s.channel }}">{{ t('channel_online') if s.channel == 'online' else t('channel_offline') }}</span></td>
+      <td>{{ t('payment_method_' ~ s.payment_method) if s.payment_method else '—' }}</td>
       <td>{{ s.total }}</td>
       <td>{{ s.warranty_until | rudate }}</td>
       <td>{{ s.staff_name or '—' }}</td>
       <td>{{ s.created_at | kyiv }}</td>
     </tr>
     {% else %}
-    <tr><td colspan="7">Продаж пока нет.</td></tr>
+    <tr><td colspan="7">{{ t('sales_empty') }}</td></tr>
     {% endfor %}
   </tbody>
 </table>
 
-<h2>Новая продажа</h2>
+<h2>{{ t('sales_new_title') }}</h2>
 <form method="post" action="{{ link('/sales') }}" class="edit-form" id="saleForm">
   <datalist id="saleProductList"></datalist>
   <input type="hidden" name="row_count" id="saleRowCount" value="{{ item_rows | length }}">
@@ -32,49 +32,50 @@
     {% for i in item_rows %}
     <div class="sale-row" style="display:flex; gap:6px; flex-wrap:wrap; align-items:center; padding-top:8px; border-top: 1px solid var(--border);">
       <input type="text" class="product-search" list="saleProductList" name="product_name_{{ i }}"
-             placeholder="Товар — название или SKU" style="flex:2;">
+             placeholder="{{ t('sales_product_placeholder') }}" style="flex:2;">
       <input type="hidden" class="product-id-input" name="product_id_{{ i }}">
       <button type="button" class="secondary sale-scan-btn" style="flex:0 0 auto;">📷</button>
-      <input type="number" name="qty_{{ i }}" placeholder="Кол-во" style="width:80px;">
-      <input type="number" name="price_{{ i }}" placeholder="Цена за шт" style="width:110px;">
+      <input type="number" name="qty_{{ i }}" placeholder="{{ t('qty_col') }}" style="width:80px;">
+      <input type="number" name="price_{{ i }}" placeholder="{{ t('sales_price_placeholder') }}" style="width:110px;">
       <div class="sale-row-hint meta" style="display:none; flex-basis:100%;"></div>
     </div>
     {% endfor %}
   </div>
-  <button type="button" id="addSaleRowBtn" class="secondary">+ Добавить позицию</button>
+  <button type="button" id="addSaleRowBtn" class="secondary">{{ t('sales_add_row_btn') }}</button>
 
-  <label>Канал
+  <label>{{ t('channel_label') }}
     <select name="channel">
-      <option value="offline">Офлайн (в точке)</option>
-      <option value="online">Онлайн</option>
+      <option value="offline">{{ t('channel_offline_full') }}</option>
+      <option value="online">{{ t('channel_online') }}</option>
     </select>
   </label>
-  <label>Способ оплаты
+  <label>{{ t('payment_method_label') }}
     <select name="payment_method">
-      {% for code, label in cash_methods.items() %}<option value="{{ code }}">{{ label }}</option>{% endfor %}
+      <option value="cash">{{ t('payment_method_cash') }}</option>
+      <option value="card">{{ t('payment_method_card') }}</option>
     </select>
   </label>
-  <label>Гарантия до (необязательно)<input type="date" name="warranty_until"></label>
+  <label>{{ t('sales_warranty_optional_label') }}<input type="date" name="warranty_until"></label>
   </div>
 
   <div>
-  <h3>Контакты клиента (необязательно)</h3>
-  <label>Имя клиента<input type="text" name="client_name"></label>
-  <label>Телефон клиента<input type="text" name="client_phone" value="+380"></label>
+  <h3>{{ t('sales_client_contacts_title') }}</h3>
+  <label>{{ t('client_name_label') }}<input type="text" name="client_name"></label>
+  <label>{{ t('client_phone_label') }}<input type="text" name="client_phone" value="+380"></label>
   </div>
   </div>
 
-  <button type="submit">Оформить продажу</button>
+  <button type="submit">{{ t('sales_submit_btn') }}</button>
 </form>
 
 <template id="saleRowTemplate">
   <div class="sale-row" style="display:flex; gap:6px; flex-wrap:wrap; align-items:center; padding-top:8px; border-top: 1px solid var(--border);">
     <input type="text" class="product-search" list="saleProductList" name="product_name___IDX__"
-           placeholder="Товар — название или SKU" style="flex:2;">
+           placeholder="{{ t('sales_product_placeholder') }}" style="flex:2;">
     <input type="hidden" class="product-id-input" name="product_id___IDX__">
     <button type="button" class="secondary sale-scan-btn" style="flex:0 0 auto;">📷</button>
-    <input type="number" name="qty___IDX__" placeholder="Кол-во" style="width:80px;">
-    <input type="number" name="price___IDX__" placeholder="Цена за шт" style="width:110px;">
+    <input type="number" name="qty___IDX__" placeholder="{{ t('qty_col') }}" style="width:80px;">
+    <input type="number" name="price___IDX__" placeholder="{{ t('sales_price_placeholder') }}" style="width:110px;">
     <div class="sale-row-hint meta" style="display:none; flex-basis:100%;"></div>
   </div>
 </template>

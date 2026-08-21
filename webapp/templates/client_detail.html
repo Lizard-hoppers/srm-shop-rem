@@ -2,45 +2,45 @@
 {% import "_icons.html" as icons %}
 {% block title %}{{ client.name }}{% endblock %}
 {% block content %}
-<a class="back-link" href="{{ link('/clients') }}">{{ icons.icon('back', 16) }} Клиенты</a>
+<a class="back-link" href="{{ link('/clients') }}">{{ icons.icon('back', 16) }} {{ t('more_clients') }}</a>
 
 <div class="panel-box">
   <h3>{{ client.name }}</h3>
-  <p class="meta">{% if client.phone %}<a href="tel:{{ client.phone }}">{{ client.phone }}</a>{% else %}Без телефона{% endif %} · {{ 'Онлайн' if client.source == 'online' else 'Офлайн' }} · в базе с {{ client.created_at | kyiv }}</p>
+  <p class="meta">{% if client.phone %}<a href="tel:{{ client.phone }}">{{ client.phone }}</a>{% else %}{{ t('no_phone') }}{% endif %} · {{ t('channel_online') if client.source == 'online' else t('channel_offline') }} · {{ t('in_base_since') }} {{ client.created_at | kyiv }}</p>
   {% if client.notes %}<p class="meta">{{ client.notes }}</p>{% endif %}
 </div>
 
 <div class="panel-box" style="margin-top: 16px; text-align: center;">
-  <h3>Карта клиента № {{ client.id }}</h3>
-  <img src="{{ link('/clients/' ~ client.id ~ '/qr.png') }}" alt="QR клиента" style="width: 160px; height: 160px; border-radius: 10px; background: #fff; padding: 8px;">
-  <p class="meta">Сканируйте в разделе «Клиенты» → «Сканировать QR», чтобы сразу открыть карточку.</p>
+  <h3>{{ t('client_card_title') }} {{ client.id }}</h3>
+  <img src="{{ link('/clients/' ~ client.id ~ '/qr.png') }}" alt="QR" style="width: 160px; height: 160px; border-radius: 10px; background: #fff; padding: 8px;">
+  <p class="meta">{{ t('client_qr_hint') }}</p>
 </div>
 
-<h2>История обращений — {{ repair_history|length }}</h2>
+<h2>{{ t('repair_history_title') }} {{ repair_history|length }}</h2>
 <table class="table">
-  <thead><tr><th>Устройство</th><th>Статус</th><th>Мастер</th><th>Принят</th></tr></thead>
+  <thead><tr><th>{{ t('col_device') }}</th><th>{{ t('col_status') }}</th><th>{{ t('master_label') }}</th><th>{{ t('accepted_at_prefix') }}</th></tr></thead>
   <tbody>
     {% for r in repair_history %}
     <tr onclick="location.href='{{ link('/repairs/' ~ r.id) }}'" class="clickable">
       <td>{{ r.device_type }} {{ r.brand or '' }} {{ r.model or '' }}{% if r.serial_number %} <span class="meta">· {{ r.serial_number }}</span>{% endif %}</td>
-      <td><span class="pill pill-{{ r.status }}">{{ status_labels[r.status] }}</span></td>
+      <td><span class="pill pill-{{ r.status }}">{{ t('status_' ~ r.status) }}</span></td>
       <td>{{ r.master_name or '—' }}</td>
       <td>{{ r.created_at | kyiv }}</td>
     </tr>
     {% else %}
-    <tr><td colspan="4">Пока не приносил устройства в ремонт.</td></tr>
+    <tr><td colspan="4">{{ t('no_repairs_yet') }}</td></tr>
     {% endfor %}
   </tbody>
 </table>
 
 {% if sales_history %}
-<h2>Покупки — {{ sales_history|length }}</h2>
+<h2>{{ t('purchases_history_title') }} {{ sales_history|length }}</h2>
 <table class="table">
-  <thead><tr><th>Канал</th><th>Сумма</th><th>Продавец</th><th>Дата</th></tr></thead>
+  <thead><tr><th>{{ t('channel_label') }}</th><th>{{ t('sales_col_amount') }}</th><th>{{ t('sales_col_seller') }}</th><th>{{ t('col_date') }}</th></tr></thead>
   <tbody>
     {% for s in sales_history %}
     <tr onclick="location.href='{{ link('/sales/' ~ s.id) }}'" class="clickable">
-      <td><span class="pill pill-{{ s.channel }}">{{ 'Онлайн' if s.channel == 'online' else 'Офлайн' }}</span></td>
+      <td><span class="pill pill-{{ s.channel }}">{{ t('channel_online') if s.channel == 'online' else t('channel_offline') }}</span></td>
       <td>{{ s.total }}</td>
       <td>{{ s.staff_name or '—' }}</td>
       <td>{{ s.created_at | kyiv }}</td>
@@ -50,11 +50,11 @@
 </table>
 {% endif %}
 
-<h2>Данные клиента</h2>
+<h2>{{ t('client_data_title') }}</h2>
 <form method="post" action="{{ link('/clients/' ~ client.id ~ '/edit') }}" class="edit-form">
-  <label>Имя<input type="text" name="name" value="{{ client.name }}" required></label>
-  <label>Телефон<input type="text" name="phone" value="{{ client.phone or '+380' }}"></label>
-  <label>Заметки<textarea name="notes">{{ client.notes or '' }}</textarea></label>
-  <button type="submit">Сохранить</button>
+  <label>{{ t('name_placeholder') }}<input type="text" name="name" value="{{ client.name }}" required></label>
+  <label>{{ t('phone_label') }}<input type="text" name="phone" value="{{ client.phone or '+380' }}"></label>
+  <label>{{ t('notes_label') }}<textarea name="notes">{{ client.notes or '' }}</textarea></label>
+  <button type="submit">{{ t('save_btn') }}</button>
 </form>
 {% endblock %}

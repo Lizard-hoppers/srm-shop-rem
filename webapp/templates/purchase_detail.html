@@ -1,12 +1,12 @@
 {% extends "base.html" %}
 {% import "_icons.html" as icons %}
-{% block title %}Приход #{{ receipt.id }}{% endblock %}
+{% block title %}{{ t('warehouse_nav_purchases_title') }} #{{ receipt.id }}{% endblock %}
 {% block content %}
-<a class="back-link" href="{{ link('/purchases') }}">{{ icons.icon('back', 16) }} Приход</a>
-<p class="meta">Поставщик: {{ receipt.supplier_name or '—' }} · Накладная: {{ receipt.invoice_no or '—' }} · Принял: {{ receipt.staff_name or '—' }} · {{ receipt.created_at | kyiv }}</p>
+<a class="back-link" href="{{ link('/purchases') }}">{{ icons.icon('back', 16) }} {{ t('warehouse_nav_purchases_title') }}</a>
+<p class="meta">{{ t('col_supplier') }}: {{ receipt.supplier_name or '—' }} · {{ t('col_invoice') }}: {{ receipt.invoice_no or '—' }} · {{ t('accepted_by_label') }}: {{ receipt.staff_name or '—' }} · {{ receipt.created_at | kyiv }}</p>
 
 <table class="table">
-  <thead><tr><th>Товар</th><th>Ячейка</th><th>Кол-во</th><th>Цена закупки</th></tr></thead>
+  <thead><tr><th>{{ t('col_product') }}</th><th>{{ t('cell_col') }}</th><th>{{ t('qty_col') }}</th><th>{{ t('col_unit_cost') }}</th></tr></thead>
   <tbody>
     {% for i in items %}
     <tr>

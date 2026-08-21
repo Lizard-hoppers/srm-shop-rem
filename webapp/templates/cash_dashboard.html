@@ -1,65 +1,65 @@
 {% extends "base.html" %}
 {% import "_icons.html" as icons %}
-{% block title %}Касса{% endblock %}
+{% block title %}{{ t('nav_cash') }}{% endblock %}
 {% block content %}
-<a class="back-link" href="{{ link('/more') }}">{{ icons.icon('back', 16) }} Ещё</a>
+<a class="back-link" href="{{ link('/more') }}">{{ icons.icon('back', 16) }} {{ t('nav_more') }}</a>
 {% if error %}<div class="flash flash-error">{{ error }}</div>{% endif %}
 
 <div class="cash-layout">
 <div>
 <div class="panel-box" style="margin-bottom: 20px;">
   <div style="font-size: 32px; font-weight: 800; letter-spacing: -0.02em;">{{ balance }}</div>
-  <div class="stat-label" style="margin-top: 4px;">наличка в кассе сейчас</div>
+  <div class="stat-label" style="margin-top: 4px;">{{ t('cash_balance_label') }}</div>
 </div>
 
-<h2>За период</h2>
+<h2>{{ t('cash_period_title') }}</h2>
 <form method="get" action="{{ link('/cash') }}" class="edit-form" style="margin-bottom: 20px;">
-  <label>С<input type="date" name="date_from" value="{{ date_from }}"></label>
-  <label>По<input type="date" name="date_to" value="{{ date_to }}"></label>
-  <button type="submit" class="secondary">Показать</button>
+  <label>{{ t('from_short_label') }}<input type="date" name="date_from" value="{{ date_from }}"></label>
+  <label>{{ t('to_short_label') }}<input type="date" name="date_to" value="{{ date_to }}"></label>
+  <button type="submit" class="secondary">{{ t('show_btn') }}</button>
 </form>
 
 <div class="stat-row" style="grid-template-columns: repeat(2, 1fr);">
   <div class="stat">
     <div class="stat-num">{{ summary.income_cash }}</div>
-    <div class="stat-label">приход наличными</div>
+    <div class="stat-label">{{ t('income_cash_label') }}</div>
   </div>
   <div class="stat">
     <div class="stat-num">{{ summary.income_card }}</div>
-    <div class="stat-label">приход картой/переводом</div>
+    <div class="stat-label">{{ t('income_card_label') }}</div>
   </div>
   <div class="stat">
     <div class="stat-num">{{ summary.expense_total }}</div>
-    <div class="stat-label">расход всего</div>
+    <div class="stat-label">{{ t('expense_total_label') }}</div>
   </div>
   <div class="stat">
     <div class="stat-num">{{ summary.net }}</div>
-    <div class="stat-label">чистыми за период</div>
+    <div class="stat-label">{{ t('net_label') }}</div>
   </div>
 </div>
 
-<h2>Последние операции</h2>
+<h2>{{ t('recent_ops_title') }}</h2>
 <table class="table">
-  <thead><tr><th>Когда</th><th>Тип</th><th>Способ</th><th>Сумма</th><th>За что</th><th>Кто</th></tr></thead>
+  <thead><tr><th>{{ t('col_when') }}</th><th>{{ t('col_type') }}</th><th>{{ t('col_method') }}</th><th>{{ t('sales_col_amount') }}</th><th>{{ t('col_for_what') }}</th><th>{{ t('col_who') }}</th></tr></thead>
   <tbody>
     {% for tx in transactions %}
     <tr>
       <td>{{ tx.created_at | kyiv }}</td>
-      <td>{{ '⬆ Приход' if tx.kind == 'income' else '⬇ Расход' }}</td>
-      <td>{{ cash_methods.get(tx.method, tx.method) }}</td>
+      <td>{{ t('income_arrow_label') if tx.kind == 'income' else t('expense_arrow_label') }}</td>
+      <td>{{ t('payment_method_' ~ tx.method) }}</td>
       <td>{{ tx.amount }}</td>
       <td>
-        {% if tx.ref_type == 'sales_order' %}Продажа #{{ tx.ref_id }}
-        {% elif tx.ref_type == 'repair_order' %}Ремонт #{{ tx.ref_id }}
-        {% elif tx.category == 'adjustment' %}Корректировка кассы
-        {% else %}{{ cash_expense_categories.get(tx.category, tx.category or '—') }}
+        {% if tx.ref_type == 'sales_order' %}{{ t('sale_ref_label') }}{{ tx.ref_id }}
+        {% elif tx.ref_type == 'repair_order' %}{{ t('repair_ref_label') }}{{ tx.ref_id }}
+        {% elif tx.category == 'adjustment' %}{{ t('adjustment_ref_label') }}
+        {% else %}{{ t('expense_category_' ~ tx.category) if tx.category else '—' }}
         {% endif %}
         {% if tx.comment %}<div class="meta">{{ tx.comment }}</div>{% endif %}
       </td>
       <td>{{ tx.staff_name or '—' }}</td>
     </tr>
     {% else %}
-    <tr><td colspan="6">Операций пока нет.</td></tr>
+    <tr><td colspan="6">{{ t('ops_empty') }}</td></tr>
     {% endfor %}
   </tbody>
 </table>
@@ -67,37 +67,41 @@
 
 <div>
 <div class="panel-box">
-  <h3>Расход</h3>
+  <h3>{{ t('expense_section_title') }}</h3>
   <form method="post" action="{{ link('/cash/expense') }}" class="edit-form">
-    <label>Категория
+    <label>{{ t('category_label') }}
       <select name="category">
-        {% for code, label in cash_expense_categories.items() %}<option value="{{ code }}">{{ label }}</option>{% endfor %}
+        <option value="rent">{{ t('expense_category_rent') }}</option>
+        <option value="salary">{{ t('expense_category_salary') }}</option>
+        <option value="supplies">{{ t('expense_category_supplies') }}</option>
+        <option value="other">{{ t('expense_category_other') }}</option>
       </select>
     </label>
-    <label>Способ
+    <label>{{ t('col_method') }}
       <select name="method">
-        {% for code, label in cash_methods.items() %}<option value="{{ code }}">{{ label }}</option>{% endfor %}
+        <option value="cash">{{ t('payment_method_cash') }}</option>
+        <option value="card">{{ t('payment_method_card') }}</option>
       </select>
     </label>
-    <label>Сумма<input type="number" name="amount" placeholder="Сумма"></label>
-    <label>Комментарий<input type="text" name="comment" placeholder="Комментарий"></label>
-    <button type="submit" class="secondary">− Списать расход</button>
+    <label>{{ t('sales_col_amount') }}<input type="number" name="amount" placeholder="{{ t('amount_placeholder') }}"></label>
+    <label>{{ t('comment_label') }}<input type="text" name="comment" placeholder="{{ t('comment_label') }}"></label>
+    <button type="submit" class="secondary">{{ t('expense_submit_btn') }}</button>
   </form>
 </div>
 
 <div class="panel-box" style="margin-top: 16px;">
-  <h3>Внести / изъять наличку</h3>
-  <p class="meta">Для размена или пересчёта — довнести на сдачу, забрать в конце дня, поправить расхождение.</p>
+  <h3>{{ t('adjustment_section_title') }}</h3>
+  <p class="meta">{{ t('adjustment_hint') }}</p>
   <form method="post" action="{{ link('/cash/adjustment') }}" class="edit-form">
-    <label>Действие
+    <label>{{ t('action_label') }}
       <select name="direction">
-        <option value="in">Внести</option>
-        <option value="out">Изъять</option>
+        <option value="in">{{ t('action_in') }}</option>
+        <option value="out">{{ t('action_out') }}</option>
       </select>
     </label>
-    <label>Сумма<input type="number" name="amount" placeholder="Сумма"></label>
-    <label>Комментарий (необязательно)<input type="text" name="comment"></label>
-    <button type="submit" class="secondary">Оформить</button>
+    <label>{{ t('sales_col_amount') }}<input type="number" name="amount" placeholder="{{ t('amount_placeholder') }}"></label>
+    <label>{{ t('comment_optional_placeholder') }}<input type="text" name="comment"></label>
+    <button type="submit" class="secondary">{{ t('adjustment_submit_btn') }}</button>
   </form>
 </div>
 </div>
