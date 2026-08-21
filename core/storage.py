@@ -244,6 +244,26 @@ CREATE TABLE IF NOT EXISTS print_jobs (
     printed_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_print_jobs_status ON print_jobs(status);
+
+-- Касса (21.08): a single append-only cash ledger, income and expense
+-- both. No shift open/close ritual — cash-on-hand is just the running
+-- signed sum of every method='cash' row (see core.cash.cash_balance), and
+-- a "day" for reporting is a plain calendar date (core.timefmt.kyiv_date_range_utc).
+-- income rows link back to what earned the money (ref_type/ref_id, same
+-- convention as stock_movements); expense/adjustment rows don't.
+CREATE TABLE IF NOT EXISTS cash_transactions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL CHECK(kind IN ('income','expense')),
+    method TEXT NOT NULL CHECK(method IN ('cash','card')),
+    amount INTEGER NOT NULL,
+    category TEXT,
+    ref_type TEXT,
+    ref_id INTEGER,
+    comment TEXT,
+    staff_id INTEGER REFERENCES staff(id),
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_cash_transactions_created ON cash_transactions(created_at);
 """
 
 
@@ -265,6 +285,7 @@ def init_db(db_path: str = DB_PATH) -> None:
         _ensure_column(conn, "devices", "photo_path", "photo_path TEXT")
         _ensure_column(conn, "staff", "language", "language TEXT NOT NULL DEFAULT 'ru'")
         _ensure_column(conn, "repair_order_messages", "has_photo", "has_photo INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "sales_orders", "payment_method", "payment_method TEXT")
         device_catalog.seed(conn)
         conn.commit()
     finally:

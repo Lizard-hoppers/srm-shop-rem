@@ -40,6 +40,14 @@
             {% for s in statuses %}<option value="{{ s }}" {% if s == repair.status %}selected{% endif %}>{{ t('status_' ~ s) }}</option>{% endfor %}
           </select>
         </label>
+        <label>{{ t('payment_method_label') }}
+          <select name="payment_method">
+            <option value="">—</option>
+            <option value="cash">{{ t('payment_method_cash') }}</option>
+            <option value="card">{{ t('payment_method_card') }}</option>
+          </select>
+        </label>
+        <p class="meta">{{ t('payment_method_hint') }}</p>
         <label>{{ t('comment_label') }}<input type="text" name="comment"></label>
         <button type="submit">{{ t('update_status_btn') }}</button>
       </form>

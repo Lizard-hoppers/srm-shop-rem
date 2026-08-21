@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import sqlite3
 
+from core import cash as core_cash
 from core.inventory import InsufficientStockError, pick_cell_with_stock, record_movement
 
 
@@ -16,16 +17,22 @@ def create_sale(
     staff_id: int,
     items: list[tuple[int, int, int]],
     warranty_until: str | None = None,
+    payment_method: str = "cash",
 ) -> int:
-    """items: list of (product_id, qty, price)."""
+    """items: list of (product_id, qty, price). Records the sale total in
+    the касса ledger (core.cash.record_income) same transaction as the
+    order itself — a sale and its payment are one atomic event here,
+    there's no separate "collect payment later" step in this shop's flow."""
     if not items:
         raise ValueError("нужна хотя бы одна позиция в продаже")
 
     order_id = conn.execute(
-        "INSERT INTO sales_orders (client_id, channel, status, staff_id, warranty_until) VALUES (?, ?, 'completed', ?, ?)",
-        (client_id, channel, staff_id, warranty_until),
+        """INSERT INTO sales_orders (client_id, channel, status, staff_id, warranty_until, payment_method)
+           VALUES (?, ?, 'completed', ?, ?, ?)""",
+        (client_id, channel, staff_id, warranty_until, payment_method),
     ).lastrowid
 
+    total = 0
     for product_id, qty, price in items:
         cell_id = pick_cell_with_stock(conn, product_id, qty)
         if cell_id is None:
@@ -38,6 +45,9 @@ def create_sale(
             conn, product_id, qty, "sale", staff_id,
             from_cell_id=cell_id, ref_type="sales_order", ref_id=order_id,
         )
+        total += qty * price
+
+    core_cash.record_income(conn, payment_method, total, "sales_order", order_id, staff_id)
 
     return order_id
 

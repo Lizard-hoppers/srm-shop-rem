@@ -37,7 +37,7 @@ import httpx
 import jinja2
 from PIL import Image
 
-from core import auth, barcode_label, clients, device_catalog, inventory, purchases, qr, repairs, sales, timefmt
+from core import auth, barcode_label, cash, clients, device_catalog, inventory, purchases, qr, repairs, sales, timefmt
 from core.session_token import make_token, read_token
 from core.storage import get_conn, init_db
 from core.telegram_auth import validate_init_data
@@ -524,6 +524,77 @@ def scenario_sales(db_path: str) -> None:
         no_warranty_id = sales.create_sale(conn, None, "offline", staff_id, [(product_id, 1, 500)])
         sale2 = sales.get_sale(conn, no_warranty_id)
         check("warranty_until defaults to null when not given", sale2["warranty_until"] is None)
+
+        inventory.receive_stock(conn, product_id, cell_a, 2, staff_id)
+        cash_sale_id = sales.create_sale(conn, None, "offline", staff_id, [(product_id, 1, 500)], payment_method="cash")
+        check("payment_method defaults to cash and is stored on the order",
+              sales.get_sale(conn, cash_sale_id)["payment_method"] == "cash")
+        card_sale_id = sales.create_sale(conn, None, "offline", staff_id, [(product_id, 1, 500)], payment_method="card")
+        check("a card sale is stored with method='card'", sales.get_sale(conn, card_sale_id)["payment_method"] == "card")
+
+        cash_income = [t for t in cash.list_transactions(conn) if t["ref_type"] == "sales_order" and t["ref_id"] == cash_sale_id]
+        card_income = [t for t in cash.list_transactions(conn) if t["ref_type"] == "sales_order" and t["ref_id"] == card_sale_id]
+        check("a cash sale posts a cash-method income row for its full total",
+              len(cash_income) == 1 and cash_income[0]["method"] == "cash" and cash_income[0]["amount"] == 500)
+        check("a card sale posts a card-method income row, not cash",
+              len(card_income) == 1 and card_income[0]["method"] == "card")
+
+
+def scenario_cash(db_path: str) -> None:
+    print("scenario: касса — cash-on-hand balance, expenses, adjustments, period summary")
+    with get_conn(db_path) as conn:
+        staff_id = auth.create_staff(conn, "cashier2", "pass", "Кассир 2", "owner")
+        balance_before = cash.cash_balance(conn)
+
+        cash.record_income(conn, "cash", 1000, "manual", None, staff_id, "тестовый приход нал")
+        cash.record_income(conn, "card", 2000, "manual", None, staff_id, "тестовый приход карта")
+        check("cash balance only moves on cash-method income, not card",
+              cash.cash_balance(conn) == balance_before + 1000)
+
+        cash.record_expense(conn, "cash", 300, "rent", "аренда за день", staff_id)
+        check("a cash expense reduces the cash balance", cash.cash_balance(conn) == balance_before + 1000 - 300)
+
+        cash.record_expense(conn, "card", 150, "supplies", "оплата картой поставщику", staff_id)
+        check("a card expense does not touch the cash balance", cash.cash_balance(conn) == balance_before + 1000 - 300)
+
+        cash.record_adjustment(conn, 500, "довнесли на размен", staff_id)
+        check("a positive adjustment (внести) adds to the cash balance",
+              cash.cash_balance(conn) == balance_before + 1000 - 300 + 500)
+        cash.record_adjustment(conn, -200, "забрали в сейф", staff_id)
+        check("a negative adjustment (изъять) subtracts from the cash balance",
+              cash.cash_balance(conn) == balance_before + 1000 - 300 + 500 - 200)
+
+        raised = False
+        try:
+            cash.record_adjustment(conn, 0, "нулевая сумма", staff_id)
+        except ValueError:
+            raised = True
+        check("a zero-amount adjustment is rejected, not silently a no-op", raised)
+
+        raised = False
+        try:
+            cash.record_expense(conn, "cash", -50, "other", "отрицательная сумма", staff_id)
+        except ValueError:
+            raised = True
+        check("a negative expense amount is rejected", raised)
+
+        today = timefmt.kyiv_today()
+        utc_start, utc_end = timefmt.kyiv_date_range_utc(today, today)
+        summary = cash.period_summary(conn, utc_start, utc_end)
+        check("today's period summary picks up the income/expense just recorded",
+              summary["income_cash"] >= 1500 and summary["income_card"] >= 2000 and summary["expense_cash"] >= 300)
+        check("net is income minus expense for the period",
+              summary["net"] == summary["income_total"] - summary["expense_total"])
+
+        far_future_start, far_future_end = timefmt.kyiv_date_range_utc("2099-01-01", "2099-01-01")
+        empty_summary = cash.period_summary(conn, far_future_start, far_future_end)
+        check("a period with no transactions summarizes to all zeros",
+              empty_summary == {"income_cash": 0, "income_card": 0, "income_total": 0,
+                                 "expense_cash": 0, "expense_card": 0, "expense_total": 0, "net": 0})
+
+        recent = cash.list_transactions(conn, limit=3)
+        check("list_transactions respects the limit and is newest-first",
+              len(recent) == 3 and recent[0]["created_at"] >= recent[1]["created_at"])
 
 
 class _FakeTelegramResponse:
@@ -1450,6 +1521,70 @@ def scenario_webapp_forms(db_path: str) -> None:
         else:
             check("a large real photo is downscaled to the cap, not stored at full resolution", False)
 
+        # Касса, end to end over real HTTP: a priced repair can't be
+        # marked "Выдан" without a payment method (friendly error, not a
+        # raw 422, and the status transition itself must not go through);
+        # picking one both issues the repair AND posts касса income;
+        # re-saving the same already-issued repair must not double-charge.
+        with get_conn(db_path) as conn:
+            cash_client_id = clients.get_or_create_by_phone(conn, "Касса Клиент", "+380501230000", source="offline")
+            cash_repair_id = repairs.create_repair(
+                conn, cash_client_id, "Смартфон", "Apple", "iPhone 8", None, "не грузится", "offline", None, 800, staff_id,
+            )
+            repairs.set_price(conn, cash_repair_id, 800, 800)
+            balance_before_issue = cash.cash_balance(conn)
+
+        no_method_resp = client.post(f"/repairs/{cash_repair_id}/status?t={token}", data={"status": "issued", "comment": ""})
+        check("issuing a priced repair with no payment method: no raw 422", no_method_resp.status_code != 422)
+        check("issuing a priced repair with no payment method: friendly error shown",
+              "Укажите способ оплаты" in no_method_resp.text)
+        with get_conn(db_path) as conn:
+            check("the blocked transition left the repair's status untouched",
+                  repairs.get_repair(conn, cash_repair_id)["status"] == "new")
+        with get_conn(db_path) as conn:
+            check("cash balance unchanged when the transition was blocked", cash.cash_balance(conn) == balance_before_issue)
+
+        issue_resp = client.post(f"/repairs/{cash_repair_id}/status?t={token}", data={
+            "status": "issued", "comment": "", "payment_method": "cash",
+        })
+        check("issuing with a payment method redirects (303)",
+              issue_resp.status_code == 303 or (issue_resp.history and issue_resp.history[0].status_code == 303))
+        with get_conn(db_path) as conn:
+            check("cash balance increased by exactly the repair's price_final",
+                  cash.cash_balance(conn) == balance_before_issue + 800)
+
+        client.post(f"/repairs/{cash_repair_id}/status?t={token}", data={
+            "status": "issued", "comment": "повторное сохранение", "payment_method": "cash",
+        })
+        with get_conn(db_path) as conn:
+            check("re-submitting an already-issued repair does not double-charge the касса",
+                  cash.cash_balance(conn) == balance_before_issue + 800)
+
+        # /cash dashboard + manual expense/adjustment forms.
+        dash_resp = client.get(f"/cash?t={token}")
+        check("cash dashboard renders for an owner", dash_resp.status_code == 200 and "Касса" in dash_resp.text)
+
+        with get_conn(db_path) as conn:
+            master_id = auth.create_staff(conn, "cashmaster", "pass", "Мастер Касса", "master")
+        master_token = make_token(master_id)
+        denied_resp = client.get(f"/cash?t={master_token}")
+        check("a master role is denied the cash dashboard (403), not shown financial data", denied_resp.status_code == 403)
+
+        expense_resp = client.post(f"/cash/expense?t={token}", data={"method": "cash", "amount": "", "category": "rent"})
+        check("missing expense amount: no raw 422", expense_resp.status_code != 422)
+        check("missing expense amount: friendly error shown", "Укажите сумму расхода" in expense_resp.text)
+
+        with get_conn(db_path) as conn:
+            balance_before_expense = cash.cash_balance(conn)
+        client.post(f"/cash/expense?t={token}", data={"method": "cash", "amount": "150", "category": "rent", "comment": "аренда"})
+        with get_conn(db_path) as conn:
+            check("a valid expense over HTTP actually reduces the cash balance",
+                  cash.cash_balance(conn) == balance_before_expense - 150)
+
+        adj_resp = client.post(f"/cash/adjustment?t={token}", data={"direction": "in", "amount": "0"})
+        check("zero-amount adjustment: friendly error, no raw 422",
+              adj_resp.status_code != 422 and "Укажите сумму" in adj_resp.text)
+
 
 def main() -> None:
     with tempfile.TemporaryDirectory() as tmp:
@@ -1467,6 +1602,7 @@ def main() -> None:
         scenario_purchase_import(db_path)
         scenario_purchase_drafts_and_vision(db_path)
         scenario_sales(db_path)
+        scenario_cash(db_path)
         scenario_repair_card_notify(db_path)
         scenario_repair_actions(db_path)
         scenario_repair_attachments(db_path)

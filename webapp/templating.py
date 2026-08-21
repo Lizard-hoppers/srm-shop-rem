@@ -4,6 +4,7 @@ import time
 from fastapi import Request
 from fastapi.templating import Jinja2Templates
 
+from core.cash import EXPENSE_CATEGORIES, METHODS as CASH_METHODS
 from core.i18n import DEFAULT_LANGUAGE, t as translate
 from core.repairs import STATUS_LABELS
 from core.timefmt import kyiv_datetime, ru_date
@@ -21,6 +22,8 @@ templates = Jinja2Templates(directory=os.path.join(os.path.dirname(__file__), "t
 templates.env.globals["role_labels"] = ROLE_LABELS
 templates.env.globals["reason_labels"] = REASON_LABELS
 templates.env.globals["status_labels"] = STATUS_LABELS
+templates.env.globals["cash_methods"] = CASH_METHODS
+templates.env.globals["cash_expense_categories"] = EXPENSE_CATEGORIES
 templates.env.filters["kyiv"] = kyiv_datetime
 templates.env.filters["rudate"] = ru_date
 

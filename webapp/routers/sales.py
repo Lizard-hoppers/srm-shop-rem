@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import RedirectResponse
 
+from core import cash as core_cash
 from core import clients as core_clients
 from core import inventory as core_inventory
 from core import sales as core_sales
@@ -58,6 +59,9 @@ async def create_view(request: Request, staff=Depends(require_staff)):
     client_phone = core_clients.normalize_phone((form.get("client_phone") or "").strip())
     channel = form.get("channel", "offline")
     warranty_until = (form.get("warranty_until") or "").strip() or None
+    payment_method = form.get("payment_method") or "cash"
+    if payment_method not in core_cash.METHODS:
+        payment_method = "cash"
     row_count = int(form.get("row_count") or INITIAL_ROWS)
 
     items = []
@@ -91,7 +95,7 @@ async def create_view(request: Request, staff=Depends(require_staff)):
     with get_conn() as conn:
         client_id = core_clients.get_or_create_by_phone(conn, client_name, client_phone, source=channel) if client_phone else None
         try:
-            order_id = core_sales.create_sale(conn, client_id, channel, staff["id"], items, warranty_until)
+            order_id = core_sales.create_sale(conn, client_id, channel, staff["id"], items, warranty_until, payment_method)
         except InsufficientStockError as exc:
             ctx = _list_context(conn)
             return render(request, "sales_list.html", staff=staff, error=str(exc), **ctx)

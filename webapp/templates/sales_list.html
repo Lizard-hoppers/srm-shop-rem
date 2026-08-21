@@ -4,19 +4,20 @@
 {% if error %}<div class="flash flash-error">{{ error }}</div>{% endif %}
 
 <table class="table">
-  <thead><tr><th>Клиент</th><th>Канал</th><th>Сумма</th><th>Гарантия</th><th>Продавец</th><th>Дата</th></tr></thead>
+  <thead><tr><th>Клиент</th><th>Канал</th><th>Оплата</th><th>Сумма</th><th>Гарантия</th><th>Продавец</th><th>Дата</th></tr></thead>
   <tbody>
     {% for s in sales %}
     <tr onclick="location.href='{{ link('/sales/' ~ s.id) }}'" class="clickable">
       <td>{{ s.client_name or 'Без клиента' }}</td>
       <td><span class="pill pill-{{ s.channel }}">{{ 'Онлайн' if s.channel == 'online' else 'Офлайн' }}</span></td>
+      <td>{{ cash_methods.get(s.payment_method, '—') }}</td>
       <td>{{ s.total }}</td>
       <td>{{ s.warranty_until | rudate }}</td>
       <td>{{ s.staff_name or '—' }}</td>
       <td>{{ s.created_at | kyiv }}</td>
     </tr>
     {% else %}
-    <tr><td colspan="6">Продаж пока нет.</td></tr>
+    <tr><td colspan="7">Продаж пока нет.</td></tr>
     {% endfor %}
   </tbody>
 </table>
@@ -46,6 +47,11 @@
     <select name="channel">
       <option value="offline">Офлайн (в точке)</option>
       <option value="online">Онлайн</option>
+    </select>
+  </label>
+  <label>Способ оплаты
+    <select name="payment_method">
+      {% for code, label in cash_methods.items() %}<option value="{{ code }}">{{ label }}</option>{% endfor %}
     </select>
   </label>
   <label>Гарантия до (необязательно)<input type="date" name="warranty_until"></label>

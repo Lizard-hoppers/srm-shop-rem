@@ -27,6 +27,16 @@
     </div>
     <div class="chevron">{{ icons.icon('chevron', 18) }}</div>
   </a>
+  {% if staff.role in ('owner', 'admin', 'storekeeper') %}
+  <a class="card nav-card" href="{{ link('/cash') }}">
+    <div class="card-icon">{{ icons.icon('cash', 18) }}</div>
+    <div class="nav-card-body">
+      <div class="nav-card-title">Касса</div>
+      <div class="nav-card-sub">Наличка, выручка, расходы</div>
+    </div>
+    <div class="chevron">{{ icons.icon('chevron', 18) }}</div>
+  </a>
+  {% endif %}
   <a class="card nav-card" href="{{ link('/settings') }}">
     <div class="card-icon">{{ icons.icon('settings', 18) }}</div>
     <div class="nav-card-body">

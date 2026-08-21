@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from core import auth as core_auth
+from core import cash as core_cash
 from core import clients as core_clients
 from core import device_catalog
 from core import inventory as core_inventory
@@ -226,11 +227,31 @@ def detail_view(request: Request, order_id: int, staff=Depends(require_staff)):
 @router.post("/{order_id}/status")
 def status_view(
     request: Request, order_id: int, status: str = Form(...), comment: str = Form(""),
+    payment_method: str = Form(""),
     staff=Depends(require_role(*_REPAIR_WRITE_ROLES)),
 ):
+    """A repair transitioning INTO 'issued' (not already there — re-saving
+    an already-issued repair's comment must never double-charge the
+    касса) with a price on it needs a payment method, and the price gets
+    recorded as касса income right here — this is the one place a repair
+    actually changes hands for money in this app's flow."""
     with get_conn() as conn:
+        current = core_repairs.get_repair(conn, order_id)
+        becoming_issued = status == "issued" and current["status"] != "issued"
+
+        if becoming_issued and current["price_final"] and payment_method not in core_cash.METHODS:
+            ctx = _detail_context(conn, order_id)
+            return render(
+                request, "repair_detail.html", staff=staff,
+                error="Укажите способ оплаты, чтобы отметить ремонт как «Выдан».", **ctx,
+            )
+
         core_repairs.update_status(conn, order_id, status, staff["id"], comment.strip() or None)
         repair = core_repairs.get_repair(conn, order_id)
+
+        if becoming_issued and current["price_final"]:
+            core_cash.record_income(conn, payment_method, current["price_final"], "repair_order", order_id, staff["id"])
+
         messages = core_repairs.get_order_messages(conn, order_id)
 
     core_notify.sync_repair_cards(
