@@ -13,13 +13,13 @@
 </div>
 
 <h2>За период</h2>
-<form method="get" action="{{ link('/cash') }}" class="edit-form" style="flex-direction:row; flex-wrap:wrap; align-items:end;">
-  <label style="flex:1; min-width:130px;">С<input type="date" name="date_from" value="{{ date_from }}"></label>
-  <label style="flex:1; min-width:130px;">По<input type="date" name="date_to" value="{{ date_to }}"></label>
+<form method="get" action="{{ link('/cash') }}" class="edit-form" style="margin-bottom: 20px;">
+  <label>С<input type="date" name="date_from" value="{{ date_from }}"></label>
+  <label>По<input type="date" name="date_to" value="{{ date_to }}"></label>
   <button type="submit" class="secondary">Показать</button>
 </form>
 
-<div class="stat-row">
+<div class="stat-row" style="grid-template-columns: repeat(2, 1fr);">
   <div class="stat">
     <div class="stat-num">{{ summary.income_cash }}</div>
     <div class="stat-label">приход наличными</div>
@@ -69,18 +69,18 @@
 <div class="panel-box">
   <h3>Расход</h3>
   <form method="post" action="{{ link('/cash/expense') }}" class="edit-form">
-    <div style="display:flex; gap:6px;">
-      <select name="category" style="flex:1;">
+    <label>Категория
+      <select name="category">
         {% for code, label in cash_expense_categories.items() %}<option value="{{ code }}">{{ label }}</option>{% endfor %}
       </select>
-      <select name="method" style="flex:1;">
+    </label>
+    <label>Способ
+      <select name="method">
         {% for code, label in cash_methods.items() %}<option value="{{ code }}">{{ label }}</option>{% endfor %}
       </select>
-    </div>
-    <div style="display:flex; gap:6px;">
-      <input type="number" name="amount" placeholder="Сумма" style="flex:1;">
-      <input type="text" name="comment" placeholder="Комментарий" style="flex:2;">
-    </div>
+    </label>
+    <label>Сумма<input type="number" name="amount" placeholder="Сумма"></label>
+    <label>Комментарий<input type="text" name="comment" placeholder="Комментарий"></label>
     <button type="submit" class="secondary">− Списать расход</button>
   </form>
 </div>
@@ -89,14 +89,14 @@
   <h3>Внести / изъять наличку</h3>
   <p class="meta">Для размена или пересчёта — довнести на сдачу, забрать в конце дня, поправить расхождение.</p>
   <form method="post" action="{{ link('/cash/adjustment') }}" class="edit-form">
-    <div style="display:flex; gap:6px;">
-      <select name="direction" style="flex:1;">
+    <label>Действие
+      <select name="direction">
         <option value="in">Внести</option>
         <option value="out">Изъять</option>
       </select>
-      <input type="number" name="amount" placeholder="Сумма" style="flex:1;">
-    </div>
-    <input type="text" name="comment" placeholder="Комментарий (необязательно)">
+    </label>
+    <label>Сумма<input type="number" name="amount" placeholder="Сумма"></label>
+    <label>Комментарий (необязательно)<input type="text" name="comment"></label>
     <button type="submit" class="secondary">Оформить</button>
   </form>
 </div>
