@@ -318,6 +318,54 @@ def scenario_purchases(db_path: str) -> None:
         check("receipt linked to a stock movement", len(movements) == 1 and movements[0]["ref_id"] == receipt_id)
 
 
+def scenario_supplier_returns(db_path: str) -> None:
+    print("scenario: same part from multiple suppliers + return a defective batch")
+    with get_conn(db_path) as conn:
+        staff_id = auth.create_staff(conn, "storekeeper3", "pass", "Кладовщик 3", "storekeeper")
+        supplier_a = purchases.create_supplier(conn, "Поставщик А", None)
+        supplier_b = purchases.create_supplier(conn, "Поставщик Б", None)
+        product_id = inventory.create_product(conn, "Экран Xiaomi Redmi 9A", "SKU-SCR-9A", "Экраны", "шт", True, False, min_qty=1, price=None)
+        cell_id = inventory.create_cell(conn, "C1-02", None, None)
+
+        # Same product, same cell, two different suppliers — the mixed-in-
+        # one-cell reality Павел confirmed (21.08).
+        receipt_a = purchases.create_receipt(conn, supplier_a, "A-100", staff_id, [(product_id, cell_id, 5, 400)])
+        receipt_b = purchases.create_receipt(conn, supplier_b, "B-200", staff_id, [(product_id, cell_id, 5, 420)])
+        check("stock from both suppliers lands in the same cell, summed", inventory.product_total_qty(conn, product_id) == 10)
+
+        history = purchases.list_receipts_for_product(conn, product_id)
+        check("purchase history shows both suppliers' deliveries, newest first",
+              len(history) == 2 and history[0]["receipt_id"] == receipt_b and history[1]["receipt_id"] == receipt_a)
+
+        # A defect is found among what turned out to be supplier B's batch.
+        return_id = purchases.create_supplier_return(
+            conn, product_id, supplier_b, receipt_b, cell_id, 2, "Треснул экран прямо из коробки", staff_id,
+        )
+        check("stock dropped by exactly the returned qty", inventory.product_total_qty(conn, product_id) == 8)
+
+        returns = purchases.list_supplier_returns(conn, product_id=product_id)
+        check("the return is logged against supplier B specifically, not supplier A",
+              len(returns) == 1 and returns[0]["supplier_name"] == "Поставщик Б" and returns[0]["qty"] == 2)
+
+        movement = [m for m in inventory.list_movements(conn) if m["ref_type"] == "supplier_return"][0]
+        check("the return's stock movement is linked back to the supplier_returns row",
+              movement["ref_id"] == return_id and movement["reason"] == "adjustment")
+        check("the movement comment carries the defect reason",
+              "Треснул экран" in movement["comment"])
+
+        raised = False
+        try:
+            purchases.create_supplier_return(conn, product_id, supplier_a, receipt_a, cell_id, 999, "тест", staff_id)
+        except inventory.InsufficientStockError:
+            raised = True
+        check("returning more than is on the shelf raises InsufficientStockError, not a silent overdraw", raised)
+
+        # A return with no specific receipt remembered — supplier only.
+        purchases.create_supplier_return(conn, product_id, supplier_a, None, cell_id, 1, None, staff_id)
+        check("a return can be logged with no receipt_id (supplier known, delivery not)",
+              any(r["receipt_id"] is None for r in purchases.list_supplier_returns(conn, product_id=product_id)))
+
+
 def scenario_purchase_import(db_path: str) -> None:
     print("scenario: parse pasted invoice text into draft receipt rows")
     from core import purchase_import
@@ -851,6 +899,39 @@ def scenario_webapp_forms(db_path: str) -> None:
         check("missing supplier name: no raw 422", resp.status_code != 422)
         check("missing supplier name: friendly error shown", "Введите название поставщика" in resp.text)
 
+        # Supplier-return form, end to end over real HTTP: product page ->
+        # receive stock -> return part of it to a supplier -> product page
+        # reflects the drop and lists the return in its history.
+        with get_conn(db_path) as conn:
+            return_test_supplier = purchases.create_supplier(conn, "HTTP Тест Поставщик", None)
+            return_test_product = inventory.create_product(conn, "HTTP Тест Деталь", None, None, "шт", True, False, min_qty=0, price=None)
+            return_test_cell = inventory.create_cell(conn, "HTTP-C1", None, None)
+            inventory.receive_stock(conn, return_test_product, return_test_cell, 5, staff_id)
+
+        detail_resp = client.get(f"/inventory/products/{return_test_product}?t={token}")
+        check("product card renders the supplier purchase-history section", "Поставщики этого товара" in detail_resp.text)
+
+        resp = client.post(f"/inventory/products/{return_test_product}/supplier-return?t={token}", data={
+            "supplier_id": "", "cell_id": str(return_test_cell), "qty": "1",
+        })
+        check("missing supplier on return: no raw 422", resp.status_code != 422)
+        check("missing supplier on return: friendly error shown", "Выберите поставщика" in resp.text)
+
+        resp = client.post(f"/inventory/products/{return_test_product}/supplier-return?t={token}", data={
+            "supplier_id": str(return_test_supplier), "cell_id": str(return_test_cell), "qty": "999", "reason": "Брак",
+        })
+        check("returning more than in stock: friendly error, not a raw exception",
+              resp.status_code != 500 and "Недостаточно товара" in resp.text)
+
+        resp = client.post(f"/inventory/products/{return_test_product}/supplier-return?t={token}", data={
+            "supplier_id": str(return_test_supplier), "cell_id": str(return_test_cell), "qty": "2", "reason": "Брак",
+        })
+        check("a valid return redirects back to the product card (303)",
+              resp.status_code == 303 or (resp.history and resp.history[0].status_code == 303))
+        with get_conn(db_path) as conn:
+            check("stock actually dropped by the returned qty", inventory.product_total_qty(conn, return_test_product) == 3)
+        check("the product card now shows the return in its history", "HTTP Тест Поставщик" in resp.text)
+
         # Client loyalty QR: image endpoint + scan-to-find lookup.
         client_resp = client.post(f"/clients?t={token}", data={"name": "QR Клиент", "phone": "+380990001122"})
         # TestClient follows the 303 by default, so the final URL (not headers) has the new id.
@@ -1382,6 +1463,7 @@ def main() -> None:
         scenario_client_qr(db_path)
         scenario_device_catalog(db_path)
         scenario_purchases(db_path)
+        scenario_supplier_returns(db_path)
         scenario_purchase_import(db_path)
         scenario_purchase_drafts_and_vision(db_path)
         scenario_sales(db_path)

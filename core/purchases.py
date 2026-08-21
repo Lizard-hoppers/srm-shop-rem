@@ -83,6 +83,72 @@ def get_receipt_items(conn: sqlite3.Connection, receipt_id: int) -> list[sqlite3
     ).fetchall()
 
 
+def list_receipts_for_product(conn: sqlite3.Connection, product_id: int) -> list[sqlite3.Row]:
+    """Every delivery of this product on record, newest first — the
+    product card's "Поставщики этого товара" section, so staff can tell
+    which supplier a batch that's turning out defective likely came from."""
+    return conn.execute(
+        """SELECT goods_receipt_items.id AS item_id, goods_receipt_items.qty, goods_receipt_items.unit_cost,
+                  goods_receipts.id AS receipt_id, goods_receipts.created_at, goods_receipts.invoice_no,
+                  goods_receipts.supplier_id, suppliers.name AS supplier_name
+           FROM goods_receipt_items
+           JOIN goods_receipts ON goods_receipts.id = goods_receipt_items.receipt_id
+           LEFT JOIN suppliers ON suppliers.id = goods_receipts.supplier_id
+           WHERE goods_receipt_items.product_id = ?
+           ORDER BY goods_receipts.created_at DESC, goods_receipts.id DESC""",
+        (product_id,),
+    ).fetchall()
+
+
+# ---- returns to a supplier (брак) ----
+
+def create_supplier_return(
+    conn: sqlite3.Connection,
+    product_id: int,
+    supplier_id: int,
+    receipt_id: int | None,
+    cell_id: int,
+    qty: int,
+    reason: str | None,
+    staff_id: int,
+) -> int:
+    """Logs a defective-stock return to whichever supplier delivered it
+    and writes off the qty from the cell via the normal stock ledger
+    (reason='adjustment', tagged ref_type='supplier_return' so the
+    movement history and this table stay linked) — raises
+    core.inventory.InsufficientStockError same as any other write-off if
+    the cell doesn't actually hold that much."""
+    return_id = conn.execute(
+        """INSERT INTO supplier_returns (product_id, supplier_id, receipt_id, cell_id, qty, reason, staff_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (product_id, supplier_id, receipt_id, cell_id, qty, reason, staff_id),
+    ).lastrowid
+    record_movement(
+        conn, product_id, qty, "adjustment", staff_id,
+        from_cell_id=cell_id, ref_type="supplier_return", ref_id=return_id,
+        comment=f"Возврат поставщику: {reason}" if reason else "Возврат поставщику",
+    )
+    return return_id
+
+
+def list_supplier_returns(conn: sqlite3.Connection, product_id: int | None = None, limit: int = 100) -> list[sqlite3.Row]:
+    query = """SELECT supplier_returns.*, products.name AS product_name, products.unit,
+                      suppliers.name AS supplier_name, staff.name AS staff_name,
+                      storage_cells.code AS cell_code
+               FROM supplier_returns
+               JOIN products ON products.id = supplier_returns.product_id
+               LEFT JOIN suppliers ON suppliers.id = supplier_returns.supplier_id
+               LEFT JOIN staff ON staff.id = supplier_returns.staff_id
+               LEFT JOIN storage_cells ON storage_cells.id = supplier_returns.cell_id"""
+    params: list = []
+    if product_id:
+        query += " WHERE supplier_returns.product_id = ?"
+        params.append(product_id)
+    query += " ORDER BY supplier_returns.created_at DESC LIMIT ?"
+    params.append(limit)
+    return conn.execute(query, params).fetchall()
+
+
 # ---- photo-of-invoice drafts (Уровень 3) ----
 
 def create_draft(conn: sqlite3.Connection, staff_id: int, items: list[dict]) -> int:

@@ -168,6 +168,28 @@ CREATE TABLE IF NOT EXISTS goods_receipt_items (
     unit_cost INTEGER
 );
 
+-- A defective-parts return to whichever supplier delivered them (21.08).
+-- Stock from different suppliers of the same product sits mixed in one
+-- cell (Павел confirmed — not physically segregated by supplier), so this
+-- isn't a precise per-unit trace: staff pick the supplier/receipt from the
+-- product's purchase history by memory/judgement (which delivery this
+-- batch likely came from) and enter the qty they're holding themselves.
+-- receipt_id is nullable — a return can also be logged against a
+-- supplier directly with no specific receipt line remembered/found.
+CREATE TABLE IF NOT EXISTS supplier_returns (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_id INTEGER NOT NULL REFERENCES products(id),
+    supplier_id INTEGER NOT NULL REFERENCES suppliers(id),
+    receipt_id INTEGER REFERENCES goods_receipts(id),
+    cell_id INTEGER NOT NULL REFERENCES storage_cells(id),
+    qty INTEGER NOT NULL,
+    reason TEXT,
+    staff_id INTEGER REFERENCES staff(id),
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_supplier_returns_product ON supplier_returns(product_id);
+CREATE INDEX IF NOT EXISTS idx_supplier_returns_supplier ON supplier_returns(supplier_id);
+
 -- A photo-of-invoice OCR result, pending human review before it ever
 -- touches stock. items_json is a list of {name_guess, qty, unit_cost,
 -- product_id} dicts (core.purchase_import.match_items() shape) — kept as

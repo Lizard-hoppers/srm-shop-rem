@@ -10,6 +10,7 @@ from core import barcode_label
 from core import inventory as core_inventory
 from core import photos as core_photos
 from core import print_queue
+from core import purchases as core_purchases
 from core import vision_ocr
 from core.inventory import InsufficientStockError
 from core.storage import get_conn
@@ -89,18 +90,31 @@ async def scan_product_label_view(photo: UploadFile = File(...), staff=Depends(r
     return JSONResponse({"ok": True, "name": result["name"], "sku": result["sku"]})
 
 
+def _product_detail_context(conn, product_id: int) -> dict | None:
+    """Shared by the card's GET view and every form on it that re-renders
+    the same page on error (receive/edit/supplier-return) — one place for
+    the purchase-history + returns sections so they never go missing from
+    one of the error paths by omission."""
+    product = core_inventory.get_product(conn, product_id)
+    if not product:
+        return None
+    return {
+        "product": product,
+        "stock_by_cell": core_inventory.product_stock_by_cell(conn, product_id),
+        "cells": core_inventory.list_cells(conn),
+        "receipt_history": core_purchases.list_receipts_for_product(conn, product_id),
+        "suppliers": core_purchases.list_suppliers(conn),
+        "returns": core_purchases.list_supplier_returns(conn, product_id=product_id),
+    }
+
+
 @router.get("/products/{product_id}")
 def product_detail_view(request: Request, product_id: int, staff=Depends(require_staff)):
     with get_conn() as conn:
-        product = core_inventory.get_product(conn, product_id)
-        if not product:
+        ctx = _product_detail_context(conn, product_id)
+        if not ctx:
             return RedirectResponse(link(request, "/inventory/products"), status_code=303)
-        stock_by_cell = core_inventory.product_stock_by_cell(conn, product_id)
-        cells = core_inventory.list_cells(conn)
-    return render(
-        request, "inventory_product_detail.html", staff=staff,
-        product=product, stock_by_cell=stock_by_cell, cells=cells,
-    )
+    return render(request, "inventory_product_detail.html", staff=staff, **ctx)
 
 
 @router.get("/products/{product_id}/barcode.png")
@@ -161,15 +175,40 @@ def product_receive_view(
     with get_conn() as conn:
         cid, q = optional_int(cell_id), optional_int(qty)
         if not cid or not q:
-            product = core_inventory.get_product(conn, product_id)
-            stock_by_cell = core_inventory.product_stock_by_cell(conn, product_id)
-            cells = core_inventory.list_cells(conn)
-            return render(
-                request, "inventory_product_detail.html", staff=staff,
-                product=product, stock_by_cell=stock_by_cell, cells=cells,
-                error="Выберите ячейку и укажите количество.",
-            )
+            ctx = _product_detail_context(conn, product_id)
+            return render(request, "inventory_product_detail.html", staff=staff, error="Выберите ячейку и укажите количество.", **ctx)
         core_inventory.receive_stock(conn, product_id, cid, q, staff["id"])
+    return RedirectResponse(link(request, f"/inventory/products/{product_id}"), status_code=303)
+
+
+@router.post("/products/{product_id}/supplier-return")
+def product_supplier_return_view(
+    request: Request, product_id: int,
+    supplier_id: str = Form(""), receipt_id: str = Form(""), cell_id: str = Form(""),
+    qty: str = Form(""), reason: str = Form(""),
+    staff=Depends(require_role(*_STOCK_WRITE_ROLES)),
+):
+    """"Оформить возврат поставщику" on the product card — write off a
+    defective qty from a cell same as any other adjustment, but tagged to
+    a supplier (and optionally the specific delivery) so it shows up in
+    that supplier's return history, not just as an anonymous write-off."""
+    with get_conn() as conn:
+        sid, rid, cid, q = optional_int(supplier_id), optional_int(receipt_id), optional_int(cell_id), optional_int(qty)
+        error = None
+        if not sid:
+            error = "Выберите поставщика."
+        elif not cid or not q:
+            error = "Выберите ячейку и укажите количество."
+        else:
+            try:
+                core_purchases.create_supplier_return(
+                    conn, product_id, sid, rid, cid, q, reason.strip() or None, staff["id"],
+                )
+            except InsufficientStockError as exc:
+                error = str(exc)
+        if error:
+            ctx = _product_detail_context(conn, product_id)
+            return render(request, "inventory_product_detail.html", staff=staff, error=error, **ctx)
     return RedirectResponse(link(request, f"/inventory/products/{product_id}"), status_code=303)
 
 
@@ -189,13 +228,8 @@ def product_edit_view(
 ):
     with get_conn() as conn:
         if not name.strip():
-            product = core_inventory.get_product(conn, product_id)
-            stock_by_cell = core_inventory.product_stock_by_cell(conn, product_id)
-            cells = core_inventory.list_cells(conn)
-            return render(
-                request, "inventory_product_detail.html", staff=staff, product=product,
-                stock_by_cell=stock_by_cell, cells=cells, error="Введите название товара.",
-            )
+            ctx = _product_detail_context(conn, product_id)
+            return render(request, "inventory_product_detail.html", staff=staff, error="Введите название товара.", **ctx)
         core_inventory.update_product(
             conn, product_id,
             name=name.strip(), sku=sku.strip() or None, category=category.strip() or None,

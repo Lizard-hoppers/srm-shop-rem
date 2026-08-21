@@ -140,6 +140,82 @@
   <button type="submit" class="secondary">+ Добавить на склад</button>
 </form>
 
+<h2>Поставщики этого товара</h2>
+<p class="meta">Одна и та же деталь может приходить от разных поставщиков вперемешку в одну ячейку — если
+  партия оказалась бракованной, выберите поставщика по накладной ниже (или из выпадающего списка в форме
+  возврата, если накладную найти не получается) и оформите возврат.</p>
+<table class="table">
+  <thead><tr><th>Дата</th><th>Поставщик</th><th>Накладная</th><th>Кол-во</th><th>Цена за ед.</th><th></th></tr></thead>
+  <tbody>
+    {% for r in receipt_history %}
+    <tr>
+      <td>{{ r.created_at | kyiv }}</td>
+      <td>{{ r.supplier_name or '—' }}</td>
+      <td>{{ r.invoice_no or '—' }}</td>
+      <td>{{ r.qty }} {{ product.unit }}</td>
+      <td>{{ r.unit_cost if r.unit_cost is not none else '—' }}</td>
+      <td>
+        {% if r.supplier_id %}
+        <button type="button" class="secondary supplier-return-pick"
+                style="font-size:12px; padding:4px 8px;"
+                data-supplier-id="{{ r.supplier_id }}" data-receipt-id="{{ r.receipt_id }}">↩ Возврат</button>
+        {% endif %}
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="6">Приходов по этому товару ещё не было.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<form method="post" action="{{ link('/inventory/products/' ~ product.id ~ '/supplier-return') }}" class="edit-form" id="supplierReturnForm">
+  <label>Оформить возврат поставщику
+    <select name="supplier_id" id="returnSupplierId" required>
+      <option value="">— поставщик —</option>
+      {% for s in suppliers %}<option value="{{ s.id }}">{{ s.name }}</option>{% endfor %}
+    </select>
+  </label>
+  <input type="hidden" name="receipt_id" id="returnReceiptId">
+  <div style="display:flex; gap:6px;">
+    <select name="cell_id" style="flex:1;">
+      <option value="">— ячейка —</option>
+      {% for c in cells %}<option value="{{ c.id }}">{{ c.code }}</option>{% endfor %}
+    </select>
+    <input type="number" name="qty" placeholder="Кол-во" style="width:100px; flex:0 0 auto;">
+  </div>
+  <label>Причина<input type="text" name="reason" placeholder="Брак, не работает…"></label>
+  <button type="submit" class="secondary">↩ Оформить возврат</button>
+</form>
+<script>
+(function () {
+  document.querySelectorAll(".supplier-return-pick").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      document.getElementById("returnSupplierId").value = btn.dataset.supplierId;
+      document.getElementById("returnReceiptId").value = btn.dataset.receiptId || "";
+      document.getElementById("supplierReturnForm").scrollIntoView({ behavior: "smooth", block: "center" });
+    });
+  });
+})();
+</script>
+
+{% if returns %}
+<h2>История возвратов</h2>
+<table class="table">
+  <thead><tr><th>Дата</th><th>Поставщик</th><th>Кол-во</th><th>Причина</th><th>Кто</th></tr></thead>
+  <tbody>
+    {% for ret in returns %}
+    <tr>
+      <td>{{ ret.created_at | kyiv }}</td>
+      <td>{{ ret.supplier_name or '—' }}</td>
+      <td>{{ ret.qty }} {{ ret.unit }}</td>
+      <td>{{ ret.reason or '—' }}</td>
+      <td>{{ ret.staff_name or '—' }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
 <h2>Данные товара</h2>
 <form method="post" action="{{ link('/inventory/products/' ~ product.id ~ '/edit') }}" class="edit-form">
   <label>Название<input type="text" name="name" id="editProductName" value="{{ product.name }}" required></label>
