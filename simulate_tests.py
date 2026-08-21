@@ -819,7 +819,7 @@ def scenario_repair_card_notify(db_path: str) -> None:
 
 
 def scenario_repair_actions(db_path: str) -> None:
-    print("scenario: claim / complete / release a repair (button actions)")
+    print("scenario: claim / complete / cancel a repair (button actions)")
     with get_conn(db_path) as conn:
         master_a = auth.create_staff(conn, "master_a", "pass", "Мастер A", "master")
         master_b = auth.create_staff(conn, "master_b", "pass", "Мастер B", "master")
@@ -840,20 +840,38 @@ def scenario_repair_actions(db_path: str) -> None:
         repair = repairs.get_repair(conn, order_id)
         check("repair is now ready", repair["status"] == "ready")
 
-        check("release after already-ready fails — not in_progress anymore", not repairs.release_claim(conn, order_id, master_a))
+        check("cancel after already-ready fails — not in_progress anymore", not repairs.cancel_repair(conn, order_id, master_a))
 
+        # cancel_repair (21.08) is a terminal outcome — "не удалось
+        # починить" — NOT a release back to the queue for someone else to
+        # try (that was this button's old behavior; Павел wants a real
+        # failure state instead).
         order_id_2 = repairs.create_repair(
             conn, client_id, "Планшет", "Samsung", "Tab", None, "треснул экран", "offline", None, None, 1,
         )
         check("claim order 2", repairs.claim_repair(conn, order_id_2, master_a))
-        check("release by the claiming master returns it to the queue", repairs.release_claim(conn, order_id_2, master_a))
+        check("cancel by the wrong master fails without override", not repairs.cancel_repair(conn, order_id_2, master_b))
+        check("cancel by the claiming master succeeds", repairs.cancel_repair(conn, order_id_2, master_a))
         repair2 = repairs.get_repair(conn, order_id_2)
-        check("order 2 is back to 'new' with no master assigned",
-              repair2["status"] == "new" and repair2["master_id"] is None)
+        check("order 2 is 'cancelled', not back to 'new' — a terminal outcome, not a re-queue",
+              repair2["status"] == "cancelled")
+        check("master_id stays on the row after cancelling — history shows who attempted it",
+              repair2["master_id"] == master_a)
 
-        check("anyone can claim it again after release", repairs.claim_repair(conn, order_id_2, master_b))
-        check("owner can complete order 2 on master B's behalf via override",
-              repairs.complete_repair(conn, order_id_2, 1, override=True))
+        order_id_3 = repairs.create_repair(
+            conn, client_id, "Телефон", "Apple", "SE", None, "не включается", "offline", None, None, 1,
+        )
+        check("claim order 3", repairs.claim_repair(conn, order_id_3, master_b))
+        check("owner can cancel order 3 on master B's behalf via override",
+              repairs.cancel_repair(conn, order_id_3, 1, override=True))
+        check("order 3 is cancelled via override", repairs.get_repair(conn, order_id_3)["status"] == "cancelled")
+
+        order_id_4 = repairs.create_repair(
+            conn, client_id, "Часы", "Apple", "Watch", None, "не заряжается", "offline", None, None, 1,
+        )
+        check("claim order 4", repairs.claim_repair(conn, order_id_4, master_b))
+        check("owner can complete order 4 on master B's behalf via override",
+              repairs.complete_repair(conn, order_id_4, 1, override=True))
 
 
 def scenario_repair_attachments(db_path: str) -> None:

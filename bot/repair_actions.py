@@ -1,10 +1,17 @@
 """Inline-button actions on a repair card posted to the staff forum topic
-and the masters group — "Взять в работу" / "Готово" / "Отменить". Runs in
-the bot process (long polling), separate from core/notify.py's plain httpx
-calls used by the web process — but both edit the exact same messages via
-core.repairs.get_order_messages(), so a button press and a status change
-made from the app never leave stale buttons behind on the other channel.
-"""
+and the masters group — "Взять в работу" / "Готов к выдаче" / "Не удалось
+починить". Runs in the bot process (long polling), separate from
+core/notify.py's plain httpx calls used by the web process — but both
+edit the exact same messages via core.repairs.get_order_messages(), so a
+button press and a status change made from the app never leave stale
+buttons behind on the other channel.
+
+The callback_data prefix for the third button stayed "repair_release:"
+even though it now calls core_repairs.cancel_repair() (21.08, was
+release_claim() — see that function's docstring for why the behavior
+changed) — repairs already "in_progress" when this shipped have that
+prefix baked into their already-posted Telegram message, and renaming it
+would silently break their button."""
 from __future__ import annotations
 
 from aiogram import F, Router
@@ -92,11 +99,11 @@ async def repair_done(callback: CallbackQuery) -> None:
         return
 
     await _sync_after_change(order_id)
-    await callback.answer("Отмечено готовым ✅")
+    await callback.answer("Готов к выдаче ✅")
 
 
 @router.callback_query(F.data.startswith("repair_release:"))
-async def repair_release(callback: CallbackQuery) -> None:
+async def repair_cancel(callback: CallbackQuery) -> None:
     order_id = _parse_order_id(callback.data)
     staff = await _resolve_actor(callback)
     if not staff:
@@ -104,7 +111,7 @@ async def repair_release(callback: CallbackQuery) -> None:
 
     override = staff["role"] in ("owner", "admin")
     with get_conn() as conn:
-        ok = core_repairs.release_claim(conn, order_id, staff["id"], override=override)
+        ok = core_repairs.cancel_repair(conn, order_id, staff["id"], override=override)
         repair = None if ok else core_repairs.get_repair(conn, order_id)
 
     if not ok:
@@ -115,4 +122,4 @@ async def repair_release(callback: CallbackQuery) -> None:
         return
 
     await _sync_after_change(order_id)
-    await callback.answer("Взятие отменено")
+    await callback.answer("Отмечено как не отремонтированное")

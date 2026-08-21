@@ -184,24 +184,29 @@ def complete_repair(conn: sqlite3.Connection, order_id: int, staff_id: int, over
     return True
 
 
-def release_claim(conn: sqlite3.Connection, order_id: int, staff_id: int, override: bool = False) -> bool:
-    """Undo a claim — back to 'new', master unassigned. The "Отменить"
-    button, for a master who took a job by mistake or can't do it, without
-    having to ask an admin to reassign it by hand."""
+def cancel_repair(conn: sqlite3.Connection, order_id: int, staff_id: int, override: bool = False) -> bool:
+    """Terminal: the device didn't get fixed and goes back to the client
+    as-is — the "❌ Не удалось починить" button. Deliberately NOT a
+    release back to the queue (that was this button's behavior until
+    21.08 — Павел wants a real "failed" outcome here, not "try someone
+    else"); master_id is left as-is so the history still shows who
+    attempted it. Only succeeds from 'in_progress', and only by the
+    master who claimed it — unless `override` (admin/owner closing on
+    someone else's behalf)."""
     if override:
         cur = conn.execute(
-            "UPDATE repair_orders SET status = 'new', master_id = NULL WHERE id = ? AND status = 'in_progress'",
+            "UPDATE repair_orders SET status = 'cancelled' WHERE id = ? AND status = 'in_progress'",
             (order_id,),
         )
     else:
         cur = conn.execute(
-            "UPDATE repair_orders SET status = 'new', master_id = NULL WHERE id = ? AND status = 'in_progress' AND master_id = ?",
+            "UPDATE repair_orders SET status = 'cancelled' WHERE id = ? AND status = 'in_progress' AND master_id = ?",
             (order_id, staff_id),
         )
     if cur.rowcount == 0:
         return False
     conn.execute(
-        "INSERT INTO repair_status_history (order_id, status, changed_by, comment) VALUES (?, 'new', ?, 'Отменил взятие (кнопка в группе)')",
+        "INSERT INTO repair_status_history (order_id, status, changed_by, comment) VALUES (?, 'cancelled', ?, 'Не удалось починить (кнопка в группе)')",
         (order_id, staff_id),
     )
     return True
@@ -336,8 +341,8 @@ def render_keyboard(order_id: int, status: str) -> dict | None:
     if status == "in_progress":
         return {
             "inline_keyboard": [[
-                {"text": "✅ Готово", "callback_data": f"repair_done:{order_id}"},
-                {"text": "↩️ Отменить", "callback_data": f"repair_release:{order_id}"},
+                {"text": "✅ Готов к выдаче", "callback_data": f"repair_done:{order_id}"},
+                {"text": "❌ Не удалось починить", "callback_data": f"repair_release:{order_id}"},
             ]]
         }
     return None
