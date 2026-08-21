@@ -12,6 +12,7 @@ from core import clients as core_clients
 from core import device_catalog
 from core import inventory as core_inventory
 from core import notify as core_notify
+from core import photos as core_photos
 from core import repairs as core_repairs
 from core import vision_ocr
 from core.inventory import InsufficientStockError
@@ -31,6 +32,10 @@ INITIAL_DEVICE_ROWS = 1
 
 
 def _write_device_photo(device_id: int, data: bytes, ext: str) -> str:
+    compressed = core_photos.compress_photo(data)
+    if compressed is not None:
+        data, ext = compressed, ".jpg"
+
     os.makedirs(_PHOTO_DIR, exist_ok=True)
     filename = f"{device_id}_{uuid.uuid4().hex}{ext}"
     with open(os.path.join(_PHOTO_DIR, filename), "wb") as f:
@@ -112,7 +117,7 @@ async def create_view(request: Request, staff=Depends(require_role(*_REPAIR_WRIT
     re-renders the same page with a plain-Russian error instead."""
     form = await request.form()
     client_name = (form.get("client_name") or "").strip()
-    client_phone = (form.get("client_phone") or "").strip()
+    client_phone = core_clients.normalize_phone((form.get("client_phone") or "").strip())
     channel = form.get("channel") or "offline"
     master_id = form.get("master_id") or ""
     device_count = int(form.get("device_count") or INITIAL_DEVICE_ROWS)

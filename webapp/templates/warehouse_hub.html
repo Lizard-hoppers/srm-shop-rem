@@ -3,8 +3,9 @@
 {% block title %}Склад{% endblock %}
 {% block content %}
 <div class="btn-row">
-  <button type="button" id="scanQrBtn" onclick="scanCrmQr()" style="display:none;">📷 Сканировать код</button>
+  <button type="button" id="scanPhotoBtn">📷 Сканировать код</button>
 </div>
+<p id="scanPhotoStatus" class="meta" style="display:none;"></p>
 
 <form method="get" action="/warehouse/find" class="search-bar">
   <input type="hidden" name="t" value="{{ token }}">
@@ -55,18 +56,85 @@
 
 <script>
 (function () {
-  var tg = window.Telegram ? window.Telegram.WebApp : null;
-  var btn = document.getElementById("scanQrBtn");
-  if (tg && typeof tg.showScanQrPopup === "function") {
-    btn.style.display = "inline-block";
-  }
-  window.scanCrmQr = function () {
-    if (!tg) return;
-    tg.showScanQrPopup({ text: "Наведите камеру на штрих-код товара или QR-код клиента" }, function (text) {
-      tg.closeScanQrPopup();
-      window.location.href = "/warehouse/find?t={{ token }}&code=" + encodeURIComponent(text);
+  // Live camera streaming (getUserMedia + ZXing) was crashing/hanging
+  // the WebKitGTK renderer inside Telegram Desktop's sandbox. A single
+  // photo shot is much lighter and reuses the same OpenAI-vision path
+  // already proven stable elsewhere in this app (the SKU scan-fill
+  // button on the product forms) — snap a photo of the barcode, the
+  // server reads the SKU off it, we jump straight to that product.
+  var btn = document.getElementById("scanPhotoBtn");
+  var statusEl = document.getElementById("scanPhotoStatus");
+
+  var input = document.createElement("input");
+  input.type = "file";
+  input.accept = "image/jpeg,image/png,image/webp";
+  input.capture = "environment";
+  input.style.display = "none";
+  btn.insertAdjacentElement("afterend", input);
+
+  btn.addEventListener("click", function () { input.click(); });
+
+  // Downscale before upload — a phone photo straight off the camera is
+  // several MB at 3000+px, which is both slow to upload and slow for
+  // OpenAI to process; a barcode's printed digits are still perfectly
+  // readable at ~1000px on the long side.
+  function shrinkPhoto(file) {
+    return new Promise(function (resolve) {
+      var img = new Image();
+      var url = URL.createObjectURL(file);
+      img.onload = function () {
+        URL.revokeObjectURL(url);
+        var scale = Math.min(1, 1000 / Math.max(img.width, img.height));
+        var canvas = document.createElement("canvas");
+        canvas.width = Math.round(img.width * scale);
+        canvas.height = Math.round(img.height * scale);
+        canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+        canvas.toBlob(function (blob) { resolve(blob || file); }, "image/jpeg", 0.8);
+      };
+      img.onerror = function () { resolve(file); };
+      img.src = url;
     });
-  };
+  }
+
+  input.addEventListener("change", function () {
+    var file = input.files[0];
+    if (!file) return;
+    btn.disabled = true;
+    statusEl.style.display = "block";
+    statusEl.textContent = "📷 Распознаю…";
+
+    shrinkPhoto(file)
+      .then(function (photoBlob) {
+        var formData = new FormData();
+        formData.append("photo", photoBlob, "scan.jpg");
+        return fetch("/warehouse/scan-photo?t={{ token }}", { method: "POST", body: formData });
+      })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (data && data.ok && data.sku) {
+          statusEl.textContent = "Готово ✅ Открываю товар…";
+          window.location.href = "/warehouse/find?t={{ token }}&code=" + encodeURIComponent(data.sku);
+        } else {
+          statusEl.textContent = "⚠️ " + ((data && data.error) || "Не распознал штрихкод на фото — попробуйте чётче и ближе.");
+          btn.disabled = false;
+        }
+      })
+      .catch(function () {
+        statusEl.textContent = "⚠️ Не удалось отправить фото.";
+        btn.disabled = false;
+      })
+      .finally(function () { input.value = ""; });
+  });
 })();
+
+// Bluetooth/USB keyboard-wedge scanner (19.08) — no click into the code
+// field needed first, same as Продажи. Detection lives in the shared
+// keyboard-scanner.js below; a recognized scan just jumps straight to
+// /warehouse/find, exactly like the plain-GET physical-scanner form
+// already does when the field happens to have focus.
+window.onBarcodeScan = function (code) {
+  window.location.href = "/warehouse/find?t={{ token }}&code=" + encodeURIComponent(code);
+};
 </script>
+<script src="/static/keyboard-scanner.js?v={{ asset_version }}"></script>
 {% endblock %}

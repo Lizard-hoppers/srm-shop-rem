@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse, RedirectResponse, Response
 
 from core import barcode_label
 from core import inventory as core_inventory
+from core import photos as core_photos
 from core import print_queue
 from core import vision_ocr
 from core.inventory import InsufficientStockError
@@ -221,6 +222,10 @@ async def product_photo_view(
     data = await photo.read(_MAX_PHOTO_BYTES + 1)
     if len(data) > _MAX_PHOTO_BYTES:
         return JSONResponse({"ok": False, "error": "Фото слишком большое (максимум 15 МБ)."}, status_code=413)
+
+    compressed = core_photos.compress_photo(data)
+    if compressed is not None:
+        data, ext = compressed, ".jpg"
 
     os.makedirs(_PHOTO_DIR, exist_ok=True)
     filename = f"{product_id}_{uuid.uuid4().hex}{ext}"

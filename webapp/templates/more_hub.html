@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% import "_icons.html" as icons %}
-{% block title %}Ещё{% endblock %}
+{% block title %}{{ t('nav_more') }}{% endblock %}
 {% block content %}
 <div class="card profile-card">
   <div class="profile-avatar">{{ (staff.name or '?')[0]|upper }}</div>
@@ -14,16 +14,24 @@
   <a class="card nav-card" href="{{ link('/clients') }}">
     <div class="card-icon">{{ icons.icon('users', 18) }}</div>
     <div class="nav-card-body">
-      <div class="nav-card-title">Клиенты</div>
-      <div class="nav-card-sub">База клиентов магазина</div>
+      <div class="nav-card-title">{{ t('more_clients') }}</div>
+      <div class="nav-card-sub">{{ t('more_clients_sub') }}</div>
     </div>
     <div class="chevron">{{ icons.icon('chevron', 18) }}</div>
   </a>
   <a class="card nav-card" href="{{ link('/reports') }}">
     <div class="card-icon">{{ icons.icon('chart', 18) }}</div>
     <div class="nav-card-body">
-      <div class="nav-card-title">Отчёты</div>
-      <div class="nav-card-sub">Ремонты, продажи, склад</div>
+      <div class="nav-card-title">{{ t('more_reports') }}</div>
+      <div class="nav-card-sub">{{ t('more_reports_sub') }}</div>
+    </div>
+    <div class="chevron">{{ icons.icon('chevron', 18) }}</div>
+  </a>
+  <a class="card nav-card" href="{{ link('/settings') }}">
+    <div class="card-icon">{{ icons.icon('settings', 18) }}</div>
+    <div class="nav-card-body">
+      <div class="nav-card-title">{{ t('more_settings') }}</div>
+      <div class="nav-card-sub">{{ t('more_settings_sub') }}</div>
     </div>
     <div class="chevron">{{ icons.icon('chevron', 18) }}</div>
   </a>

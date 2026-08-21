@@ -240,6 +240,7 @@ def init_db(db_path: str = DB_PATH) -> None:
         _ensure_column(conn, "sales_orders", "warranty_until", "warranty_until TEXT")
         _ensure_column(conn, "products", "photo_path", "photo_path TEXT")
         _ensure_column(conn, "devices", "photo_path", "photo_path TEXT")
+        _ensure_column(conn, "staff", "language", "language TEXT NOT NULL DEFAULT 'ru'")
         device_catalog.seed(conn)
         conn.commit()
     finally:

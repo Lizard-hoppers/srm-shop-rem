@@ -4,6 +4,15 @@
 {% block content %}
 <a class="back-link" href="{{ link('/more') }}">{{ icons.icon('back', 16) }} Ещё</a>
 
+<h2>Добавить клиента</h2>
+<form method="post" action="{{ link('/clients') }}" class="inline-form">
+  <input type="text" name="name" placeholder="Имя" required>
+  <input type="text" name="phone" placeholder="Телефон" value="+380">
+  <input type="text" name="notes" placeholder="Заметка">
+  <button type="submit">Добавить</button>
+</form>
+
+<h2>Клиенты</h2>
 <div class="btn-row">
   <button type="button" id="scanQrBtn" onclick="scanClientQr()" style="display:none;">📷 Сканировать QR</button>
 </div>
@@ -23,27 +32,22 @@
 
 <div class="cards">
   {% for c in clients %}
-  <a class="card thumb-card" href="{{ link('/clients/' ~ c.id) }}">
+  <div class="card thumb-card">
+    <a class="stretched-link" href="{{ link('/clients/' ~ c.id) }}" aria-label="{{ c.name }}"></a>
     <div class="thumb-card-photo-placeholder">{{ icons.icon('users', 26) }}</div>
     <div class="thumb-card-name">{{ c.name }}</div>
-    <div class="thumb-card-meta">{{ c.phone or 'Без телефона' }}</div>
+    <div class="thumb-card-meta">
+      {% if c.phone %}<a class="stretched-link-exception" href="tel:{{ c.phone }}">{{ c.phone }}</a>{% else %}Без телефона{% endif %}
+    </div>
     <div class="thumb-card-meta">
       <span class="pill pill-{{ c.source }}">{{ 'Онлайн' if c.source == 'online' else 'Офлайн' }}</span>
     </div>
     <div class="thumb-card-meta">В базе с {{ c.created_at | kyiv }}</div>
-  </a>
+  </div>
   {% else %}
   <p class="meta">Клиентов пока нет.</p>
   {% endfor %}
 </div>
-
-<h2>Добавить клиента</h2>
-<form method="post" action="{{ link('/clients') }}" class="inline-form">
-  <input type="text" name="name" placeholder="Имя" required>
-  <input type="text" name="phone" placeholder="Телефон">
-  <input type="text" name="notes" placeholder="Заметка">
-  <button type="submit">Добавить</button>
-</form>
 
 <script>
 (function () {

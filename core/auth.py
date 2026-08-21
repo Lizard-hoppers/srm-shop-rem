@@ -59,3 +59,7 @@ def get_staff_by_telegram_id(conn: sqlite3.Connection, telegram_id: int) -> sqli
 def link_staff_telegram(conn: sqlite3.Connection, login: str, telegram_id: int) -> bool:
     cur = conn.execute("UPDATE staff SET telegram_id = ? WHERE login = ?", (telegram_id, login))
     return cur.rowcount > 0
+
+
+def set_staff_language(conn: sqlite3.Connection, staff_id: int, language: str) -> None:
+    conn.execute("UPDATE staff SET language = ? WHERE id = ?", (language, staff_id))

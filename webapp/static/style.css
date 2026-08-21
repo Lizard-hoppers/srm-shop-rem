@@ -115,14 +115,23 @@ h3 { font-size: 12px; color: var(--muted); margin: 0 0 10px; font-weight: 700; t
 
 /* ---- cards ---- */
 
-.cards { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-bottom: 14px; }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; margin-bottom: 14px; }
 .card {
+  position: relative;
   background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
   padding: 16px; text-decoration: none; color: var(--text); box-shadow: var(--shadow);
   transition: transform 0.12s ease, background 0.12s ease;
   display: flex; flex-direction: column; gap: 10px;
 }
 .card:active { transform: scale(0.97); background: var(--panel-hover); }
+/* A whole card can be one big tap target (.stretched-link, covers the
+   card) while still carrying a real, separately-clickable link inside it
+   (e.g. a tel: number) — two nested <a> tags would be invalid HTML, so
+   the card itself becomes a plain <div class="card">, the stretched-link
+   supplies its navigation, and any exception just needs to paint above
+   it (positioned content stacks above unpositioned content by default). */
+.stretched-link { position: absolute; inset: 0; z-index: 0; }
+.stretched-link-exception { position: relative; z-index: 1; color: var(--accent-2); text-decoration: none; }
 .card-icon {
   width: 36px; height: 36px; border-radius: 10px;
   display: flex; align-items: center; justify-content: center;
@@ -286,6 +295,29 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 @media (min-width: 720px) {
   .grid-2 { grid-template-columns: 1fr 1fr; align-items: start; }
+}
+
+/* Desktop (19.08) — the app was mobile-first (Telegram Mini App on a
+   phone), so .container just sat as a narrow 640px column with empty
+   space on either side on an actual laptop screen. Widen the container
+   so .cards/.table get real room to breathe; a stacked form (.edit-form)
+   stretching to that same width would put a "Имя" field a thousand
+   pixels wide, so it keeps a comfortable reading width and stays
+   left-aligned rather than centering (centering a form under a
+   left-aligned page title looks off-balance). */
+@media (min-width: 900px) {
+  .container { max-width: 1100px; }
+  form.edit-form { max-width: 480px; }
+  /* Ремонты (19.08): intake form and the repair cards side by side
+     instead of stacked — the left column matches .edit-form's own cap
+     so there's no dead gap between the form and its column edge. */
+  .repairs-layout { display: grid; grid-template-columns: 480px 1fr; gap: 32px; align-items: start; }
+  /* Продажи (19.08): item rows need real width to lay out product/qty/
+     price side by side without wrapping, so #saleForm gets its own wider
+     cap instead of the generic 480px .edit-form one — client contacts
+     move into a narrower second column alongside it. */
+  #saleForm { max-width: 900px; }
+  .sale-layout { display: grid; grid-template-columns: 1fr 300px; gap: 32px; align-items: start; }
 }
 
 /* Tap-to-flip barcode card (product detail, 19.08) — front is the

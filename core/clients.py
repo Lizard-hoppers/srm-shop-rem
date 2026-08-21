@@ -66,8 +66,12 @@ def normalize_phone(phone: str) -> str:
       0501234567     how staff type it at the counter (local format)
     """
     phone = phone.strip().replace(" ", "").replace("-", "")
-    if not phone:
-        return phone
+    if not phone or phone == "+380":
+        # phone form fields default to "+380" as a typing template (19.08)
+        # so staff don't retype the country code — nobody actually
+        # touched it if that's all that's there, treat it the same as
+        # never having entered anything.
+        return ""
     if phone.startswith("+"):
         return phone
     if phone.startswith("380") and phone[3:].isdigit():

@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
-<title>{% block title %}CRM{% endblock %} — Сервис-центр</title>
+<title>{% block title %}CRM{% endblock %} — {{ t('app_subtitle') }}</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -27,23 +27,24 @@
 {% if staff %}
 <nav class="tabbar">
   <a href="{{ link('/') }}" class="{{ 'active' if path == '/' else '' }}">
-    {{ icons.icon('home') }}<span>Главная</span>
+    {{ icons.icon('home') }}<span>{{ t('nav_home') }}</span>
   </a>
   <a href="{{ link('/repairs') }}" class="{{ 'active' if path.startswith('/repairs') else '' }}">
-    {{ icons.icon('tool') }}<span>Ремонты</span>
+    {{ icons.icon('tool') }}<span>{{ t('nav_repairs') }}</span>
   </a>
   <a href="{{ link('/sales') }}" class="{{ 'active' if path.startswith('/sales') else '' }}">
-    {{ icons.icon('cart') }}<span>Продажи</span>
+    {{ icons.icon('cart') }}<span>{{ t('nav_sales') }}</span>
   </a>
   <a href="{{ link('/warehouse') }}" class="{{ 'active' if path.startswith('/warehouse') or path.startswith('/inventory') or path.startswith('/purchases') else '' }}">
-    {{ icons.icon('box') }}<span>Склад</span>
+    {{ icons.icon('box') }}<span>{{ t('nav_warehouse') }}</span>
   </a>
-  <a href="{{ link('/more') }}" class="{{ 'active' if path.startswith('/more') or path.startswith('/clients') or path.startswith('/reports') else '' }}">
-    {{ icons.icon('more') }}<span>Ещё</span>
+  <a href="{{ link('/more') }}" class="{{ 'active' if path.startswith('/more') or path.startswith('/clients') or path.startswith('/reports') or path.startswith('/settings') else '' }}">
+    {{ icons.icon('more') }}<span>{{ t('nav_more') }}</span>
   </a>
 </nav>
 {% endif %}
 <script src="/static/select-enhance.js?v={{ asset_version }}"></script>
 <script src="/static/double-submit-guard.js?v={{ asset_version }}"></script>
+<script src="/static/tel-link-fix.js?v={{ asset_version }}"></script>
 </body>
 </html>

@@ -56,17 +56,14 @@ def _wrap_text(text: str, font: ImageFont.ImageFont, max_width: int, draw: Image
 
 
 def generate_label_png(sku: str, name: str, price: int | None, *, compact: bool = False) -> bytes:
-    """A printable label: a Code128 barcode of `sku` (with the digits/
-    text printed under the bars) and the current sale price, plus the
-    product name above it — unless `compact`, which drops the name.
+    """A printable label: product name, a Code128 barcode of `sku` (with
+    the digits/text printed under the bars), and the current sale price.
 
     compact=True is for physical thermal-label printing (Xprinter
     XP-420B, 30x20mm labels — see webapp.routers.inventory's
     ?compact=1 barcode.png param and the print view on the product
-    card): at that size a wrapped name just crowds out the barcode
-    without being legible anyway, so the label only carries what a
-    30x20mm sticker can actually show clearly. The full version stays
-    the on-screen default."""
+    card): same layout as the on-screen full version, just with the
+    price rendered much larger so it's readable at sticker size."""
     code128 = barcode_lib.get_barcode_class("code128")
     barcode_obj = code128(sku, writer=ImageWriter())
     barcode_buf = io.BytesIO()
@@ -77,20 +74,16 @@ def generate_label_png(sku: str, name: str, price: int | None, *, compact: bool 
     barcode_buf.seek(0)
     barcode_img = Image.open(barcode_buf).convert("RGB")
 
-    name_font = _load_font(_FONT_BOLD, 16)
-    price_font = _load_font(_FONT_BOLD, 20)
+    name_font = _load_font(_FONT_BOLD, 32 if compact else 16)
+    price_font = _load_font(_FONT_BOLD, 60 if compact else 20)
 
     padding = 12
     canvas_width = barcode_img.width + 2 * padding
 
-    if compact:
-        name_lines: list[str] = []
-        name_line_height = 0
-    else:
-        dummy = Image.new("RGB", (1, 1))
-        dummy_draw = ImageDraw.Draw(dummy)
-        name_lines = _wrap_text(name, name_font, canvas_width - 2 * padding, dummy_draw)
-        name_line_height = name_font.size + 4
+    dummy = Image.new("RGB", (1, 1))
+    dummy_draw = ImageDraw.Draw(dummy)
+    name_lines = _wrap_text(name, name_font, canvas_width - 2 * padding, dummy_draw)
+    name_line_height = name_font.size + 4
     name_block_height = name_line_height * len(name_lines)
 
     price_text = f"{price} грн" if price is not None else "Цена не указана"

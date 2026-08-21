@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from starlette.staticfiles import StaticFiles
 
 from core.storage import init_db
-from webapp.routers import clients, dashboard, hubs, inventory, miniapp, print_agent, purchases, reports, repairs, sales
+from webapp.routers import clients, dashboard, hubs, inventory, miniapp, print_agent, purchases, reports, repairs, sales, settings
 
 if not os.environ.get("CRM_SECRET_KEY"):
     raise RuntimeError("CRM_SECRET_KEY env var is required (auth token signing key)")
@@ -24,6 +24,7 @@ app.include_router(reports.router)
 app.include_router(hubs.router)
 app.include_router(miniapp.router)
 app.include_router(print_agent.router)
+app.include_router(settings.router)
 
 
 @app.on_event("startup")

@@ -2,17 +2,20 @@
 several pages that don't fit as their own top-level tab."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Request
-from fastapi.responses import RedirectResponse
+from fastapi import APIRouter, Depends, File, Request, UploadFile
+from fastapi.responses import JSONResponse, RedirectResponse
 
 from core import clients as core_clients
 from core import inventory as core_inventory
 from core import qr as core_qr
+from core import vision_ocr
 from core.storage import get_conn
 from webapp.deps import link, require_staff
 from webapp.templating import render
 
 router = APIRouter()
+
+_MAX_PHOTO_BYTES = 15 * 1024 * 1024  # comfortably under nginx's client_max_body_size (20M)
 
 
 @router.get("/warehouse")
@@ -42,6 +45,31 @@ def warehouse_find(request: Request, code: str = "", staff=Depends(require_staff
             return RedirectResponse(link(request, f"/clients/{client_id}"), status_code=303)
 
     return render(request, "warehouse_hub.html", staff=staff, error="Код не распознан — ничего не найдено.")
+
+
+@router.post("/warehouse/scan-photo")
+async def warehouse_scan_photo(photo: UploadFile = File(...), staff=Depends(require_staff)):
+    """Photo-based alternative to a live camera feed (19.08) — snapping a
+    single photo of a barcode and reading it via OpenAI vision
+    (core.vision_ocr.extract_product_label, same function the SKU
+    scan-fill button uses) turned out much more reliable in practice than
+    a live getUserMedia+ZXing video stream, which was crashing/hanging
+    Telegram Desktop's sandboxed WebKitGTK renderer. Returns a SKU for
+    the client to hand to /warehouse/find, same as any other scan
+    source — no redirect here, this endpoint never touches the DB."""
+    photo_bytes = await photo.read(_MAX_PHOTO_BYTES + 1)
+    if len(photo_bytes) > _MAX_PHOTO_BYTES:
+        return JSONResponse({"ok": False, "error": "Фото слишком большое (максимум 15 МБ)."}, status_code=413)
+
+    try:
+        result = vision_ocr.extract_product_label(photo_bytes)
+    except vision_ocr.VisionOcrError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
+
+    if not result["sku"]:
+        return JSONResponse({"ok": False, "error": "Не распознал штрихкод на фото — попробуйте чётче и ближе."})
+
+    return JSONResponse({"ok": True, "sku": result["sku"]})
 
 
 @router.get("/more")

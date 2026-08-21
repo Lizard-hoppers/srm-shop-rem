@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% import "_icons.html" as icons %}
+{% block title %}{{ t('settings_title') }}{% endblock %}
+{% block content %}
+<a class="back-link" href="{{ link('/more') }}">{{ icons.icon('back', 16) }} {{ t('nav_more') }}</a>
+
+<h2>{{ t('settings_language') }}</h2>
+<div class="section-btns">
+  {% for code, label in languages.items() %}
+  <form method="post" action="{{ link('/settings/language') }}" style="display:inline;">
+    <input type="hidden" name="language" value="{{ code }}">
+    <button type="submit" class="secondary" {% if staff.language == code %}style="border-color: var(--accent); color: var(--accent-2);"{% endif %}>{{ label }}</button>
+  </form>
+  {% endfor %}
+</div>
+<p class="meta">{{ t('settings_language_hint') }}</p>
+{% endblock %}

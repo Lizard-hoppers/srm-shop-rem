@@ -1,9 +1,9 @@
 {% extends "base.html" %}
 {% import "_icons.html" as icons %}
-{% block title %}Ремонт #{{ repair.id }}{% endblock %}
+{% block title %}{{ t('repair_detail_title') }} #{{ repair.id }}{% endblock %}
 {% block content %}
-<a class="back-link" href="{{ link('/repairs') }}">{{ icons.icon('back', 16) }} Ремонты</a>
-<div style="margin-bottom: 14px;"><span class="pill pill-{{ repair.status }}">{{ status_labels[repair.status] }}</span></div>
+<a class="back-link" href="{{ link('/repairs') }}">{{ icons.icon('back', 16) }} {{ t('nav_repairs') }}</a>
+<div style="margin-bottom: 14px;"><span class="pill pill-{{ repair.status }}">{{ t('status_' ~ repair.status) }}</span></div>
 
 <div class="grid-2">
   <div>
@@ -11,12 +11,12 @@
       <img class="photo-preview" src="{{ '/static/device_photos/' ~ repair.device_photo_path if repair.device_photo_path else '' }}"
            alt="{{ repair.device_type }}"
            style="max-width: 240px; max-height: 240px; border-radius: 10px; object-fit: cover; {% if not repair.device_photo_path %}display:none;{% endif %}">
-      <p class="no-photo-text meta" {% if repair.device_photo_path %}style="display:none;"{% endif %}>Фото устройства ещё не добавлено.</p>
+      <p class="no-photo-text meta" {% if repair.device_photo_path %}style="display:none;"{% endif %}>{{ t('device_photo_empty') }}</p>
       <form class="edit-form" style="margin-top: 10px;" data-photo-upload="/repairs/{{ repair.id }}/photo">
-        <label>{{ 'Заменить фото' if repair.device_photo_path else 'Добавить фото' }}
+        <label>{{ t('photo_replace') if repair.device_photo_path else t('photo_add') }}
           <input type="file" name="photo" accept="image/jpeg,image/png,image/webp" capture="environment" required>
         </label>
-        <button type="submit">Загрузить</button>
+        <button type="submit">{{ t('upload_btn') }}</button>
       </form>
       <p class="photo-status meta" style="display:none;"></p>
     </div>
@@ -24,60 +24,60 @@
     <script src="/static/photo-upload.js?v={{ asset_version }}"></script>
 
     <div class="panel-box" style="margin-top: 16px;">
-      <h3>Клиент и устройство</h3>
+      <h3>{{ t('client_device_title') }}</h3>
       <p><a href="{{ link('/clients/' ~ repair.client_id) }}">{{ repair.client_name }}</a> · {% if repair.client_phone %}<a href="tel:{{ repair.client_phone }}">{{ repair.client_phone }}</a>{% else %}—{% endif %}</p>
       <p>{{ repair.device_type }} {{ repair.brand or '' }} {{ repair.model or '' }}</p>
-      <p class="meta">Серийный №: {{ repair.serial_number or '—' }}</p>
-      <p class="meta">Неисправность: {{ repair.defect_description or '—' }}</p>
-      <p class="meta">Канал: <span class="pill pill-{{ repair.channel }}">{{ 'Онлайн' if repair.channel == 'online' else 'Офлайн' }}</span> · Принят {{ repair.created_at | kyiv }}</p>
+      <p class="meta">{{ t('serial_number_prefix') }} {{ repair.serial_number or '—' }}</p>
+      <p class="meta">{{ t('defect_prefix') }} {{ repair.defect_description or '—' }}</p>
+      <p class="meta">{{ t('channel_prefix') }} <span class="pill pill-{{ repair.channel }}">{{ t('channel_online') if repair.channel == 'online' else t('channel_offline') }}</span> · {{ t('accepted_at_prefix') }} {{ repair.created_at | kyiv }}</p>
     </div>
 
     <div class="panel-box" style="margin-top: 16px;">
-      <h3>Статус</h3>
+      <h3>{{ t('status_title') }}</h3>
       <form method="post" action="{{ link('/repairs/' ~ repair.id ~ '/status') }}" class="edit-form">
-        <label>Новый статус
+        <label>{{ t('new_status_label') }}
           <select name="status">
-            {% for s in statuses %}<option value="{{ s }}" {% if s == repair.status %}selected{% endif %}>{{ status_labels[s] }}</option>{% endfor %}
+            {% for s in statuses %}<option value="{{ s }}" {% if s == repair.status %}selected{% endif %}>{{ t('status_' ~ s) }}</option>{% endfor %}
           </select>
         </label>
-        <label>Комментарий<input type="text" name="comment"></label>
-        <button type="submit">Обновить статус</button>
+        <label>{{ t('comment_label') }}<input type="text" name="comment"></label>
+        <button type="submit">{{ t('update_status_btn') }}</button>
       </form>
     </div>
 
     <div class="panel-box" style="margin-top: 16px;">
-      <h3>Мастер</h3>
+      <h3>{{ t('master_label') }}</h3>
       <form method="post" action="{{ link('/repairs/' ~ repair.id ~ '/assign') }}" class="inline-form">
         <select name="master_id">
-          <option value="">Не назначен</option>
+          <option value="">{{ t('master_unassigned') }}</option>
           {% for m in masters %}<option value="{{ m.id }}" {% if repair.master_id == m.id %}selected{% endif %}>{{ m.name }}</option>{% endfor %}
         </select>
-        <button type="submit">Назначить</button>
+        <button type="submit">{{ t('assign_btn') }}</button>
       </form>
     </div>
 
     <div class="panel-box" style="margin-top: 16px;">
-      <h3>Цена и гарантия</h3>
+      <h3>{{ t('price_warranty_title') }}</h3>
       <form method="post" action="{{ link('/repairs/' ~ repair.id ~ '/price') }}" class="edit-form">
-        <label>Оценка стоимости<input type="number" name="price_estimate" value="{{ repair.price_estimate or '' }}"></label>
-        <label>Итоговая цена<input type="number" name="price_final" value="{{ repair.price_final or '' }}"></label>
-        <label>Гарантия до<input type="date" name="warranty_until" value="{{ repair.warranty_until or '' }}"></label>
-        <button type="submit">Сохранить</button>
+        <label>{{ t('price_estimate_label') }}<input type="number" name="price_estimate" value="{{ repair.price_estimate or '' }}"></label>
+        <label>{{ t('price_final_label') }}<input type="number" name="price_final" value="{{ repair.price_final or '' }}"></label>
+        <label>{{ t('warranty_until_label') }}<input type="date" name="warranty_until" value="{{ repair.warranty_until or '' }}"></label>
+        <button type="submit">{{ t('save_btn') }}</button>
       </form>
     </div>
   </div>
 
   <div>
     <div class="panel-box">
-      <h3>Использованные детали</h3>
+      <h3>{{ t('used_parts_title') }}</h3>
       {% if error %}<div class="flash flash-error">{{ error }}</div>{% endif %}
       <table class="table">
-        <thead><tr><th>Деталь</th><th>Кол-во</th><th>Когда</th></tr></thead>
+        <thead><tr><th>{{ t('part_col') }}</th><th>{{ t('qty_col') }}</th><th>{{ t('when_col') }}</th></tr></thead>
         <tbody>
           {% for p in parts %}
           <tr><td>{{ p.product_name }}</td><td>{{ p.qty }}</td><td>{{ p.created_at | kyiv }}</td></tr>
           {% else %}
-          <tr><td colspan="3">Детали не списывались.</td></tr>
+          <tr><td colspan="3">{{ t('no_parts_used') }}</td></tr>
           {% endfor %}
         </tbody>
       </table>
@@ -89,18 +89,18 @@
           {% for c in cells %}<option value="{{ c.id }}">{{ c.code }}</option>{% endfor %}
         </select>
         <input type="number" name="qty" min="1" value="1" required style="width: 70px;">
-        <button type="submit">Списать</button>
+        <button type="submit">{{ t('writeoff_btn') }}</button>
       </form>
     </div>
 
     {% if attachments %}
     <div class="panel-box" style="margin-top: 16px;">
-      <h3>📎 Вложения</h3>
+      <h3>📎 {{ t('attachments_title') }}</h3>
       <div style="display:flex; flex-wrap:wrap; gap:8px;">
         {% for a in attachments %}
         <a href="/static/repair_photos/{{ a.photo_path }}" target="_blank"
            title="{{ a.staff_name or '—' }} · {{ a.created_at | kyiv }}{% if a.caption %} · {{ a.caption }}{% endif %}">
-          <img src="/static/repair_photos/{{ a.photo_path }}" alt="Вложение"
+          <img src="/static/repair_photos/{{ a.photo_path }}" alt="{{ t('attachment_alt') }}"
                style="width:80px; height:80px; border-radius:8px; object-fit:cover;">
         </a>
         {% endfor %}
@@ -109,13 +109,13 @@
     {% endif %}
 
     <div class="panel-box" style="margin-top: 16px;">
-      <h3>История</h3>
+      <h3>{{ t('history_title') }}</h3>
       <ul class="timeline">
         {% for h in history %}
         <li>
-          <span class="pill pill-{{ h.status }}">{{ status_labels[h.status] }}</span>
+          <span class="pill pill-{{ h.status }}">{{ t('status_' ~ h.status) }}</span>
           {{ h.comment or '' }}
-          <div class="t-when">{{ h.changed_at | kyiv }} · {{ h.staff_name or 'система' }}</div>
+          <div class="t-when">{{ h.changed_at | kyiv }} · {{ h.staff_name or t('system_label') }}</div>
         </li>
         {% endfor %}
       </ul>

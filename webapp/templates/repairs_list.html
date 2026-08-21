@@ -1,11 +1,68 @@
 {% extends "base.html" %}
 {% import "_icons.html" as icons %}
-{% block title %}Ремонты{% endblock %}
+{% block title %}{{ t('nav_repairs') }}{% endblock %}
 {% block content %}
+<div class="repairs-layout">
+<div>
+<h2>{{ t('repairs_intake_title') }}</h2>
+<datalist id="deviceTypeList">{% for t_ in device_types %}<option value="{{ t_ }}">{% endfor %}</datalist>
+<datalist id="deviceBrandList">{% for b in device_brands %}<option value="{{ b }}">{% endfor %}</datalist>
+
+<form method="post" action="{{ link('/repairs') }}" class="edit-form" enctype="multipart/form-data" id="repairIntakeForm">
+  <label>{{ t('client_name_label') }}<input type="text" name="client_name" required></label>
+  <label>{{ t('client_phone_label') }}<input type="text" name="client_phone" value="+380" required></label>
+  <label>{{ t('channel_label') }}
+    <select name="channel">
+      <option value="offline">{{ t('channel_offline_full') }}</option>
+      <option value="online">{{ t('channel_online') }}</option>
+    </select>
+  </label>
+  <label>{{ t('master_label') }}
+    <select name="master_id">
+      <option value="">{{ t('master_unassigned') }}</option>
+      {% for m in masters %}<option value="{{ m.id }}">{{ m.name }}</option>{% endfor %}
+    </select>
+  </label>
+
+  <input type="hidden" name="device_count" id="deviceCount" value="{{ device_rows | length }}">
+  <div id="deviceRows">
+    {% for i in device_rows %}
+    <div class="repair-device-row" style="display:flex; flex-direction:column; gap:12px; padding-top:12px; border-top: 1px solid var(--border);">
+      <label>{{ t('device_type_label') }}
+        <input type="text" name="device_type_{{ i }}" class="device-type-input" list="deviceTypeList" placeholder="{{ t('device_type_placeholder') }}" required>
+      </label>
+      <label>{{ t('device_brand_label') }}
+        <input type="text" name="brand_{{ i }}" class="device-brand-input" list="deviceBrandList" placeholder="{{ t('device_brand_placeholder') }}">
+      </label>
+      <label>{{ t('device_model_label') }}
+        <input type="text" name="model_{{ i }}" class="device-model-input" list="deviceModelList_{{ i }}" placeholder="{{ t('device_model_placeholder') }}">
+        <datalist id="deviceModelList_{{ i }}"></datalist>
+      </label>
+      <label>{{ t('device_serial_label') }}
+        <div style="display:flex; gap:6px;">
+          <input type="text" name="serial_number_{{ i }}" class="device-serial-input" style="flex:1;">
+          <button type="button" class="secondary device-scan-btn" style="flex:0 0 auto;">📷</button>
+        </div>
+      </label>
+      <div class="device-scan-status meta" style="display:none;"></div>
+      <label>{{ t('defect_description_label') }}<textarea name="defect_description_{{ i }}"></textarea></label>
+      <label>{{ t('device_photo_label') }}<input type="file" name="photo_{{ i }}" accept="image/jpeg,image/png,image/webp" capture="environment"></label>
+      <label>{{ t('price_estimate_label') }}<input type="number" name="price_estimate_{{ i }}"></label>
+    </div>
+    {% endfor %}
+  </div>
+  <button type="button" id="addDeviceRowBtn" class="secondary">{{ t('add_device_btn') }}</button>
+
+  <button type="submit">{{ t('intake_submit_btn') }}</button>
+</form>
+</div>
+
+<div>
+<h2>{{ t('nav_repairs') }}</h2>
 <div class="section-btns">
-  <a href="{{ link('/repairs') }}"><button type="button" class="secondary" {% if not status %}style="border-color: var(--accent); color: var(--accent-2);"{% endif %}>Все</button></a>
+  <a href="{{ link('/repairs') }}"><button type="button" class="secondary" {% if not status %}style="border-color: var(--accent); color: var(--accent-2);"{% endif %}>{{ t('filter_all') }}</button></a>
   {% for s in statuses %}
-  <a href="{{ link('/repairs?status=' ~ s) }}"><button type="button" class="secondary" {% if status == s %}style="border-color: var(--accent); color: var(--accent-2);"{% endif %}>{{ status_labels[s] }}</button></a>
+  <a href="{{ link('/repairs?status=' ~ s) }}"><button type="button" class="secondary" {% if status == s %}style="border-color: var(--accent); color: var(--accent-2);"{% endif %}>{{ t('status_' ~ s) }}</button></a>
   {% endfor %}
 </div>
 
@@ -20,90 +77,40 @@
     <div class="thumb-card-name">{{ r.client_name }}</div>
     <div class="thumb-card-meta">{{ r.device_type }} {{ r.brand or '' }} {{ r.model or '' }}</div>
     <div class="thumb-card-meta">
-      <span class="pill pill-{{ r.status }}">{{ status_labels[r.status] }}</span>
-      <span class="pill pill-{{ r.channel }}">{{ 'Онлайн' if r.channel == 'online' else 'Офлайн' }}</span>
+      <span class="pill pill-{{ r.status }}">{{ t('status_' ~ r.status) }}</span>
+      <span class="pill pill-{{ r.channel }}">{{ t('channel_online') if r.channel == 'online' else t('channel_offline') }}</span>
     </div>
-    <div class="thumb-card-meta">{{ r.master_name or 'Мастер не назначен' }} · {{ r.created_at | kyiv }}</div>
+    <div class="thumb-card-meta">{{ r.master_name or t('master_unassigned_meta') }} · {{ r.created_at | kyiv }}</div>
   </a>
   {% else %}
-  <p class="meta">Ремонтов пока нет.</p>
+  <p class="meta">{{ t('repairs_empty') }}</p>
   {% endfor %}
 </div>
-
-<h2>Принять устройство в ремонт</h2>
-<datalist id="deviceTypeList">{% for t in device_types %}<option value="{{ t }}">{% endfor %}</datalist>
-<datalist id="deviceBrandList">{% for b in device_brands %}<option value="{{ b }}">{% endfor %}</datalist>
-
-<form method="post" action="{{ link('/repairs') }}" class="edit-form" enctype="multipart/form-data" id="repairIntakeForm">
-  <label>Имя клиента<input type="text" name="client_name" required></label>
-  <label>Телефон клиента<input type="text" name="client_phone" required></label>
-  <label>Канал
-    <select name="channel">
-      <option value="offline">Офлайн (в точке)</option>
-      <option value="online">Онлайн</option>
-    </select>
-  </label>
-  <label>Мастер
-    <select name="master_id">
-      <option value="">Не назначен</option>
-      {% for m in masters %}<option value="{{ m.id }}">{{ m.name }}</option>{% endfor %}
-    </select>
-  </label>
-
-  <input type="hidden" name="device_count" id="deviceCount" value="{{ device_rows | length }}">
-  <div id="deviceRows">
-    {% for i in device_rows %}
-    <div class="repair-device-row" style="display:flex; flex-direction:column; gap:12px; padding-top:12px; border-top: 1px solid var(--border);">
-      <label>Тип устройства
-        <input type="text" name="device_type_{{ i }}" class="device-type-input" list="deviceTypeList" placeholder="Смартфон, ноутбук…" required>
-      </label>
-      <label>Бренд
-        <input type="text" name="brand_{{ i }}" class="device-brand-input" list="deviceBrandList" placeholder="Apple, Samsung…">
-      </label>
-      <label>Модель
-        <input type="text" name="model_{{ i }}" class="device-model-input" list="deviceModelList_{{ i }}" placeholder="Начните вводить бренд — появятся модели">
-        <datalist id="deviceModelList_{{ i }}"></datalist>
-      </label>
-      <label>Серийный №/IMEI
-        <div style="display:flex; gap:6px;">
-          <input type="text" name="serial_number_{{ i }}" class="device-serial-input" style="flex:1;">
-          <button type="button" class="secondary device-scan-btn" style="flex:0 0 auto;">📷</button>
-        </div>
-      </label>
-      <div class="device-scan-status meta" style="display:none;"></div>
-      <label>Описание неисправности<textarea name="defect_description_{{ i }}"></textarea></label>
-      <label>Фото устройства (необязательно)<input type="file" name="photo_{{ i }}" accept="image/jpeg,image/png,image/webp" capture="environment"></label>
-      <label>Оценка стоимости<input type="number" name="price_estimate_{{ i }}"></label>
-    </div>
-    {% endfor %}
-  </div>
-  <button type="button" id="addDeviceRowBtn" class="secondary">+ Добавить ещё устройство</button>
-
-  <button type="submit">Принять</button>
-</form>
+</div>
+</div>
 
 <template id="deviceRowTemplate">
   <div class="repair-device-row" style="display:flex; flex-direction:column; gap:12px; padding-top:12px; border-top: 1px solid var(--border);">
-    <label>Тип устройства
-      <input type="text" name="device_type___IDX__" class="device-type-input" list="deviceTypeList" placeholder="Смартфон, ноутбук…">
+    <label>{{ t('device_type_label') }}
+      <input type="text" name="device_type___IDX__" class="device-type-input" list="deviceTypeList" placeholder="{{ t('device_type_placeholder') }}">
     </label>
-    <label>Бренд
-      <input type="text" name="brand___IDX__" class="device-brand-input" list="deviceBrandList" placeholder="Apple, Samsung…">
+    <label>{{ t('device_brand_label') }}
+      <input type="text" name="brand___IDX__" class="device-brand-input" list="deviceBrandList" placeholder="{{ t('device_brand_placeholder') }}">
     </label>
-    <label>Модель
-      <input type="text" name="model___IDX__" class="device-model-input" list="deviceModelList___IDX__" placeholder="Начните вводить бренд — появятся модели">
+    <label>{{ t('device_model_label') }}
+      <input type="text" name="model___IDX__" class="device-model-input" list="deviceModelList___IDX__" placeholder="{{ t('device_model_placeholder') }}">
       <datalist id="deviceModelList___IDX__"></datalist>
     </label>
-    <label>Серийный №/IMEI
+    <label>{{ t('device_serial_label') }}
       <div style="display:flex; gap:6px;">
         <input type="text" name="serial_number___IDX__" class="device-serial-input" style="flex:1;">
         <button type="button" class="secondary device-scan-btn" style="flex:0 0 auto;">📷</button>
       </div>
     </label>
     <div class="device-scan-status meta" style="display:none;"></div>
-    <label>Описание неисправности<textarea name="defect_description___IDX__"></textarea></label>
-    <label>Фото устройства (необязательно)<input type="file" name="photo___IDX__" accept="image/jpeg,image/png,image/webp" capture="environment"></label>
-    <label>Оценка стоимости<input type="number" name="price_estimate___IDX__"></label>
+    <label>{{ t('defect_description_label') }}<textarea name="defect_description___IDX__"></textarea></label>
+    <label>{{ t('device_photo_label') }}<input type="file" name="photo___IDX__" accept="image/jpeg,image/png,image/webp" capture="environment"></label>
+    <label>{{ t('price_estimate_label') }}<input type="number" name="price_estimate___IDX__"></label>
   </div>
 </template>
 

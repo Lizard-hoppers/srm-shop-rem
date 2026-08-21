@@ -25,6 +25,8 @@
 <form method="post" action="{{ link('/sales') }}" class="edit-form" id="saleForm">
   <datalist id="saleProductList"></datalist>
   <input type="hidden" name="row_count" id="saleRowCount" value="{{ item_rows | length }}">
+  <div class="sale-layout">
+  <div>
   <div id="saleRows">
     {% for i in item_rows %}
     <div class="sale-row" style="display:flex; gap:6px; flex-wrap:wrap; align-items:center; padding-top:8px; border-top: 1px solid var(--border);">
@@ -47,10 +49,14 @@
     </select>
   </label>
   <label>Гарантия до (необязательно)<input type="date" name="warranty_until"></label>
+  </div>
 
+  <div>
   <h3>Контакты клиента (необязательно)</h3>
   <label>Имя клиента<input type="text" name="client_name"></label>
-  <label>Телефон клиента<input type="text" name="client_phone"></label>
+  <label>Телефон клиента<input type="text" name="client_phone" value="+380"></label>
+  </div>
+  </div>
 
   <button type="submit">Оформить продажу</button>
 </form>
@@ -71,5 +77,6 @@
   window.SALE_PRODUCTS = {{ products_for_picker | tojson }};
   window.SALE_DEFAULT_PRICE_BY_PRODUCT = {{ default_price_by_product | tojson }};
 </script>
+<script src="/static/keyboard-scanner.js?v={{ asset_version }}"></script>
 <script src="/static/sale-rows.js?v={{ asset_version }}"></script>
 {% endblock %}

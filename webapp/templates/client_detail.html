@@ -53,7 +53,7 @@
 <h2>Данные клиента</h2>
 <form method="post" action="{{ link('/clients/' ~ client.id ~ '/edit') }}" class="edit-form">
   <label>Имя<input type="text" name="name" value="{{ client.name }}" required></label>
-  <label>Телефон<input type="text" name="phone" value="{{ client.phone or '' }}"></label>
+  <label>Телефон<input type="text" name="phone" value="{{ client.phone or '+380' }}"></label>
   <label>Заметки<textarea name="notes">{{ client.notes or '' }}</textarea></label>
   <button type="submit">Сохранить</button>
 </form>

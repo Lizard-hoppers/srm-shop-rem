@@ -19,6 +19,7 @@ from aiogram import F, Router
 from aiogram.types import Message
 
 from core import auth as core_auth
+from core import photos as core_photos
 from core import repairs as core_repairs
 from core.storage import get_conn
 
@@ -52,10 +53,15 @@ async def photo_reply_to_repair(message: Message) -> None:
     file = await message.bot.get_file(photo.file_id)
     buf = await message.bot.download_file(file.file_path)
 
+    data = buf.read()
+    compressed = core_photos.compress_photo(data)
+    if compressed is not None:
+        data = compressed
+
     os.makedirs(_ATTACH_DIR, exist_ok=True)
     filename = f"{order_id}_{uuid.uuid4().hex}.jpg"
     with open(os.path.join(_ATTACH_DIR, filename), "wb") as f:
-        f.write(buf.read())
+        f.write(data)
 
     with get_conn() as conn:
         core_repairs.add_attachment(conn, order_id, filename, message.caption, staff["id"])

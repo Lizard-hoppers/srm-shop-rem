@@ -153,4 +153,79 @@
   }
 
   Array.prototype.forEach.call(rowsContainer.children, wireScanButton);
+
+  /* Bluetooth/USB "keyboard-wedge" barcode scanner (19.08) — no click
+     into any field needed first. Detection itself (telling a scanner's
+     burst-typed input apart from a human by keystroke timing) lives in
+     the shared keyboard-scanner.js, included before this file; it calls
+     window.onBarcodeScan(code) for anything it recognizes as a scan. */
+  var toastEl = null;
+  var toastTimer = null;
+  function showScanToast(text, isWarning) {
+    if (!toastEl) {
+      toastEl = document.createElement("div");
+      toastEl.style.cssText =
+        "position:fixed; left:50%; bottom:90px; transform:translateX(-50%); z-index:50;" +
+        "padding:10px 18px; border-radius:10px; font-size:13.5px; font-weight:600;" +
+        "box-shadow:var(--shadow-lg); transition:opacity 0.2s ease; color:#fff;";
+      document.body.appendChild(toastEl);
+    }
+    toastEl.textContent = text;
+    toastEl.style.background = isWarning ? "#b45309" : "#16a34a";
+    toastEl.style.opacity = "1";
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { toastEl.style.opacity = "0"; }, 1600);
+  }
+
+  function findRowByProductId(id) {
+    var rows = rowsContainer.querySelectorAll(".sale-row");
+    for (var i = 0; i < rows.length; i++) {
+      var hidden = rows[i].querySelector(".product-id-input");
+      if (hidden && hidden.value === String(id)) return rows[i];
+    }
+    return null;
+  }
+
+  function findFirstEmptyRow() {
+    var rows = rowsContainer.querySelectorAll(".sale-row");
+    for (var i = 0; i < rows.length; i++) {
+      var search = rows[i].querySelector(".product-search");
+      if (search && !search.value.trim()) return rows[i];
+    }
+    return null;
+  }
+
+  function flashRow(rowEl) {
+    rowEl.style.transition = "background 0.4s ease";
+    rowEl.style.background = "color-mix(in srgb, var(--accent) 22%, transparent)";
+    setTimeout(function () { rowEl.style.background = ""; }, 600);
+  }
+
+  function handleBarcodeScan(code) {
+    var productId = skuToId[code];
+    if (!productId) {
+      showScanToast("⚠️ Штрих-код не найден: " + code, true);
+      return;
+    }
+
+    var existingRow = findRowByProductId(productId);
+    if (existingRow) {
+      var qtyInput = existingRow.querySelector('[name^="qty_"]');
+      qtyInput.value = (parseInt(qtyInput.value, 10) || 0) + 1;
+      flashRow(existingRow);
+      showScanToast("✅ " + idToLabel[productId] + " ×" + qtyInput.value);
+      return;
+    }
+
+    var rowEl = findFirstEmptyRow() || addRow();
+    var search = rowEl.querySelector(".product-search");
+    search.value = idToLabel[productId];
+    resolveRow(search);
+    var newQtyInput = rowEl.querySelector('[name^="qty_"]');
+    if (!newQtyInput.value) newQtyInput.value = 1;
+    flashRow(rowEl);
+    showScanToast("✅ " + idToLabel[productId] + " ×1");
+  }
+
+  window.onBarcodeScan = handleBarcodeScan;
 })();

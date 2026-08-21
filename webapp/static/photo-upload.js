@@ -11,8 +11,33 @@
      .no-photo-text       hidden once a photo exists
      a <label> whose first child text node reads "Добавить/Заменить фото"
      .photo-status        status line ("Загружаю…" / "Готово ✅" / errors)
-   and containing a <input type="file"> + submit <button>. */
+   and containing a <input type="file"> + submit <button>.
+
+   Shrinks the photo client-side before upload (19.08) — a phone camera
+   photo straight off the camera is several MB at 3000+px, which on a
+   mobile connection is most of what made this feel slow; the server
+   caps stored photos at 1600px anyway (core.photos.compress_photo), so
+   sending anything bigger than that never bought any real quality. */
 (function () {
+  function shrinkPhoto(file) {
+    return new Promise(function (resolve) {
+      var img = new Image();
+      var url = URL.createObjectURL(file);
+      img.onload = function () {
+        URL.revokeObjectURL(url);
+        var scale = Math.min(1, 1600 / Math.max(img.width, img.height));
+        if (scale === 1) { resolve(file); return; }
+        var canvas = document.createElement("canvas");
+        canvas.width = Math.round(img.width * scale);
+        canvas.height = Math.round(img.height * scale);
+        canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+        canvas.toBlob(function (blob) { resolve(blob || file); }, "image/jpeg", 0.85);
+      };
+      img.onerror = function () { resolve(file); };
+      img.src = url;
+    });
+  }
+
   document.querySelectorAll("form[data-photo-upload]").forEach(function (form) {
     var endpoint = form.dataset.photoUpload;
     var input = form.querySelector('input[type="file"]');
@@ -33,12 +58,12 @@
         status.textContent = "Загружаю…";
       }
 
-      var formData = new FormData();
-      formData.append("photo", file);
-      fetch(endpoint + window.location.search, {
-        method: "POST",
-        body: formData,
-      })
+      shrinkPhoto(file)
+        .then(function (photoBlob) {
+          var formData = new FormData();
+          formData.append("photo", photoBlob, "photo.jpg");
+          return fetch(endpoint + window.location.search, { method: "POST", body: formData });
+        })
         .then(function (r) { return r.json(); })
         .then(function (data) {
           if (data && data.ok) {

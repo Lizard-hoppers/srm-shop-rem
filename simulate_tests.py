@@ -3,6 +3,7 @@ against a live crm.sqlite3. Usage: python simulate_tests.py
 """
 from __future__ import annotations
 
+import io
 import os
 import sys
 import tempfile
@@ -34,6 +35,7 @@ import urllib.parse
 
 import httpx
 import jinja2
+from PIL import Image
 
 from core import auth, barcode_label, clients, device_catalog, inventory, purchases, qr, repairs, sales, timefmt
 from core.session_token import make_token, read_token
@@ -838,14 +840,12 @@ def scenario_webapp_forms(db_path: str) -> None:
         # Tap-to-flip print view (19.08, Xprinter XP-420B 30x20mm labels).
         check("the product card renders the flip-to-print barcode card",
               'id="barcodeFlip"' in product_card_resp.text and 'id="printAgentBtn"' in product_card_resp.text)
-        check("the product card embeds a compact (no name) barcode for the print-only area",
+        check("the product card embeds a compact (big-price) barcode for the print-only area",
               f"/inventory/products/{barcode_product_id}/barcode.png?compact=1" in product_card_resp.text)
 
         compact_barcode_resp = client.get(f"/inventory/products/{barcode_product_id}/barcode.png?t={token}&compact=1")
         check("compact barcode.png returns 200", compact_barcode_resp.status_code == 200)
         check("compact barcode.png body is a real PNG", compact_barcode_resp.content[:8] == b"\x89PNG\r\n\x1a\n")
-        check("compact barcode is smaller than the full one (no name block)",
-              len(compact_barcode_resp.content) < len(product_barcode_resp.content))
 
         # Print queue (19.08) — the CRM server can't reach a printer
         # behind Павел's router directly, so "Отправить на печать"
@@ -915,9 +915,60 @@ def scenario_webapp_forms(db_path: str) -> None:
               find_garbage_resp.status_code != 422 and "не распознан" in find_garbage_resp.text)
 
         warehouse_resp = client.get(f"/warehouse?t={token}")
-        check("Склад renders the QR scanner button", 'scanQrBtn' in warehouse_resp.text and '/warehouse/find' in warehouse_resp.text)
+        check("Склад renders the photo scanner button", 'scanPhotoBtn' in warehouse_resp.text and '/warehouse/find' in warehouse_resp.text)
         check("Ещё no longer carries the scanner (moved to Склад)",
-              'scanQrBtn' not in client.get(f"/more?t={token}").text)
+              'scanPhotoBtn' not in client.get(f"/more?t={token}").text)
+
+        # Settings — язык интерфейса (19.08). Infrastructure + the most-
+        # visible screens (nav, home dashboard, Ещё) first, per Павел;
+        # the rest of the app stays Russian-only until it gets its own
+        # translation pass, so this only checks what's actually wired up.
+        more_for_settings_resp = client.get(f"/more?t={token}")
+        check("Ещё shows a Настройки card linking to /settings",
+              "/settings" in more_for_settings_resp.text)
+
+        settings_resp = client.get(f"/settings?t={token}")
+        check("settings page offers both language options",
+              "Русский" in settings_resp.text and "Українська" in settings_resp.text)
+
+        dash_before_lang = client.get(f"/?t={token}")
+        check("dashboard defaults to Russian nav labels", "Ремонты" in dash_before_lang.text)
+
+        set_lang_resp = client.post(f"/settings/language?t={token}", data={"language": "uk"})
+        check("switching language redirects back to settings",
+              set_lang_resp.status_code == 303 or (set_lang_resp.history and set_lang_resp.history[0].status_code == 303))
+
+        dash_after_lang = client.get(f"/?t={token}")
+        check("after switching to uk, the tabbar shows Ukrainian labels instead",
+              "Ремонти" in dash_after_lang.text and "Ремонты" not in dash_after_lang.text)
+
+        bad_lang_resp = client.post(f"/settings/language?t={token}", data={"language": "en"})
+        check("an unknown language code is ignored, not stored",
+              bad_lang_resp.status_code == 303 or (bad_lang_resp.history and bad_lang_resp.history[0].status_code == 303))
+        check("the previous (uk) choice is still in effect after the rejected value",
+              "Ремонти" in client.get(f"/?t={token}").text)
+
+        # reset — later checks in this same scenario assume Russian text
+        client.post(f"/settings/language?t={token}", data={"language": "ru"})
+
+        # Photo-based scan (19.08, replaced live getUserMedia+ZXing camera
+        # streaming, which was crashing/hanging Telegram Desktop's
+        # sandboxed WebKitGTK renderer) — snap a photo of a barcode,
+        # OpenAI vision reads the SKU off it, same contract as the other
+        # scan-to-X endpoints.
+        scan_photo_resp = client.post(
+            f"/warehouse/scan-photo?t={token}",
+            files={"photo": ("barcode.jpg", b"fake-bytes", "image/jpeg")},
+        )
+        check("POST /warehouse/scan-photo without an API key returns a structured error, not a 500",
+              scan_photo_resp.status_code == 502 and scan_photo_resp.json()["ok"] is False)
+
+        oversized_scan_photo_resp = client.post(
+            f"/warehouse/scan-photo?t={token}",
+            files={"photo": ("huge.jpg", b"x" * (16 * 1024 * 1024), "image/jpeg")},
+        )
+        check("POST /warehouse/scan-photo rejects an oversized photo before ever calling OpenAI",
+              oversized_scan_photo_resp.status_code == 413 and oversized_scan_photo_resp.json()["ok"] is False)
 
         # Physical USB/Bluetooth scanner support (19.08) — a keyboard-
         # wedge scanner just "types" into whatever field has focus, so a
@@ -963,6 +1014,12 @@ def scenario_webapp_forms(db_path: str) -> None:
         # base.html, not just the repairs intake form.
         check("every page loads the double-submit guard, not just repairs intake",
               'double-submit-guard.js' in resp.text)
+
+        # tel: links don't work in Telegram's own in-app WebView (a
+        # documented Telegram bug, both platforms) — this app-wide script
+        # (19.08) reroutes them through window.open() as the workaround,
+        # loaded on every page the same way as the double-submit guard.
+        check("every page loads the tel: link fix", 'tel-link-fix.js' in resp.text)
 
         catalog_resp = client.post(f"/repairs?t={token}", data={
             "client_name": "Каталог Тест", "client_phone": "+380990002233",
@@ -1079,6 +1136,32 @@ def scenario_webapp_forms(db_path: str) -> None:
             beyond_cap_order_id = int(str(beyond_cap_resp.url).split("/sales/")[1].split("?")[0])
             beyond_cap_items = sales.get_sale_items(conn, beyond_cap_order_id)
         check("both rows (0 and 3) landed as separate sale items", len(beyond_cap_items) == 2)
+
+        # Phone fields default to "+380" as a typing template (19.08) so
+        # staff don't retype the country code — checkout's client contact
+        # is optional, so an untouched "+380" (nothing actually typed)
+        # must be treated exactly like an empty field, not create a
+        # phantom client with a garbage phone number. Own throwaway
+        # product/cell/stock here — reusing wproduct_id would consume
+        # stock the later "Добавить остаток" test assumes is still there.
+        client.post(f"/inventory/products?t={token}", data={"name": "Тест Телефон", "sku": "PHONE-TEST-1", "unit": "шт", "min_qty": "0"})
+        client.post(f"/inventory/cells?t={token}", data={"code": "PHONE-TEST-CELL"})
+        with get_conn(db_path) as conn:
+            phone_test_product_id = conn.execute("SELECT id FROM products WHERE sku = 'PHONE-TEST-1'").fetchone()["id"]
+            phone_test_cell_id = conn.execute("SELECT id FROM storage_cells WHERE code = 'PHONE-TEST-CELL'").fetchone()["id"]
+            clients_before = conn.execute("SELECT COUNT(*) AS n FROM clients").fetchone()["n"]
+        client.post(f"/inventory/movements/receive?t={token}", data={
+            "product_id": str(phone_test_product_id), "cell_id": str(phone_test_cell_id), "qty": "1",
+        })
+        untouched_phone_resp = client.post(f"/sales?t={token}", data={
+            "channel": "offline", "client_phone": "+380",
+            "product_id_0": str(phone_test_product_id), "qty_0": "1", "price_0": "1000",
+        })
+        with get_conn(db_path) as conn:
+            clients_after = conn.execute("SELECT COUNT(*) AS n FROM clients").fetchone()["n"]
+        check("an untouched '+380' template in checkout doesn't create a phantom client",
+              (untouched_phone_resp.status_code == 303 or untouched_phone_resp.history)
+              and clients_after == clients_before)
 
         unresolved_resp = client.post(f"/sales?t={token}", data={
             "channel": "offline",
@@ -1214,6 +1297,31 @@ def scenario_webapp_forms(db_path: str) -> None:
         check("the uploaded photo file was actually written to disk", photo_path is not None and os.path.exists(saved_photo_file))
         if photo_path and os.path.exists(saved_photo_file):
             os.remove(saved_photo_file)  # test hygiene — don't leave uploaded test images on disk
+
+        # 19.08 — every upload site now runs core.photos.compress_photo,
+        # so a phone-camera-sized photo shouldn't be stored anywhere near
+        # its original resolution/weight. A real (not fake-bytes) 3000px
+        # PNG is the only way to actually exercise that code path, rather
+        # than its fallback for undecodable data (the fake-bytes check
+        # above).
+        big_buf = io.BytesIO()
+        Image.new("RGB", (3000, 3000), "red").save(big_buf, format="PNG")
+        big_photo_bytes = big_buf.getvalue()
+        big_photo_resp = client.post(
+            f"/inventory/products/{wproduct_id}/photo?t={token}",
+            files={"photo": ("huge-real.png", big_photo_bytes, "image/png")},
+        )
+        big_photo_path = big_photo_resp.json().get("photo_url", "").rsplit("/", 1)[-1]
+        big_saved_file = os.path.join("webapp", "static", "product_photos", big_photo_path or "")
+        if os.path.exists(big_saved_file):
+            with Image.open(big_saved_file) as saved_im:
+                check("a large real photo is downscaled to the cap, not stored at full resolution",
+                      max(saved_im.size) <= 1600)
+            check("a large real photo is re-encoded as JPEG regardless of the original format",
+                  big_saved_file.endswith(".jpg"))
+            os.remove(big_saved_file)
+        else:
+            check("a large real photo is downscaled to the cap, not stored at full resolution", False)
 
 
 def main() -> None:
