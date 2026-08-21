@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% import "_icons.html" as icons %}
+{% block title %}{{ t('nav_masters') }}{% endblock %}
+{% block content %}
+<a class="back-link" href="{{ link('/more') }}">{{ icons.icon('back', 16) }} {{ t('nav_more') }}</a>
+{% if error %}<div class="flash flash-error">{{ error }}</div>{% endif %}
+
+{% for m in masters %}
+<div class="panel-box" style="margin-bottom: 12px;">
+  <a href="{{ link('/masters/' ~ m.id) }}" style="display:flex; justify-content:space-between; align-items:center; gap:8px;">
+    <div>
+      <h3 style="margin:0;">{{ m.name }}</h3>
+      <p class="meta" style="margin:2px 0 0;">
+        <span class="pill {{ 'pill-ready' if m.active else 'pill-cancelled' }}">{{ t('master_status_active') if m.active else t('master_status_inactive') }}</span>
+        {% if m.pay_type %} · {{ t('pay_type_' ~ m.pay_type) }}: {{ m.pay_value }}{% if m.pay_type == 'percent' %}%{% endif %}{% endif %}
+      </p>
+    </div>
+    <div class="chevron">{{ icons.icon('chevron', 18) }}</div>
+  </a>
+  <div class="stat-row" style="grid-template-columns: repeat(3, 1fr); margin-top: 12px; margin-bottom: 0;">
+    <div class="stat">
+      <div class="stat-num">{{ summaries[m.id].today.repairs_count }}</div>
+      <div class="stat-label">{{ t('stat_today') }}: {{ summaries[m.id].today.payout }}</div>
+    </div>
+    <div class="stat">
+      <div class="stat-num">{{ summaries[m.id].month.repairs_count }}</div>
+      <div class="stat-label">{{ t('stat_month') }}: {{ summaries[m.id].month.payout }}</div>
+    </div>
+    <div class="stat">
+      <div class="stat-num">{{ summaries[m.id].all_time.repairs_count }}</div>
+      <div class="stat-label">{{ t('stat_all_time') }}: {{ summaries[m.id].all_time.payout }}</div>
+    </div>
+  </div>
+  <form method="post" action="{{ link('/masters/' ~ m.id ~ (('/activate' if not m.active else '/deactivate'))) }}" style="margin-top: 10px;">
+    <button type="submit" class="secondary">{{ t('activate_btn') if not m.active else t('deactivate_btn') }}</button>
+  </form>
+</div>
+{% else %}
+<p class="meta">{{ t('masters_empty') }}</p>
+{% endfor %}
+
+<h2>{{ t('masters_add_title') }}</h2>
+<form method="post" action="{{ link('/masters') }}" class="edit-form">
+  <label>{{ t('name_placeholder') }}<input type="text" name="name" required></label>
+  <label>{{ t('telegram_id_label') }}<input type="number" name="telegram_id"></label>
+  <p class="meta">{{ t('telegram_id_hint') }}</p>
+  <label>{{ t('pay_type_label') }}
+    <select name="pay_type">
+      <option value="">{{ t('pay_type_none_option') }}</option>
+      <option value="percent">{{ t('pay_type_percent') }}</option>
+      <option value="fixed">{{ t('pay_type_fixed') }}</option>
+    </select>
+  </label>
+  <label>{{ t('pay_value_label') }}<input type="number" name="pay_value"></label>
+  <button type="submit">{{ t('add_btn') }}</button>
+</form>
+{% endblock %}

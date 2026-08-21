@@ -37,7 +37,7 @@ import httpx
 import jinja2
 from PIL import Image
 
-from core import auth, barcode_label, cash, clients, device_catalog, inventory, purchases, qr, repairs, sales, timefmt
+from core import auth, barcode_label, cash, clients, device_catalog, inventory, masters, purchases, qr, repairs, sales, timefmt
 from core.session_token import make_token, read_token
 from core.storage import get_conn, init_db
 from core.telegram_auth import validate_init_data
@@ -538,6 +538,88 @@ def scenario_sales(db_path: str) -> None:
               len(cash_income) == 1 and cash_income[0]["method"] == "cash" and cash_income[0]["amount"] == 500)
         check("a card sale posts a card-method income row, not cash",
               len(card_income) == 1 and card_income[0]["method"] == "card")
+
+
+def scenario_masters(db_path: str) -> None:
+    print("scenario: мастера — CRUD, pay rate/percentage, profit-based stats")
+    with get_conn(db_path) as conn:
+        admin_id = auth.create_staff(conn, "masteradmin", "pass", "Админ Мастеров", "admin")
+
+        master_id = auth.create_master(conn, "Мастер Иван", None, "percent", 40)
+        master = auth.get_master(conn, master_id)
+        check("create_master sets role=master", master["role"] == "master")
+        check("create_master auto-generates a login (never surfaced to Павел)",
+              bool(master["login"]) and master["login"] != "")
+        check("telegram_id is optional and defaults to null", master["telegram_id"] is None)
+        check("pay_type/pay_value stored as given", master["pay_type"] == "percent" and master["pay_value"] == 40)
+
+        second_id = auth.create_master(conn, "Мастер Иван", 555111222, "fixed", 300)
+        second = auth.get_master(conn, second_id)
+        check("two masters with the same name get distinct auto-generated logins",
+              second["login"] != master["login"])
+        check("telegram_id is stored when given", second["telegram_id"] == 555111222)
+
+        check("list_masters (active only) returns both fresh masters",
+              {m["id"] for m in auth.list_masters(conn)} >= {master_id, second_id})
+
+        auth.update_master(conn, master_id, "Мастер Иван Петров", 999888777, "percent", 50)
+        updated = auth.get_master(conn, master_id)
+        check("update_master changes name/telegram_id/pay_value",
+              updated["name"] == "Мастер Иван Петров" and updated["telegram_id"] == 999888777 and updated["pay_value"] == 50)
+
+        auth.set_master_active(conn, second_id, False)
+        check("a deactivated master drops out of the active-only list",
+              second_id not in {m["id"] for m in auth.list_masters(conn)})
+        check("but include_inactive=True still finds them (for reactivation)",
+              second_id in {m["id"] for m in auth.list_masters(conn, include_inactive=True)})
+        check("get_master still finds a deactivated master (unlike get_staff_by_id)",
+              auth.get_master(conn, second_id) is not None)
+        auth.set_master_active(conn, second_id, True)
+
+        # Profit-based stats: a real repair, with a part whose cost basis
+        # comes from an actual goods receipt (unit_cost snapshotted onto
+        # the repair_use movement at write-off time).
+        product_id = inventory.create_product(conn, "Экран для профита", "SKU-PROFIT", "Экраны", "шт", True, False, min_qty=0, price=None)
+        cell_id = inventory.create_cell(conn, "M1-01", None, None)
+        purchases.create_receipt(conn, None, "PROFIT-INV", admin_id, [(product_id, cell_id, 5, 200)])
+
+        client_id = clients.get_or_create_by_phone(conn, "Клиент Мастера", "+380671119988", source="offline")
+        order_id = repairs.create_repair(
+            conn, client_id, "Смартфон", "Xiaomi", "Redmi 9", None, "экран разбит", "offline", master_id, 1000, admin_id,
+        )
+        repairs.assign_master(conn, order_id, master_id)
+        inventory.record_movement(conn, product_id, 1, "repair_use", admin_id, from_cell_id=cell_id, ref_type="repair_order", ref_id=order_id)
+
+        movement = [m for m in inventory.list_movements(conn) if m["ref_type"] == "repair_order" and m["ref_id"] == order_id][0]
+        check("repair_use snapshots the product's current unit_cost onto the movement", movement["unit_cost"] == 200)
+
+        # Not issued yet — must not count toward stats (mirrors касса: only
+        # "Выдан" repairs count).
+        pre_issue_stats = masters.period_stats(conn, master_id)
+        check("an unissued repair doesn't count toward stats yet", pre_issue_stats["repairs_count"] == 0)
+
+        repairs.set_price(conn, order_id, price_estimate=1000, price_final=1000)
+        repairs.update_status(conn, order_id, "issued", admin_id)
+
+        stats = masters.period_stats(conn, master_id)
+        check("issued repair counts toward all-time stats", stats["repairs_count"] == 1)
+        check("revenue is the repair's price_final", stats["revenue"] == 1000)
+        check("parts cost is qty * snapshotted unit_cost (1 * 200)", stats["parts_cost"] == 200)
+        check("profit is revenue minus parts cost (1000 - 200 = 800)", stats["profit"] == 800)
+
+        check("payout() at 50% of an 800 profit is 400", masters.payout(800, 1, "percent", 50) == 400)
+        check("payout() for a fixed rate is repairs_count * pay_value, not profit-based",
+              masters.payout(800, 3, "fixed", 300) == 900)
+        check("payout() with no pay_type configured is 0, not a crash", masters.payout(800, 1, None, None) == 0)
+        check("payout() never goes negative even if parts cost exceeded price",
+              masters.payout(-500, 1, "percent", 50) == 0)
+
+        summary = masters.master_summary(conn, auth.get_master(conn, master_id))
+        check("master_summary's all_time picks up the issued repair", summary["all_time"]["repairs_count"] == 1)
+        check("master_summary computes a payout per period using the master's own pay_type/value",
+              summary["all_time"]["payout"] == round(800 * 50 / 100))
+        check("master_summary's today bucket also has the repair (issued just now)",
+              summary["today"]["repairs_count"] == 1)
 
 
 def scenario_cash(db_path: str) -> None:
@@ -1617,6 +1699,48 @@ def scenario_webapp_forms(db_path: str) -> None:
         check("zero-amount adjustment: friendly error, no raw 422",
               adj_resp.status_code != 422 and "Укажите сумму" in adj_resp.text)
 
+        # Мастера — CRUD over real HTTP, plus role gating (compensation
+        # data, same owner/admin-only tier as Касса).
+        masters_denied_resp = client.get(f"/masters?t={master_token}")
+        check("a master role is denied the Мастера section (403), not shown pay rates",
+              masters_denied_resp.status_code == 403)
+
+        masters_list_resp = client.get(f"/masters?t={token}")
+        check("Мастера list renders for an owner", masters_list_resp.status_code == 200)
+
+        no_name_resp = client.post(f"/masters?t={token}", data={"name": "", "pay_type": "percent", "pay_value": "40"})
+        check("missing master name: no raw 422", no_name_resp.status_code != 422)
+        check("missing master name: friendly error shown", "Введите имя мастера" in no_name_resp.text)
+
+        create_resp = client.post(f"/masters?t={token}", data={
+            "name": "HTTP Тест Мастер", "telegram_id": "", "pay_type": "percent", "pay_value": "35",
+        })
+        check("creating a master redirects to their detail page (303)",
+              create_resp.status_code == 303 or (create_resp.history and create_resp.history[0].status_code == 303))
+        http_master_id = int(str(create_resp.url).split("/masters/")[1].split("?")[0])
+
+        detail_resp = client.get(f"/masters/{http_master_id}?t={token}")
+        check("the new master's detail page shows their configured rate",
+              "HTTP Тест Мастер" in detail_resp.text and "35" in detail_resp.text)
+
+        edit_resp = client.post(f"/masters/{http_master_id}/edit?t={token}", data={
+            "name": "HTTP Тест Мастер Правка", "telegram_id": "", "pay_type": "fixed", "pay_value": "250",
+        })
+        check("editing a master redirects back to their card (303)",
+              edit_resp.status_code == 303 or (edit_resp.history and edit_resp.history[0].status_code == 303))
+        with get_conn(db_path) as conn:
+            edited = auth.get_master(conn, http_master_id)
+        check("the edit actually changed name and pay_type/value",
+              edited["name"] == "HTTP Тест Мастер Правка" and edited["pay_type"] == "fixed" and edited["pay_value"] == 250)
+
+        client.post(f"/masters/{http_master_id}/deactivate?t={token}")
+        with get_conn(db_path) as conn:
+            check("deactivating over HTTP actually flips active, not a hard delete",
+                  auth.get_master(conn, http_master_id)["active"] == 0)
+        list_after_deactivate = client.get(f"/masters?t={token}")
+        check("a deactivated master still shows up in the list (for reactivation), just marked inactive",
+              "HTTP Тест Мастер Правка" in list_after_deactivate.text)
+
 
 def main() -> None:
     with tempfile.TemporaryDirectory() as tmp:
@@ -1635,6 +1759,7 @@ def main() -> None:
         scenario_purchase_drafts_and_vision(db_path)
         scenario_sales(db_path)
         scenario_cash(db_path)
+        scenario_masters(db_path)
         scenario_repair_card_notify(db_path)
         scenario_repair_actions(db_path)
         scenario_repair_attachments(db_path)

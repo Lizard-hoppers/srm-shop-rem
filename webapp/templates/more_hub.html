@@ -37,6 +37,16 @@
     <div class="chevron">{{ icons.icon('chevron', 18) }}</div>
   </a>
   {% endif %}
+  {% if staff.role in ('owner', 'admin') %}
+  <a class="card nav-card" href="{{ link('/masters') }}">
+    <div class="card-icon">{{ icons.icon('user', 18) }}</div>
+    <div class="nav-card-body">
+      <div class="nav-card-title">{{ t('nav_masters') }}</div>
+      <div class="nav-card-sub">{{ t('more_masters_sub') }}</div>
+    </div>
+    <div class="chevron">{{ icons.icon('chevron', 18) }}</div>
+  </a>
+  {% endif %}
   <a class="card nav-card" href="{{ link('/settings') }}">
     <div class="card-icon">{{ icons.icon('settings', 18) }}</div>
     <div class="nav-card-body">

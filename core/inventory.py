@@ -166,6 +166,26 @@ def _apply_stock_delta(conn: sqlite3.Connection, product_id: int, cell_id: int, 
         )
 
 
+def _latest_unit_cost(conn: sqlite3.Connection, product_id: int) -> int | None:
+    """Best-known cost basis for a product right now — the unit_cost of its
+    most recent goods receipt. Parts from different suppliers aren't
+    segregated by cell (see core.purchases.create_supplier_return's
+    docstring — deliberately not batch-tracked), so this is an
+    approximation, not the exact cost of the specific unit consumed —
+    good enough for a repair's profit estimate (see core.masters), not
+    precise accounting."""
+    row = conn.execute(
+        """SELECT goods_receipt_items.unit_cost
+           FROM goods_receipt_items
+           JOIN goods_receipts ON goods_receipts.id = goods_receipt_items.receipt_id
+           WHERE goods_receipt_items.product_id = ? AND goods_receipt_items.unit_cost IS NOT NULL
+           ORDER BY goods_receipts.created_at DESC, goods_receipts.id DESC
+           LIMIT 1""",
+        (product_id,),
+    ).fetchone()
+    return row["unit_cost"] if row else None
+
+
 def record_movement(
     conn: sqlite3.Connection,
     product_id: int,
@@ -178,7 +198,14 @@ def record_movement(
     ref_id: int | None = None,
     comment: str | None = None,
 ) -> int:
-    """Apply a stock movement and write the audit row. qty is always positive."""
+    """Apply a stock movement and write the audit row. qty is always positive.
+
+    A 'repair_use' movement snapshots the product's current unit_cost onto
+    the row (see _latest_unit_cost) — core.masters nets this against a
+    repair's price_final to estimate a master's profit-based payout.
+    Snapshotted at write time, not looked up later, so a subsequent
+    purchase-price change never silently reshuffles an already-issued
+    repair's numbers."""
     if qty <= 0:
         raise ValueError("qty должен быть положительным")
     if from_cell_id is None and to_cell_id is None:
@@ -189,11 +216,12 @@ def record_movement(
     if to_cell_id is not None:
         _apply_stock_delta(conn, product_id, to_cell_id, qty)
 
+    unit_cost = _latest_unit_cost(conn, product_id) if reason == "repair_use" else None
     cur = conn.execute(
         """INSERT INTO stock_movements
-           (product_id, from_cell_id, to_cell_id, qty, reason, ref_type, ref_id, staff_id, comment)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (product_id, from_cell_id, to_cell_id, qty, reason, ref_type, ref_id, staff_id, comment),
+           (product_id, from_cell_id, to_cell_id, qty, reason, ref_type, ref_id, staff_id, comment, unit_cost)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (product_id, from_cell_id, to_cell_id, qty, reason, ref_type, ref_id, staff_id, comment, unit_cost),
     )
     return cur.lastrowid
 

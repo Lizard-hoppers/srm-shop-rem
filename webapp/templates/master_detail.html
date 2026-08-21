@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% import "_icons.html" as icons %}
+{% block title %}{{ master.name }}{% endblock %}
+{% block content %}
+<a class="back-link" href="{{ link('/masters') }}">{{ icons.icon('back', 16) }} {{ t('nav_masters') }}</a>
+{% if error %}<div class="flash flash-error">{{ error }}</div>{% endif %}
+
+<div class="panel-box">
+  <h3 style="margin:0;">{{ master.name }}</h3>
+  <p class="meta" style="margin:4px 0 0;">
+    <span class="pill {{ 'pill-ready' if master.active else 'pill-cancelled' }}">{{ t('master_status_active') if master.active else t('master_status_inactive') }}</span>
+    {% if master.pay_type %} · {{ t('pay_type_' ~ master.pay_type) }}: {{ master.pay_value }}{% if master.pay_type == 'percent' %}%{% endif %}
+    {% else %} · {{ t('no_rate_hint') }}
+    {% endif %}
+  </p>
+</div>
+
+<h2>{{ t('master_stats_title') }}</h2>
+<table class="table">
+  <thead><tr><th></th><th>{{ t('stat_repairs_count') }}</th><th>{{ t('col_revenue') }}</th><th>{{ t('parts_cost_label') }}</th><th>{{ t('profit_label') }}</th><th>{{ t('payout_label') }}</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>{{ t('stat_today') }}</td>
+      <td>{{ summary.today.repairs_count }}</td>
+      <td>{{ summary.today.revenue }}</td>
+      <td>{{ summary.today.parts_cost }}</td>
+      <td>{{ summary.today.profit }}</td>
+      <td>{{ summary.today.payout }}</td>
+    </tr>
+    <tr>
+      <td>{{ t('stat_month') }}</td>
+      <td>{{ summary.month.repairs_count }}</td>
+      <td>{{ summary.month.revenue }}</td>
+      <td>{{ summary.month.parts_cost }}</td>
+      <td>{{ summary.month.profit }}</td>
+      <td>{{ summary.month.payout }}</td>
+    </tr>
+    <tr>
+      <td>{{ t('stat_all_time') }}</td>
+      <td>{{ summary.all_time.repairs_count }}</td>
+      <td>{{ summary.all_time.revenue }}</td>
+      <td>{{ summary.all_time.parts_cost }}</td>
+      <td>{{ summary.all_time.profit }}</td>
+      <td>{{ summary.all_time.payout }}</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>{{ t('master_data_title') }}</h2>
+<form method="post" action="{{ link('/masters/' ~ master.id ~ '/edit') }}" class="edit-form">
+  <label>{{ t('name_placeholder') }}<input type="text" name="name" value="{{ master.name }}" required></label>
+  <label>{{ t('telegram_id_label') }}<input type="number" name="telegram_id" value="{{ master.telegram_id or '' }}"></label>
+  <p class="meta">{{ t('telegram_id_hint') }}</p>
+  <label>{{ t('pay_type_label') }}
+    <select name="pay_type">
+      <option value="" {% if not master.pay_type %}selected{% endif %}>{{ t('pay_type_none_option') }}</option>
+      <option value="percent" {% if master.pay_type == 'percent' %}selected{% endif %}>{{ t('pay_type_percent') }}</option>
+      <option value="fixed" {% if master.pay_type == 'fixed' %}selected{% endif %}>{{ t('pay_type_fixed') }}</option>
+    </select>
+  </label>
+  <label>{{ t('pay_value_label') }}<input type="number" name="pay_value" value="{{ master.pay_value if master.pay_value is not none else '' }}"></label>
+  <button type="submit">{{ t('save_btn') }}</button>
+</form>
+
+<form method="post" action="{{ link('/masters/' ~ master.id ~ (('/activate' if not master.active else '/deactivate'))) }}" style="margin-top: 12px;">
+  <button type="submit" class="secondary">{{ t('activate_btn') if not master.active else t('deactivate_btn') }}</button>
+</form>
+{% endblock %}

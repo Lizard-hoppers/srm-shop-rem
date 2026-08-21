@@ -143,6 +143,7 @@ CREATE TABLE IF NOT EXISTS stock_movements (
     ref_id INTEGER,
     staff_id INTEGER REFERENCES staff(id),
     comment TEXT,
+    unit_cost INTEGER,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -286,6 +287,9 @@ def init_db(db_path: str = DB_PATH) -> None:
         _ensure_column(conn, "staff", "language", "language TEXT NOT NULL DEFAULT 'ru'")
         _ensure_column(conn, "repair_order_messages", "has_photo", "has_photo INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "sales_orders", "payment_method", "payment_method TEXT")
+        _ensure_column(conn, "stock_movements", "unit_cost", "unit_cost INTEGER")
+        _ensure_column(conn, "staff", "pay_type", "pay_type TEXT")
+        _ensure_column(conn, "staff", "pay_value", "pay_value INTEGER")
         device_catalog.seed(conn)
         conn.commit()
     finally:
