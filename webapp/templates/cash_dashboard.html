@@ -5,15 +5,15 @@
 <a class="back-link" href="{{ link('/more') }}">{{ icons.icon('back', 16) }} Ещё</a>
 {% if error %}<div class="flash flash-error">{{ error }}</div>{% endif %}
 
-<div class="stat-row">
-  <div class="stat">
-    <div class="stat-num">{{ balance }}</div>
-    <div class="stat-label">наличка в кассе сейчас</div>
-  </div>
+<div class="cash-layout">
+<div>
+<div class="panel-box" style="margin-bottom: 20px;">
+  <div style="font-size: 32px; font-weight: 800; letter-spacing: -0.02em;">{{ balance }}</div>
+  <div class="stat-label" style="margin-top: 4px;">наличка в кассе сейчас</div>
 </div>
 
 <h2>За период</h2>
-<form method="get" action="{{ link('/cash') }}" class="edit-form" style="display:flex; gap:6px; flex-wrap:wrap; align-items:end;">
+<form method="get" action="{{ link('/cash') }}" class="edit-form" style="flex-direction:row; flex-wrap:wrap; align-items:end;">
   <label style="flex:1; min-width:130px;">С<input type="date" name="date_from" value="{{ date_from }}"></label>
   <label style="flex:1; min-width:130px;">По<input type="date" name="date_to" value="{{ date_to }}"></label>
   <button type="submit" class="secondary">Показать</button>
@@ -38,7 +38,35 @@
   </div>
 </div>
 
-<div class="panel-box" style="margin-top: 16px;">
+<h2>Последние операции</h2>
+<table class="table">
+  <thead><tr><th>Когда</th><th>Тип</th><th>Способ</th><th>Сумма</th><th>За что</th><th>Кто</th></tr></thead>
+  <tbody>
+    {% for tx in transactions %}
+    <tr>
+      <td>{{ tx.created_at | kyiv }}</td>
+      <td>{{ '⬆ Приход' if tx.kind == 'income' else '⬇ Расход' }}</td>
+      <td>{{ cash_methods.get(tx.method, tx.method) }}</td>
+      <td>{{ tx.amount }}</td>
+      <td>
+        {% if tx.ref_type == 'sales_order' %}Продажа #{{ tx.ref_id }}
+        {% elif tx.ref_type == 'repair_order' %}Ремонт #{{ tx.ref_id }}
+        {% elif tx.category == 'adjustment' %}Корректировка кассы
+        {% else %}{{ cash_expense_categories.get(tx.category, tx.category or '—') }}
+        {% endif %}
+        {% if tx.comment %}<div class="meta">{{ tx.comment }}</div>{% endif %}
+      </td>
+      <td>{{ tx.staff_name or '—' }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="6">Операций пока нет.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+
+<div>
+<div class="panel-box">
   <h3>Расход</h3>
   <form method="post" action="{{ link('/cash/expense') }}" class="edit-form">
     <div style="display:flex; gap:6px;">
@@ -72,30 +100,6 @@
     <button type="submit" class="secondary">Оформить</button>
   </form>
 </div>
-
-<h2>Последние операции</h2>
-<table class="table">
-  <thead><tr><th>Когда</th><th>Тип</th><th>Способ</th><th>Сумма</th><th>За что</th><th>Кто</th></tr></thead>
-  <tbody>
-    {% for tx in transactions %}
-    <tr>
-      <td>{{ tx.created_at | kyiv }}</td>
-      <td>{{ '⬆ Приход' if tx.kind == 'income' else '⬇ Расход' }}</td>
-      <td>{{ cash_methods.get(tx.method, tx.method) }}</td>
-      <td>{{ tx.amount }}</td>
-      <td>
-        {% if tx.ref_type == 'sales_order' %}Продажа #{{ tx.ref_id }}
-        {% elif tx.ref_type == 'repair_order' %}Ремонт #{{ tx.ref_id }}
-        {% elif tx.category == 'adjustment' %}Корректировка кассы
-        {% else %}{{ cash_expense_categories.get(tx.category, tx.category or '—') }}
-        {% endif %}
-        {% if tx.comment %}<div class="meta">{{ tx.comment }}</div>{% endif %}
-      </td>
-      <td>{{ tx.staff_name or '—' }}</td>
-    </tr>
-    {% else %}
-    <tr><td colspan="6">Операций пока нет.</td></tr>
-    {% endfor %}
-  </tbody>
-</table>
+</div>
+</div>
 {% endblock %}

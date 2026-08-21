@@ -318,6 +318,12 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
      move into a narrower second column alongside it. */
   #saleForm { max-width: 900px; }
   .sale-layout { display: grid; grid-template-columns: 1fr 300px; gap: 32px; align-items: start; }
+  /* Касса (21.08): balance/summary/ledger need the wide column to
+     breathe (stat-row, the transactions table); the Расход/Внести-изъять
+     forms are secondary input, so they get the same narrow sidebar
+     treatment as sale-layout's contact form instead of stretching full
+     width or stacking with empty space on either side. */
+  .cash-layout { display: grid; grid-template-columns: 1fr 300px; gap: 32px; align-items: start; }
 }
 
 /* Tap-to-flip barcode card (product detail, 19.08) — front is the
