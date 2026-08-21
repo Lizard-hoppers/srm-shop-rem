@@ -24,6 +24,7 @@ process without pulling aiogram into the web process's notify path.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 
@@ -35,6 +36,18 @@ _BOT_TOKEN = os.environ.get("CRM_BOT_TOKEN")
 _STAFF_GROUP_CHAT_ID = os.environ.get("CRM_STAFF_GROUP_CHAT_ID")
 _REPAIR_TOPIC_ID = os.environ.get("CRM_REPAIR_TOPIC_ID")
 _MASTERS_GROUP_CHAT_ID = os.environ.get("CRM_MASTERS_GROUP_CHAT_ID")
+
+# Telegram caps a photo caption at 1024 chars (vs. 4096 for a plain text
+# message) — the card itself is normally well under that, but defect
+# descriptions are free text with no length limit on the form, so this is
+# a safety net, not the expected case.
+_MAX_CAPTION_LEN = 1024
+
+
+def _as_caption(text: str) -> str:
+    if len(text) <= _MAX_CAPTION_LEN:
+        return text
+    return text[: _MAX_CAPTION_LEN - 1] + "…"
 
 
 def _send(
@@ -70,21 +83,33 @@ def _send(
 
 
 def _send_photo(
-    chat_id: str | int | None, photo_bytes: bytes, filename: str, message_thread_id: str | int | None = None
+    chat_id: str | int | None,
+    photo_bytes: bytes,
+    filename: str,
+    message_thread_id: str | int | None = None,
+    caption: str | None = None,
+    reply_markup: dict | None = None,
 ) -> int | None:
     """Post a photo (uploaded directly, not by URL — Telegram's fetch-by-
     URL path for sendPhoto turned out unreliable against our own domain,
     rejecting a perfectly valid, publicly-fetchable JPEG with "wrong type
     of the web page content"; a direct multipart upload has no such
     dependency on Telegram being able to reach/like our server) to
-    `chat_id`, no caption. Never raises, same best-effort contract as
-    _send(). Not tracked in repair_order_messages: it's never edited
-    later, only the text card that follows it is."""
+    `chat_id`, optionally as the one message carrying both the photo and
+    the card text/keyboard (caption), rather than two separate messages.
+    Never raises, same best-effort contract as _send()."""
     if not chat_id or not _BOT_TOKEN:
         return None
     data = {"chat_id": chat_id}
     if message_thread_id:
         data["message_thread_id"] = message_thread_id
+    if caption:
+        data["caption"] = _as_caption(caption)
+        data["parse_mode"] = "HTML"
+    if reply_markup:
+        # multipart/form-data has no native nested-object support — the
+        # Bot API accepts reply_markup as a JSON-encoded string field here.
+        data["reply_markup"] = json.dumps(reply_markup)
     try:
         resp = httpx.post(
             f"https://api.telegram.org/bot{_BOT_TOKEN}/sendPhoto",
@@ -129,6 +154,37 @@ def edit_message(chat_id: str | int, message_id: int, text: str, reply_markup: d
         return False
 
 
+def edit_message_caption(
+    chat_id: str | int, message_id: int, caption: str, reply_markup: dict | None = None
+) -> bool:
+    """Same as edit_message(), but for a message that was sent as a photo
+    with a caption (editMessageText 400s on those — Telegram requires
+    editMessageCaption instead). Never raises; returns whether it went
+    through."""
+    if not chat_id or not message_id or not _BOT_TOKEN:
+        return False
+    payload = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "caption": _as_caption(caption),
+        "parse_mode": "HTML",
+        "reply_markup": reply_markup or {"inline_keyboard": []},
+    }
+    try:
+        resp = httpx.post(
+            f"https://api.telegram.org/bot{_BOT_TOKEN}/editMessageCaption",
+            json=payload,
+            timeout=5,
+        )
+        if resp.status_code != 200:
+            logger.warning("staff notify caption edit failed: %s %s", resp.status_code, resp.text)
+            return False
+        return True
+    except httpx.HTTPError:
+        logger.warning("staff notify caption edit failed", exc_info=True)
+        return False
+
+
 def notify_staff_group(
     text: str, message_thread_id: str | int | None = None, reply_markup: dict | None = None
 ) -> int | None:
@@ -139,37 +195,54 @@ def notify_staff_group(
 
 def notify_repair_card(
     text: str, reply_markup: dict | None = None, photo: tuple[bytes, str] | None = None
-) -> list[tuple[str, int, str]]:
+) -> list[tuple[str, int, str, bool]]:
     """Post a new-repair card everywhere staff expect to see one: the
     'Ремонт техники' topic in the main staff group, and the separate
-    masters group. Returns a (chat_id, message_id, kind) tuple for every
-    destination that actually sent, so the caller can persist them (see
-    core.repairs.save_order_messages) for later edits via sync_repair_cards.
+    masters group. Returns a (chat_id, message_id, kind, has_photo) tuple
+    for every destination that actually sent, so the caller can persist
+    them (see core.repairs.save_order_messages) for later edits via
+    sync_repair_cards.
 
     If photo (raw bytes, filename) is given — a device photo attached at
-    intake, see webapp.routers.repairs.create_view — it goes out first,
-    so the card never reaches staff incomplete with the photo trickling
-    in as an afterthought once someone happens to open the repair later."""
+    intake, see webapp.routers.repairs.create_view — the card goes out as
+    ONE message: the photo with the card text as its caption and the
+    status keyboard attached, not a bare photo followed by a separate
+    text card (that used to read as two disconnected messages in the
+    group)."""
+    sent: list[tuple[str, int, str, bool]] = []
     if photo:
         photo_bytes, filename = photo
-        _send_photo(_STAFF_GROUP_CHAT_ID, photo_bytes, filename, message_thread_id=_REPAIR_TOPIC_ID)
-        _send_photo(_MASTERS_GROUP_CHAT_ID, photo_bytes, filename)
+        topic_message_id = _send_photo(
+            _STAFF_GROUP_CHAT_ID, photo_bytes, filename,
+            message_thread_id=_REPAIR_TOPIC_ID, caption=text, reply_markup=reply_markup,
+        )
+        if topic_message_id:
+            sent.append((_STAFF_GROUP_CHAT_ID, topic_message_id, "topic", True))
+        masters_message_id = _send_photo(
+            _MASTERS_GROUP_CHAT_ID, photo_bytes, filename, caption=text, reply_markup=reply_markup
+        )
+        if masters_message_id:
+            sent.append((_MASTERS_GROUP_CHAT_ID, masters_message_id, "masters_group", True))
+        return sent
 
-    sent: list[tuple[str, int, str]] = []
     topic_message_id = _send(_STAFF_GROUP_CHAT_ID, text, message_thread_id=_REPAIR_TOPIC_ID, reply_markup=reply_markup)
     if topic_message_id:
-        sent.append((_STAFF_GROUP_CHAT_ID, topic_message_id, "topic"))
+        sent.append((_STAFF_GROUP_CHAT_ID, topic_message_id, "topic", False))
     masters_message_id = _send(_MASTERS_GROUP_CHAT_ID, text, reply_markup=reply_markup)
     if masters_message_id:
-        sent.append((_MASTERS_GROUP_CHAT_ID, masters_message_id, "masters_group"))
+        sent.append((_MASTERS_GROUP_CHAT_ID, masters_message_id, "masters_group", False))
     return sent
 
 
-def sync_repair_cards(messages: list[tuple[str, int]], text: str, reply_markup: dict | None = None) -> None:
+def sync_repair_cards(messages: list[tuple[str, int, bool]], text: str, reply_markup: dict | None = None) -> None:
     """Edit every previously sent card for a repair order to the same new
     text/keyboard — called after any status change, whether it came from a
     button press or from the web app, so the two never drift apart.
-    `messages` is a list of (chat_id, message_id) pairs, e.g. from
-    core.repairs.get_order_messages()."""
-    for chat_id, message_id in messages:
-        edit_message(chat_id, message_id, text, reply_markup=reply_markup)
+    `messages` is a list of (chat_id, message_id, has_photo) triples, e.g.
+    from core.repairs.get_order_messages() — has_photo picks editMessageCaption
+    (photo+caption cards) vs editMessageText (plain text cards)."""
+    for chat_id, message_id, has_photo in messages:
+        if has_photo:
+            edit_message_caption(chat_id, message_id, text, reply_markup=reply_markup)
+        else:
+            edit_message(chat_id, message_id, text, reply_markup=reply_markup)

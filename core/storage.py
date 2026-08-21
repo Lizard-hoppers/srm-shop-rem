@@ -86,6 +86,7 @@ CREATE TABLE IF NOT EXISTS repair_order_messages (
     chat_id TEXT NOT NULL,
     message_id INTEGER NOT NULL,
     kind TEXT NOT NULL,
+    has_photo INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_repair_order_messages_order ON repair_order_messages(order_id);
@@ -241,6 +242,7 @@ def init_db(db_path: str = DB_PATH) -> None:
         _ensure_column(conn, "products", "photo_path", "photo_path TEXT")
         _ensure_column(conn, "devices", "photo_path", "photo_path TEXT")
         _ensure_column(conn, "staff", "language", "language TEXT NOT NULL DEFAULT 'ru'")
+        _ensure_column(conn, "repair_order_messages", "has_photo", "has_photo INTEGER NOT NULL DEFAULT 0")
         device_catalog.seed(conn)
         conn.commit()
     finally:

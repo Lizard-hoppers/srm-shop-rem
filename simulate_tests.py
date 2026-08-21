@@ -553,22 +553,68 @@ def scenario_repair_card_notify(db_path: str) -> None:
         # since edit_message()/sync_repair_cards() short-circuit without them.
         httpx.post = _fake_post_edit
         ok = notify.edit_message(sent[0][0], sent[0][1], "обновлённый текст", reply_markup=kb_in_progress)
-        notify.sync_repair_cards([(c, m) for c, m, _k in sent], "синхронизировано")
+        notify.sync_repair_cards([(c, m, hp) for c, m, _k, hp in sent], "синхронизировано")
     finally:
         httpx.post = orig_post
         notify._BOT_TOKEN, notify._STAFF_GROUP_CHAT_ID, notify._REPAIR_TOPIC_ID, notify._MASTERS_GROUP_CHAT_ID = orig_env
 
     check(
         "notify_repair_card fans out to both the repair topic and the masters group",
-        len(sent) == 2 and {c for c, m, k in sent} == {"-100main", "-100masters"}
+        len(sent) == 2 and {c for c, m, k, hp in sent} == {"-100main", "-100masters"}
         and all(c["reply_markup"] == kb_new for c in calls),
     )
     check("the topic destination carries message_thread_id", calls[0]["message_thread_id"] == "5")
+    check("a text-only card (no photo) is tracked with has_photo=False",
+          all(hp is False for c, m, k, hp in sent))
     check("edit_message reports success against the (faked) Telegram API", ok)
     check("sync_repair_cards edits every stored message for the order",
           sum(1 for c in edit_calls if c["url"].endswith("editMessageText")) == 1 + len(sent))
     check("sync_repair_cards clears the keyboard when reply_markup is omitted",
           any(c.get("reply_markup") == {"inline_keyboard": []} for c in edit_calls))
+
+    # A repair with a device photo must go out as ONE message — the photo
+    # itself carrying the card text as its caption and the status keyboard
+    # — not a bare photo followed by a separate text card.
+    photo_calls = []
+
+    def _fake_post_photo(url, data, files, timeout):
+        photo_calls.append({"url": url, "data": data, "files": files})
+        return _FakeTelegramResponse()
+
+    caption_edit_calls = []
+
+    def _fake_post_caption_edit(url, json, timeout):
+        caption_edit_calls.append({"url": url, **json})
+        return _FakeTelegramResponse()
+
+    notify._BOT_TOKEN = "test-token"
+    notify._STAFF_GROUP_CHAT_ID, notify._REPAIR_TOPIC_ID, notify._MASTERS_GROUP_CHAT_ID = "-100main", "5", "-100masters"
+    try:
+        httpx.post = _fake_post_photo
+        sent_photo = notify.notify_repair_card(
+            "карточка с фото", reply_markup=kb_new, photo=(b"fake-jpeg-bytes", "device.jpg")
+        )
+
+        httpx.post = _fake_post_caption_edit
+        notify.sync_repair_cards([(c, m, hp) for c, m, _k, hp in sent_photo], "готово", None)
+    finally:
+        httpx.post = orig_post
+        notify._BOT_TOKEN, notify._STAFF_GROUP_CHAT_ID, notify._REPAIR_TOPIC_ID, notify._MASTERS_GROUP_CHAT_ID = orig_env
+
+    check("a repair with a photo sends exactly one message per destination (no separate bare photo)",
+          len(photo_calls) == 2)
+    check("both photo+caption cards are tracked with has_photo=True",
+          len(sent_photo) == 2 and all(hp is True for c, m, k, hp in sent_photo))
+    check("the photo call carries the card text as its caption, not a follow-up message",
+          photo_calls[0]["data"]["caption"] == "карточка с фото")
+    check("the photo call carries the status keyboard as a JSON-encoded field (multipart has no nested objects)",
+          json.loads(photo_calls[0]["data"]["reply_markup"]) == kb_new)
+    check("the topic photo carries message_thread_id", photo_calls[0]["data"]["message_thread_id"] == "5")
+    check("a status change on a photo card edits via editMessageCaption, not editMessageText",
+          len(caption_edit_calls) == 2 and all(c["url"].endswith("editMessageCaption") for c in caption_edit_calls))
+
+    check("an overlong caption is truncated to Telegram's 1024-char cap",
+          len(notify._as_caption("x" * 2000)) == 1024)
 
 
 def scenario_repair_actions(db_path: str) -> None:
@@ -621,7 +667,7 @@ def scenario_repair_attachments(db_path: str) -> None:
               repairs.find_order_by_message(conn, "-100masters", 999) is None)
 
         repairs.save_order_messages(conn, order_id, [
-            ("-100topic", 42, "topic"), ("-100masters", 43, "masters_group"),
+            ("-100topic", 42, "topic", True), ("-100masters", 43, "masters_group", True),
         ])
         check("find_order_by_message resolves the topic card back to the repair",
               repairs.find_order_by_message(conn, "-100topic", 42) == order_id)

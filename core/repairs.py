@@ -207,23 +207,25 @@ def release_claim(conn: sqlite3.Connection, order_id: int, staff_id: int, overri
     return True
 
 
-def save_order_messages(conn: sqlite3.Connection, order_id: int, messages: list[tuple[str, int, str]]) -> None:
-    """Persist (chat_id, message_id, kind) for a repair's posted Telegram
-    cards, so a later status change can edit them in place instead of
-    spamming a new message per update."""
+def save_order_messages(conn: sqlite3.Connection, order_id: int, messages: list[tuple[str, int, str, bool]]) -> None:
+    """Persist (chat_id, message_id, kind, has_photo) for a repair's posted
+    Telegram cards, so a later status change can edit them in place instead
+    of spamming a new message per update. has_photo picks editMessageCaption
+    vs editMessageText in core.notify.sync_repair_cards()."""
     conn.executemany(
-        "INSERT INTO repair_order_messages (order_id, chat_id, message_id, kind) VALUES (?, ?, ?, ?)",
-        [(order_id, chat_id, message_id, kind) for chat_id, message_id, kind in messages],
+        "INSERT INTO repair_order_messages (order_id, chat_id, message_id, kind, has_photo) VALUES (?, ?, ?, ?, ?)",
+        [(order_id, chat_id, message_id, kind, has_photo) for chat_id, message_id, kind, has_photo in messages],
     )
 
 
-def get_order_messages(conn: sqlite3.Connection, order_id: int) -> list[tuple[str, int]]:
-    """(chat_id, message_id) pairs for every card posted for this repair —
-    what core.notify.sync_repair_cards() needs to edit them all."""
+def get_order_messages(conn: sqlite3.Connection, order_id: int) -> list[tuple[str, int, bool]]:
+    """(chat_id, message_id, has_photo) triples for every card posted for
+    this repair — what core.notify.sync_repair_cards() needs to edit them
+    all in place."""
     rows = conn.execute(
-        "SELECT chat_id, message_id FROM repair_order_messages WHERE order_id = ?", (order_id,)
+        "SELECT chat_id, message_id, has_photo FROM repair_order_messages WHERE order_id = ?", (order_id,)
     ).fetchall()
-    return [(row["chat_id"], row["message_id"]) for row in rows]
+    return [(row["chat_id"], row["message_id"], bool(row["has_photo"])) for row in rows]
 
 
 def find_order_by_message(conn: sqlite3.Connection, chat_id: str, message_id: int) -> int | None:
