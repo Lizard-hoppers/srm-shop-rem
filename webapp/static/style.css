@@ -213,6 +213,17 @@ form.edit-form label.checkbox-label input[type="checkbox"] {
   vertical-align: middle;
   margin-right: 10px;
 }
+/* .sale-layout/.cash-layout only get their side-by-side grid at
+   min-width:900px (below) — at every width, including mobile Telegram
+   where this is actually used, the plain wrapper <div> inside each
+   column had NO gap of its own (only form.edit-form's own gap:12px
+   applies, and only to ITS direct children — .sale-layout is one such
+   child, but everything nested a level deeper inside it got zero
+   spacing). "+ Добавить позицию" sat flush against the row above it and
+   the Канал/Оплата fields below with no breathing room — found 23.08,
+   Павел: "залазит на форму". */
+.sale-layout > div, .cash-layout > div { display: flex; flex-direction: column; gap: 12px; }
+
 .movement-forms { display: flex; flex-direction: column; gap: 14px; }
 .movement-forms form,
 .panel-box { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; box-shadow: var(--shadow); }
