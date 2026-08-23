@@ -2122,6 +2122,11 @@ def scenario_multi_store_login_and_switch_http() -> None:
         with get_conn(store_a_db) as conn:
             auth.create_staff(conn, "loginowner", "pass", "Мультивладелец", "owner")
             auth.link_staff_telegram(conn, "loginowner", telegram_id)
+            # Кабинет-edited name, deliberately different from stores.json's
+            # static "Магазин Логин A" label — regression guard for 23.08:
+            # the switcher used to show the stale stores.json name because
+            # it never looked at store_settings at all.
+            store_settings.update_settings(conn, "Кастомное Имя A", None, None, None)
         with get_conn(store_b_db) as conn:
             auth.create_staff(conn, "loginowner", "pass", "Мультивладелец", "owner")
             auth.link_staff_telegram(conn, "loginowner", telegram_id)
@@ -2145,6 +2150,12 @@ def scenario_multi_store_login_and_switch_http() -> None:
                       first_login.status_code == 303 and read_token(token_after_first_login)["store_id"] == "A")
                 dash = client.get(f"/?t={token_after_first_login}")
                 check("that token actually authenticates", dash.status_code == 200)
+
+                switch_page = client.get(f"/store/switch?t={token_after_first_login}")
+                check("the switcher shows the Кабинет-edited name (store_settings), not stores.json's static label",
+                      "Кастомное Имя A" in switch_page.text and "Магазин Логин A" not in switch_page.text)
+                check("a store that was never renamed still shows its seeded default name",
+                      "Магазин Логин B" not in switch_page.text)
 
                 switch = client.post("/store/switch?t=" + token_after_first_login, data={"store_id": "B"}, follow_redirects=False)
                 check("switching to store B redirects (303)", switch.status_code == 303)

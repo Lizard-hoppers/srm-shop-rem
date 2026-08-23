@@ -48,11 +48,28 @@ def store_settings_save(
     return render(request, "store_settings.html", staff=staff, settings=settings, success="Изменения сохранены.")
 
 
+def _with_display_names(accessible):
+    """(store, staff_row, display_name) — accessible_stores() only carries
+    StoreConfig.name, stores.json's static ops-only label ("Магазин 1"),
+    never edited from the app. The switcher needs the REAL name a
+    владелец sets via Кабинет магазина (store_settings, per-store DB) —
+    found 23.08, Павел changed his store's name there and the switcher
+    kept showing the old stores.json label, since it never looked at
+    store_settings at all. One extra tiny query per store — accessible
+    is at most a handful of stores (owner/admin only), negligible."""
+    result = []
+    for store, staff_row in accessible:
+        with get_conn(store.db_path) as conn:
+            name = core_store_settings.get_settings(conn)["name"]
+        result.append((store, staff_row, name))
+    return result
+
+
 @router.get("/switch")
 def store_switch_view(request: Request, staff=Depends(require_staff)):
     accessible = accessible_stores(staff["telegram_id"]) if staff["telegram_id"] else []
     return render(
-        request, "store_switch.html", staff=staff, accessible=accessible,
+        request, "store_switch.html", staff=staff, accessible=_with_display_names(accessible),
         current_store_id=request.state.store.id,
     )
 
@@ -63,7 +80,7 @@ def store_switch_do(request: Request, store_id: str = Form(...), staff=Depends(r
     match = next(((s, st) for s, st in accessible if s.id == store_id), None)
     if not match:
         return render(
-            request, "store_switch.html", staff=staff, accessible=accessible,
+            request, "store_switch.html", staff=staff, accessible=_with_display_names(accessible),
             current_store_id=request.state.store.id,
             error="У вас нет доступа к этому магазину.",
         )
