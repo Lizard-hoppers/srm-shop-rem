@@ -191,7 +191,10 @@ async def create_view(request: Request, staff=Depends(require_role(*_REPAIR_WRIT
             repair = core_repairs.get_repair(conn, order_id)
             keyboard = core_repairs.render_keyboard(order_id, repair["status"])
             sent = core_notify.notify_repair_card(
-                core_repairs.render_card_text(repair), reply_markup=keyboard, photo=photo_for_notify
+                core_repairs.render_card_text(repair), reply_markup=keyboard, photo=photo_for_notify,
+                staff_group_chat_id=request.state.store.staff_group_chat_id,
+                repair_topic_id=request.state.store.repair_topic_id,
+                masters_group_chat_id=request.state.store.masters_group_chat_id,
             )
             if sent:
                 core_repairs.save_order_messages(conn, order_id, sent)

@@ -186,15 +186,33 @@ def edit_message_caption(
 
 
 def notify_staff_group(
-    text: str, message_thread_id: str | int | None = None, reply_markup: dict | None = None
+    text: str,
+    message_thread_id: str | int | None = None,
+    reply_markup: dict | None = None,
+    *,
+    staff_group_chat_id: str | int | None = None,
 ) -> int | None:
-    """Post to the main staff forum group. `message_thread_id` targets a
-    specific topic; omit for the group's General feed."""
-    return _send(_STAFF_GROUP_CHAT_ID, text, message_thread_id=message_thread_id, reply_markup=reply_markup)
+    """Post to a staff forum group. `message_thread_id` targets a specific
+    topic; omit for the group's General feed. `staff_group_chat_id` lets a
+    caller target a specific store's group (Фаза C, 23.08) — omitted (None),
+    falls back to the legacy env-configured group. Resolved inside the
+    function body, not as a literal default value: a default arg is bound
+    once at def time, which would freeze whatever _STAFF_GROUP_CHAT_ID
+    happened to be at import — this way a monkeypatched module constant
+    (see simulate_tests.py's notify tests) is still picked up per call."""
+    if staff_group_chat_id is None:
+        staff_group_chat_id = _STAFF_GROUP_CHAT_ID
+    return _send(staff_group_chat_id, text, message_thread_id=message_thread_id, reply_markup=reply_markup)
 
 
 def notify_repair_card(
-    text: str, reply_markup: dict | None = None, photo: tuple[bytes, str] | None = None
+    text: str,
+    reply_markup: dict | None = None,
+    photo: tuple[bytes, str] | None = None,
+    *,
+    staff_group_chat_id: str | int | None = None,
+    repair_topic_id: str | int | None = None,
+    masters_group_chat_id: str | int | None = None,
 ) -> list[tuple[str, int, str, bool]]:
     """Post a new-repair card everywhere staff expect to see one: the
     'Ремонт техники' topic in the main staff group, and the separate
@@ -203,34 +221,51 @@ def notify_repair_card(
     them (see core.repairs.save_order_messages) for later edits via
     sync_repair_cards.
 
+    Фаза C (23.08): which groups is now an explicit argument, not a fixed
+    env-configured pair — a multi-store deployment has a different group
+    per store (core/stores.py::StoreConfig), and the caller (webapp.routers
+    .repairs.create_view) already knows which store the request belongs
+    to. Omitted (None) keyword args fall back to the legacy env constants,
+    resolved inside the function body rather than as literal default
+    values (see notify_staff_group's docstring for why) — a single-store
+    deployment, or any caller that doesn't pass them, behaves exactly as
+    before.
+
     If photo (raw bytes, filename) is given — a device photo attached at
     intake, see webapp.routers.repairs.create_view — the card goes out as
     ONE message: the photo with the card text as its caption and the
     status keyboard attached, not a bare photo followed by a separate
     text card (that used to read as two disconnected messages in the
     group)."""
+    if staff_group_chat_id is None:
+        staff_group_chat_id = _STAFF_GROUP_CHAT_ID
+    if repair_topic_id is None:
+        repair_topic_id = _REPAIR_TOPIC_ID
+    if masters_group_chat_id is None:
+        masters_group_chat_id = _MASTERS_GROUP_CHAT_ID
+
     sent: list[tuple[str, int, str, bool]] = []
     if photo:
         photo_bytes, filename = photo
         topic_message_id = _send_photo(
-            _STAFF_GROUP_CHAT_ID, photo_bytes, filename,
-            message_thread_id=_REPAIR_TOPIC_ID, caption=text, reply_markup=reply_markup,
+            staff_group_chat_id, photo_bytes, filename,
+            message_thread_id=repair_topic_id, caption=text, reply_markup=reply_markup,
         )
         if topic_message_id:
-            sent.append((_STAFF_GROUP_CHAT_ID, topic_message_id, "topic", True))
+            sent.append((staff_group_chat_id, topic_message_id, "topic", True))
         masters_message_id = _send_photo(
-            _MASTERS_GROUP_CHAT_ID, photo_bytes, filename, caption=text, reply_markup=reply_markup
+            masters_group_chat_id, photo_bytes, filename, caption=text, reply_markup=reply_markup
         )
         if masters_message_id:
-            sent.append((_MASTERS_GROUP_CHAT_ID, masters_message_id, "masters_group", True))
+            sent.append((masters_group_chat_id, masters_message_id, "masters_group", True))
         return sent
 
-    topic_message_id = _send(_STAFF_GROUP_CHAT_ID, text, message_thread_id=_REPAIR_TOPIC_ID, reply_markup=reply_markup)
+    topic_message_id = _send(staff_group_chat_id, text, message_thread_id=repair_topic_id, reply_markup=reply_markup)
     if topic_message_id:
-        sent.append((_STAFF_GROUP_CHAT_ID, topic_message_id, "topic", False))
-    masters_message_id = _send(_MASTERS_GROUP_CHAT_ID, text, reply_markup=reply_markup)
+        sent.append((staff_group_chat_id, topic_message_id, "topic", False))
+    masters_message_id = _send(masters_group_chat_id, text, reply_markup=reply_markup)
     if masters_message_id:
-        sent.append((_MASTERS_GROUP_CHAT_ID, masters_message_id, "masters_group", False))
+        sent.append((masters_group_chat_id, masters_message_id, "masters_group", False))
     return sent
 
 

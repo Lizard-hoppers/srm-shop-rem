@@ -11,7 +11,15 @@ even though it now calls core_repairs.cancel_repair() (21.08, was
 release_claim() — see that function's docstring for why the behavior
 changed) — repairs already "in_progress" when this shipped have that
 prefix baked into their already-posted Telegram message, and renaming it
-would silently break their button."""
+would silently break their button.
+
+Фаза C (23.08): one bot process handles every store's groups, and each
+store has its own SQLite file — a button press carries only an order_id in
+its callback_data, which is meaningless across stores (each has its own
+independent auto-increment sequence). The message's own chat — the group
+the button was pressed in — unambiguously names its store
+(core.stores.store_for_chat_id), so every handler resolves that first and
+opens that store's DB explicitly, never the process-wide default."""
 from __future__ import annotations
 
 from aiogram import F, Router
@@ -21,6 +29,7 @@ from core import auth as core_auth
 from core import notify as core_notify
 from core import repairs as core_repairs
 from core.storage import get_conn
+from core.stores import store_for_chat_id
 
 router = Router()
 
@@ -31,11 +40,24 @@ def _parse_order_id(callback_data: str) -> int:
     return int(callback_data.split(":", 1)[1])
 
 
-async def _resolve_actor(callback: CallbackQuery):
+async def _resolve_store(callback: CallbackQuery):
+    """The store this button's group belongs to, or None (having already
+    answered the callback with an alert) if the group isn't configured for
+    any store — shouldn't happen in practice (buttons only exist on cards
+    the bot itself posted into a known store's group), but store config
+    can change after cards are already out, so this stays defensive."""
+    store = store_for_chat_id(callback.message.chat.id)
+    if not store:
+        await callback.answer("Эта группа не привязана ни к одному магазину.", show_alert=True)
+        return None
+    return store
+
+
+async def _resolve_actor(callback: CallbackQuery, db_path: str):
     """Staff row for whoever pressed the button, or None (having already
     answered the callback with an alert) if they're not CRM staff with the
     right role to act on repairs."""
-    with get_conn() as conn:
+    with get_conn(db_path) as conn:
         staff = core_auth.get_staff_by_telegram_id(conn, callback.from_user.id)
     if not staff or staff["role"] not in _ACTOR_ROLES:
         await callback.answer("Вы не подключены как мастер в CRM.", show_alert=True)
@@ -43,11 +65,11 @@ async def _resolve_actor(callback: CallbackQuery):
     return staff
 
 
-async def _sync_after_change(order_id: int) -> None:
+async def _sync_after_change(order_id: int, db_path: str) -> None:
     """Re-render every posted card for this order to match its current DB
     state — the same helper the web app calls after a manual status
     change, so both channels always agree."""
-    with get_conn() as conn:
+    with get_conn(db_path) as conn:
         repair = core_repairs.get_repair(conn, order_id)
         messages = core_repairs.get_order_messages(conn, order_id)
     core_notify.sync_repair_cards(
@@ -57,12 +79,15 @@ async def _sync_after_change(order_id: int) -> None:
 
 @router.callback_query(F.data.startswith("repair_take:"))
 async def repair_take(callback: CallbackQuery) -> None:
+    store = await _resolve_store(callback)
+    if not store:
+        return
     order_id = _parse_order_id(callback.data)
-    staff = await _resolve_actor(callback)
+    staff = await _resolve_actor(callback, store.db_path)
     if not staff:
         return
 
-    with get_conn() as conn:
+    with get_conn(store.db_path) as conn:
         ok = core_repairs.claim_repair(conn, order_id, staff["id"])
         repair = None if ok else core_repairs.get_repair(conn, order_id)
 
@@ -73,19 +98,22 @@ async def repair_take(callback: CallbackQuery) -> None:
             await callback.answer(f"Уже взял: {repair['master_name'] or 'другой мастер'}", show_alert=True)
         return
 
-    await _sync_after_change(order_id)
+    await _sync_after_change(order_id, store.db_path)
     await callback.answer("Взяли в работу ✅")
 
 
 @router.callback_query(F.data.startswith("repair_done:"))
 async def repair_done(callback: CallbackQuery) -> None:
+    store = await _resolve_store(callback)
+    if not store:
+        return
     order_id = _parse_order_id(callback.data)
-    staff = await _resolve_actor(callback)
+    staff = await _resolve_actor(callback, store.db_path)
     if not staff:
         return
 
     override = staff["role"] in ("owner", "admin")
-    with get_conn() as conn:
+    with get_conn(store.db_path) as conn:
         ok = core_repairs.complete_repair(conn, order_id, staff["id"], override=override)
         repair = None if ok else core_repairs.get_repair(conn, order_id)
 
@@ -98,19 +126,22 @@ async def repair_done(callback: CallbackQuery) -> None:
             await callback.answer(f"Ремонт не за вами (мастер: {repair['master_name'] or '—'}).", show_alert=True)
         return
 
-    await _sync_after_change(order_id)
+    await _sync_after_change(order_id, store.db_path)
     await callback.answer("Готов к выдаче ✅")
 
 
 @router.callback_query(F.data.startswith("repair_release:"))
 async def repair_cancel(callback: CallbackQuery) -> None:
+    store = await _resolve_store(callback)
+    if not store:
+        return
     order_id = _parse_order_id(callback.data)
-    staff = await _resolve_actor(callback)
+    staff = await _resolve_actor(callback, store.db_path)
     if not staff:
         return
 
     override = staff["role"] in ("owner", "admin")
-    with get_conn() as conn:
+    with get_conn(store.db_path) as conn:
         ok = core_repairs.cancel_repair(conn, order_id, staff["id"], override=override)
         repair = None if ok else core_repairs.get_repair(conn, order_id)
 
@@ -121,5 +152,5 @@ async def repair_cancel(callback: CallbackQuery) -> None:
             await callback.answer(f"Ремонт не за вами (мастер: {repair['master_name'] or '—'}).", show_alert=True)
         return
 
-    await _sync_after_change(order_id)
+    await _sync_after_change(order_id, store.db_path)
     await callback.answer("Отмечено как не отремонтированное")

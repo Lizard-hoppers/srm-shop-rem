@@ -22,17 +22,37 @@ from core import auth as core_auth
 from core import inventory as core_inventory
 from core import purchase_import as core_purchase_import
 from core import purchases as core_purchases
+from core import store_access
 from core import vision_ocr
 from core.storage import get_conn
+from core.stores import get_store
 
 router = Router()
 
 _DRAFT_ROLES = ("owner", "admin", "storekeeper")
 
 
-def _draft_keyboard(draft_id: int) -> InlineKeyboardMarkup:
+def _resolve_store_for_dm(telegram_id: int):
+    """Which store a staff member's DM should write to (Фаза C, 23.08) —
+    there's no group chat_id to resolve by here, so this falls back to
+    whichever store they're currently "in" (core.store_access, the same
+    mechanism the web switcher uses) — keeps the bot and the Mini App
+    agreeing on "your current store". None if telegram_id isn't CRM staff
+    anywhere."""
+    accessible = store_access.accessible_stores(telegram_id)
+    if not accessible:
+        return None
+    return store_access.pick_default_store(telegram_id, accessible)
+
+
+def _draft_keyboard(store_id: str, draft_id: int) -> InlineKeyboardMarkup:
+    # store_id travels in callback_data rather than being re-resolved when
+    # "✅ Оприходовать как есть" is pressed — draft_id alone isn't globally
+    # unique (each store's purchase_drafts has its own sequence), and
+    # re-resolving "current store" at press time could disagree with where
+    # the draft actually lives if the sender switched stores in between.
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Оприходовать как есть", callback_data=f"draft_apply:{draft_id}")],
+        [InlineKeyboardButton(text="✅ Оприходовать как есть", callback_data=f"draft_apply:{store_id}:{draft_id}")],
         [InlineKeyboardButton(
             text="✏️ Открыть и поправить",
             web_app=WebAppInfo(url=f"{MINIAPP_URL.rstrip('/')}/purchases/draft/{draft_id}"),
@@ -61,7 +81,11 @@ async def photo_invoice(message: Message) -> None:
     without this filter it was treating every photo posted anywhere in
     those groups (a client's contact card, a repair part for a client's
     history, casual chat photos) as an invoice to OCR."""
-    with get_conn() as conn:
+    store = _resolve_store_for_dm(message.from_user.id)
+    if not store:
+        return  # not CRM staff anywhere — a client's photo, ignore silently in DM
+
+    with get_conn(store.db_path) as conn:
         staff = core_auth.get_staff_by_telegram_id(conn, message.from_user.id)
     if not staff or staff["role"] not in _DRAFT_ROLES:
         return  # not staff with receiving rights — a client's photo, ignore silently in DM
@@ -84,18 +108,24 @@ async def photo_invoice(message: Message) -> None:
         await status_msg.edit_text("Не нашёл ни одной позиции на фото — попробуйте более чёткий снимок.")
         return
 
-    with get_conn() as conn:
+    with get_conn(store.db_path) as conn:
         matched_items = core_purchase_import.match_items(conn, raw_items)
         draft_id = core_purchases.create_draft(conn, staff["id"], matched_items)
 
-    await status_msg.edit_text(_draft_preview_text(matched_items), reply_markup=_draft_keyboard(draft_id))
+    await status_msg.edit_text(_draft_preview_text(matched_items), reply_markup=_draft_keyboard(store.id, draft_id))
 
 
 @router.callback_query(F.data.startswith("draft_apply:"))
 async def apply_draft(callback: CallbackQuery) -> None:
-    draft_id = int(callback.data.split(":", 1)[1])
+    _, store_id, draft_id_str = callback.data.split(":", 2)
+    draft_id = int(draft_id_str)
+    try:
+        store = get_store(store_id)
+    except KeyError:
+        await callback.answer("Магазин черновика больше не настроен.", show_alert=True)
+        return
 
-    with get_conn() as conn:
+    with get_conn(store.db_path) as conn:
         staff = core_auth.get_staff_by_telegram_id(conn, callback.from_user.id)
         if not staff or staff["role"] not in _DRAFT_ROLES:
             await callback.answer("Вы не подключены как сотрудник склада в CRM.", show_alert=True)

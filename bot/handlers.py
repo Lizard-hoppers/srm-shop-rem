@@ -18,7 +18,9 @@ from bot.config import MINIAPP_URL
 from core import auth as core_auth
 from core import clients as core_clients
 from core import qr as core_qr
+from core import store_access
 from core.storage import get_conn
+from core.stores import store_for_chat_id
 
 router = Router()
 
@@ -40,11 +42,20 @@ CLIENT_REGISTERED = "Готово! Вот ваша карта скидок — �
 
 @router.message(CommandStart(), F.chat.type == "private")
 async def start(message: Message) -> None:
-    with get_conn() as conn:
-        staff = core_auth.get_staff_by_telegram_id(conn, message.from_user.id)
-        client = None if staff else core_clients.get_by_telegram_id(conn, message.from_user.id)
+    # Фаза C (23.08): "is this telegram_id CRM staff at all" has to check
+    # every store, not just the default one — a master added only to
+    # Магазин 2/3 used to be wrongly treated as a walk-in client here
+    # (get_conn() with no path only ever saw the default store's DB) and
+    # asked to share their phone number. Self-registration itself (the
+    # client branch below) stays on the default store, unchanged —
+    # согласовано с Павлом 23.08, see OPERATIONS.md "Мультимагазинность".
+    is_staff = bool(store_access.accessible_stores(message.from_user.id))
+    client = None
+    if not is_staff:
+        with get_conn() as conn:
+            client = core_clients.get_by_telegram_id(conn, message.from_user.id)
 
-    if staff:
+    if is_staff:
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[[InlineKeyboardButton(text="Открыть CRM", web_app=WebAppInfo(url=MINIAPP_URL))]]
         )
@@ -65,11 +76,17 @@ async def start(message: Message) -> None:
 
 @router.message(Command("chatid"))
 async def chat_id_cmd(message: Message) -> None:
-    """Onboarding helper: add the bot to the staff group as admin, send this
-    there, and put the returned id into CRM_STAFF_GROUP_CHAT_ID in .env —
-    that's the chat new-repair cards get posted to. Commands reach the bot
-    in groups regardless of privacy mode, so no extra bot setup is needed."""
-    await message.answer(f"Chat ID: <code>{message.chat.id}</code>")
+    """Onboarding helper: add the bot to a store's group as admin, send this
+    there, and put the returned id into that store's staff_group_chat_id/
+    masters_group_chat_id in stores.json (Фаза C, 23.08 — was CRM_STAFF_GROUP_CHAT_ID
+    in .env before per-store config existed) — that's the chat new-repair
+    cards get posted to. Commands reach the bot in groups regardless of
+    privacy mode, so no extra bot setup is needed. Also reports which
+    store (if any) this chat is already wired to — handy for checking a
+    new store's group is configured correctly."""
+    store = store_for_chat_id(message.chat.id)
+    suffix = f"\nМагазин: {store.name}" if store else "\n⚠️ Не привязан ни к одному магазину."
+    await message.answer(f"Chat ID: <code>{message.chat.id}</code>{suffix}")
 
 
 @router.message(F.contact)
@@ -89,10 +106,11 @@ async def got_contact(message: Message) -> None:
         return
     is_own_contact = message.contact.user_id == message.from_user.id
 
-    with get_conn() as conn:
-        staff = core_auth.get_staff_by_telegram_id(conn, message.from_user.id)
+    # Same Фаза C fix as start(): "is this telegram_id staff at all" has
+    # to check every store, not just the default one.
+    is_staff = bool(store_access.accessible_stores(message.from_user.id))
 
-    if staff and not is_own_contact:
+    if is_staff and not is_own_contact:
         await offer_add_client(message)
         return
 
@@ -122,7 +140,23 @@ async def offer_add_client(message: Message) -> None:
 
 @router.callback_query(F.data == "contact_add_client")
 async def confirm_add_client(callback: CallbackQuery) -> None:
-    with get_conn() as conn:
+    # Фаза C (23.08): staff adding SOMEONE ELSE's contact as a client is a
+    # staff action, so it resolves the same way as any other — a group
+    # (the confirmation reply lands in whichever chat the contact was
+    # shared in) resolves unambiguously by chat_id; a DM has no such
+    # signal and falls back to the sender's current store (same mechanism
+    # as bot/purchase_photo.py).
+    chat = callback.message.chat if callback.message else None
+    if chat and chat.type != "private":
+        store = store_for_chat_id(chat.id)
+    else:
+        accessible = store_access.accessible_stores(callback.from_user.id)
+        store = store_access.pick_default_store(callback.from_user.id, accessible) if accessible else None
+    if not store:
+        await callback.answer("Эта группа не привязана ни к одному магазину.", show_alert=True)
+        return
+
+    with get_conn(store.db_path) as conn:
         staff = core_auth.get_staff_by_telegram_id(conn, callback.from_user.id)
     if not staff:
         await callback.answer("Недостаточно прав.", show_alert=True)
@@ -135,7 +169,7 @@ async def confirm_add_client(callback: CallbackQuery) -> None:
 
     contact = contact_message.contact
     name = f"{contact.first_name or ''} {contact.last_name or ''}".strip() or "Клиент"
-    with get_conn() as conn:
+    with get_conn(store.db_path) as conn:
         client_id = core_clients.get_or_create_by_phone(conn, name, contact.phone_number, source="offline")
 
     await callback.message.edit_text(f"✅ Добавлен клиент: {name} (№{client_id})")

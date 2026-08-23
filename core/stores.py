@@ -92,3 +92,18 @@ def get_store(store_id: str) -> StoreConfig:
 
 def default_store_id() -> str:
     return load_stores()[0].id
+
+
+def store_for_chat_id(chat_id: int | str) -> StoreConfig | None:
+    """Which store a Telegram group belongs to (Фаза C, 23.08) — a group
+    message/button press unambiguously identifies its store this way,
+    unlike a DM (see core.store_access.accessible_stores/pick_default_store
+    for that case, which resolves by the sender's identity instead)."""
+    try:
+        chat_id = int(chat_id)
+    except (TypeError, ValueError):
+        return None
+    for store in load_stores():
+        if store.staff_group_chat_id == chat_id or store.masters_group_chat_id == chat_id:
+            return store
+    return None

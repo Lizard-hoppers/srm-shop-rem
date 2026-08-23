@@ -22,6 +22,7 @@ from core import auth as core_auth
 from core import photos as core_photos
 from core import repairs as core_repairs
 from core.storage import get_conn
+from core.stores import store_for_chat_id
 
 router = Router()
 
@@ -39,7 +40,16 @@ async def photo_reply_to_repair(message: Message) -> None:
     OCR handler gets a look at a reply-photo sent there (aiogram stops at
     the first matching handler, and this filter would otherwise match
     first purely by luck of router registration order)."""
-    with get_conn() as conn:
+    # Фаза C (23.08): resolve the store by the group this reply landed in
+    # (same reasoning as bot/repair_actions.py) before touching any DB —
+    # an unrecognized group (store config changed since a card went out,
+    # or the bot's in some other group entirely) is silently ignored, same
+    # spirit as "a bare photo with no reply is silently ignored" above.
+    store = store_for_chat_id(message.chat.id)
+    if not store:
+        return
+
+    with get_conn(store.db_path) as conn:
         staff = core_auth.get_staff_by_telegram_id(conn, message.from_user.id)
         if not staff or staff["role"] not in _REPAIR_ROLES:
             return
@@ -63,7 +73,7 @@ async def photo_reply_to_repair(message: Message) -> None:
     with open(os.path.join(_ATTACH_DIR, filename), "wb") as f:
         f.write(data)
 
-    with get_conn() as conn:
+    with get_conn(store.db_path) as conn:
         core_repairs.add_attachment(conn, order_id, filename, message.caption, staff["id"])
 
     await message.reply(f"📎 Добавлено в историю ремонта №{order_id}")

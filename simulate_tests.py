@@ -846,6 +846,53 @@ def scenario_repair_card_notify(db_path: str) -> None:
     check("an overlong caption is truncated to Telegram's 1024-char cap",
           len(notify._as_caption("x" * 2000)) == 1024)
 
+    # Фаза C (23.08): explicit per-store group ids must win over whatever
+    # the module-level (legacy env) constants happen to be — this is the
+    # whole point of notify_repair_card/notify_staff_group taking them as
+    # keyword args now, since webapp.routers.repairs.create_view passes the
+    # CURRENT request's store, which may differ from the "default" store
+    # the process started with.
+    store_a_calls = []
+
+    def _fake_post_store_a(url, json, timeout):
+        store_a_calls.append({"url": url, **json})
+        return _FakeTelegramResponse()
+
+    notify._BOT_TOKEN = "test-token"
+    # Module constants deliberately point at a DIFFERENT ("wrong") group —
+    # a stale set of legacy env vars a real deployment might still have —
+    # to prove the explicit args, not these, decide where the card goes.
+    notify._STAFF_GROUP_CHAT_ID, notify._REPAIR_TOPIC_ID, notify._MASTERS_GROUP_CHAT_ID = "-999wrong", "1", "-999wrong-masters"
+    try:
+        httpx.post = _fake_post_store_a
+        sent_store_a = notify.notify_repair_card(
+            "карточка магазина A", reply_markup=kb_new,
+            staff_group_chat_id="-100storeA", repair_topic_id="7", masters_group_chat_id="-100storeA-masters",
+        )
+    finally:
+        httpx.post = orig_post
+        notify._BOT_TOKEN, notify._STAFF_GROUP_CHAT_ID, notify._REPAIR_TOPIC_ID, notify._MASTERS_GROUP_CHAT_ID = orig_env
+
+    check("explicit staff_group_chat_id/masters_group_chat_id override the (wrong) module constants",
+          {c for c, m, k, hp in sent_store_a} == {"-100storeA", "-100storeA-masters"})
+    check("explicit repair_topic_id is used, not the module constant",
+          any(c.get("message_thread_id") == "7" for c in store_a_calls))
+    check("nothing was sent to the module-constant (wrong) group",
+          all(c["chat_id"] not in ("-999wrong", "-999wrong-masters") for c in store_a_calls))
+
+    # notify_staff_group gets the same treatment, same reasoning.
+    notify._BOT_TOKEN = "test-token"
+    notify._STAFF_GROUP_CHAT_ID = "-999wrong"
+    try:
+        httpx.post = _fake_post_store_a
+        store_a_calls.clear()
+        notify.notify_staff_group("привет магазину A", staff_group_chat_id="-100storeA")
+    finally:
+        httpx.post = orig_post
+        notify._BOT_TOKEN, notify._STAFF_GROUP_CHAT_ID, notify._REPAIR_TOPIC_ID, notify._MASTERS_GROUP_CHAT_ID = orig_env
+    check("notify_staff_group's explicit staff_group_chat_id also overrides the module constant",
+          len(store_a_calls) == 1 and store_a_calls[0]["chat_id"] == "-100storeA")
+
 
 def scenario_repair_actions(db_path: str) -> None:
     print("scenario: claim / complete / cancel a repair (button actions)")
@@ -1036,6 +1083,15 @@ def scenario_stores_config() -> None:
                 check("get_store raises on an unknown id", False)
             except KeyError:
                 check("get_store raises on an unknown id", True)
+
+            # store_for_chat_id (Фаза C, 23.08) — group -> store reverse lookup.
+            check("store_for_chat_id resolves the staff group to its store", stores.store_for_chat_id(-100).id == "1")
+            check("store_for_chat_id resolves the masters group to its store too", stores.store_for_chat_id(-200).id == "1")
+            check("a topic id is not a chat_id — resolves to nothing", stores.store_for_chat_id(5) is None)
+            check("an unrecognized chat_id resolves to no store", stores.store_for_chat_id(-999) is None)
+            check("store_for_chat_id accepts a string chat_id too (Telegram hands either)",
+                  stores.store_for_chat_id("-100").id == "1")
+            check("a non-numeric chat_id resolves to no store, doesn't raise", stores.store_for_chat_id("not-a-number") is None)
     finally:
         if prev_config is None:
             os.environ.pop("CRM_STORES_CONFIG", None)
