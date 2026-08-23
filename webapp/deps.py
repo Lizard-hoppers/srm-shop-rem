@@ -5,6 +5,7 @@ from fastapi import Depends, HTTPException, Request
 from core import auth
 from core.session_token import read_token
 from core.storage import get_conn
+from core.stores import StoreConfig, default_store_id, get_store
 
 ROLE_LABELS = {
     "owner": "Владелец",
@@ -18,13 +19,26 @@ def request_token(request: Request) -> str:
     return request.query_params.get("t", "")
 
 
+def resolve_store_for_request(request: Request) -> StoreConfig:
+    """Which store's DB this request should read/write. Called by
+    webapp.main's middleware before any route runs (so get_conn() with no
+    explicit db_path resolves correctly), and safe to call again from a
+    route body — cheap (itsdangerous verify + a small JSON read)."""
+    data = read_token(request_token(request))
+    store_id = data["store_id"] if data else default_store_id()
+    try:
+        return get_store(store_id)
+    except KeyError:
+        return get_store(default_store_id())
+
+
 def current_staff(request: Request):
     token = request_token(request)
-    staff_id = read_token(token)
-    if not staff_id:
+    data = read_token(token)
+    if not data:
         return None
     with get_conn() as c:
-        return auth.get_staff_by_id(c, staff_id)
+        return auth.get_staff_by_id(c, data["staff_id"])
 
 
 def require_staff(request: Request):

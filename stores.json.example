@@ -1,0 +1,26 @@
+[
+  {
+    "id": "1",
+    "name": "Магазин 1",
+    "db_path": "crm.sqlite3",
+    "staff_group_chat_id": -1004478202416,
+    "repair_topic_id": 5,
+    "masters_group_chat_id": -1003820178638
+  },
+  {
+    "id": "2",
+    "name": "Магазин 2",
+    "db_path": "store2.sqlite3",
+    "staff_group_chat_id": null,
+    "repair_topic_id": null,
+    "masters_group_chat_id": null
+  },
+  {
+    "id": "3",
+    "name": "Магазин 3",
+    "db_path": "store3.sqlite3",
+    "staff_group_chat_id": null,
+    "repair_topic_id": null,
+    "masters_group_chat_id": null
+  }
+]

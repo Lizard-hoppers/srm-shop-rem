@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import os
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from starlette.staticfiles import StaticFiles
 
+from core import storage
 from core.storage import init_db
+from core.stores import load_stores
+from webapp.deps import resolve_store_for_request
 from webapp.routers import cash, clients, dashboard, hubs, inventory, masters, miniapp, print_agent, purchases, reports, repairs, sales, settings
 
 if not os.environ.get("CRM_SECRET_KEY"):
@@ -29,6 +32,22 @@ app.include_router(cash.router)
 app.include_router(masters.router)
 
 
+@app.middleware("http")
+async def store_context_middleware(request: Request, call_next):
+    """Resolves which store this request belongs to (from its ?t= token,
+    default store if none/unrecognized) and points core.storage.get_conn()
+    at that store's DB file for the duration of the request. See
+    core/stores.py and webapp/deps.py::resolve_store_for_request."""
+    store = resolve_store_for_request(request)
+    request.state.store = store
+    token = storage.set_current_db_path(store.db_path)
+    try:
+        return await call_next(request)
+    finally:
+        storage.reset_current_db_path(token)
+
+
 @app.on_event("startup")
 def on_startup():
-    init_db()
+    for store in load_stores():
+        init_db(store.db_path)

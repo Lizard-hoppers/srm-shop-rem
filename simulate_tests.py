@@ -37,7 +37,9 @@ import httpx
 import jinja2
 from PIL import Image
 
-from core import auth, barcode_label, cash, clients, device_catalog, inventory, masters, purchases, qr, repairs, sales, timefmt
+from core import auth, barcode_label, cash, clients, device_catalog, inventory, masters, purchases, qr, repairs, sales, stores, timefmt
+from core import session_token as _session_token
+from core import storage
 from core.session_token import make_token, read_token
 from core.storage import get_conn, init_db
 from core.telegram_auth import validate_init_data
@@ -947,8 +949,10 @@ def scenario_telegram_auth() -> None:
 
 def scenario_session_token() -> None:
     print("scenario: url-carried session token")
-    token = make_token(42)
-    check("token round-trips to the same staff_id", read_token(token) == 42)
+    token = make_token(42, "7")
+    data = read_token(token)
+    check("token round-trips to the same staff_id", data is not None and data["staff_id"] == 42)
+    check("token carries the store_id it was made with", data is not None and data["store_id"] == "7")
     check("garbage token rejected", read_token("not-a-real-token") is None)
     check("empty token rejected", read_token("") is None)
     # Flip a character in the middle of the signature, not the last one: the
@@ -958,6 +962,101 @@ def scenario_session_token() -> None:
     flipped = "a" if token[mid] != "a" else "b"
     tampered = token[:mid] + flipped + token[mid + 1:]
     check("tampered token rejected", read_token(tampered) is None)
+
+    # Фаза A backward compat: a token minted before store_id existed (no key
+    # in the payload at all) must still read back, with a default store_id
+    # filled in — nobody already logged in should get kicked out by the upgrade.
+    legacy_token = _session_token._serializer.dumps({"staff_id": 99})
+    legacy_data = read_token(legacy_token)
+    check(
+        "a pre-Фаза-A token (no store_id in payload) still authenticates, defaulted to the default store",
+        legacy_data is not None and legacy_data["staff_id"] == 99 and legacy_data["store_id"] == stores.default_store_id(),
+    )
+
+
+def scenario_stores_config() -> None:
+    print("scenario: store registry (core/stores.py)")
+    prev_config = os.environ.get("CRM_STORES_CONFIG")
+    try:
+        # No stores.json at this path -> single synthetic store from the
+        # legacy CRM_DB_PATH/CRM_*_GROUP_CHAT_ID env vars (backward compat).
+        os.environ["CRM_STORES_CONFIG"] = os.path.join(tempfile.gettempdir(), "definitely-not-a-real-stores-file.json")
+        legacy = stores.load_stores()
+        check("no stores.json -> exactly one synthetic store", len(legacy) == 1)
+        check("synthetic store's db_path is the legacy CRM_DB_PATH", legacy[0].db_path == storage.DB_PATH)
+        check("default_store_id() picks the only store", stores.default_store_id() == legacy[0].id)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = os.path.join(tmp, "stores.json")
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump(
+                    [
+                        {"id": "1", "name": "Первый", "db_path": "s1.sqlite3", "staff_group_chat_id": -100, "repair_topic_id": 5, "masters_group_chat_id": -200},
+                        {"id": "2", "name": "Второй", "db_path": os.path.join(tmp, "s2.sqlite3")},
+                    ],
+                    f,
+                )
+            os.environ["CRM_STORES_CONFIG"] = config_path
+            parsed = stores.load_stores()
+            check("stores.json with 2 entries parses to 2 stores", len(parsed) == 2)
+            check("relative db_path is resolved against the repo root", os.path.isabs(parsed[0].db_path))
+            check("absolute db_path passes through unchanged", parsed[1].db_path == os.path.join(tmp, "s2.sqlite3"))
+            check("optional group-chat fields default to None when omitted", parsed[1].staff_group_chat_id is None)
+            check("get_store finds a known id", stores.get_store("2").name == "Второй")
+            check("default_store_id() is the first entry", stores.default_store_id() == "1")
+            try:
+                stores.get_store("nope")
+                check("get_store raises on an unknown id", False)
+            except KeyError:
+                check("get_store raises on an unknown id", True)
+    finally:
+        if prev_config is None:
+            os.environ.pop("CRM_STORES_CONFIG", None)
+        else:
+            os.environ["CRM_STORES_CONFIG"] = prev_config
+
+
+def scenario_storage_context() -> None:
+    print("scenario: per-request db path via contextvar (core.storage)")
+    with tempfile.TemporaryDirectory() as tmp:
+        path_a = os.path.join(tmp, "a.sqlite3")
+        path_b = os.path.join(tmp, "b.sqlite3")
+        init_db(path_a)
+        init_db(path_b)
+
+        with get_conn(path_a) as conn:
+            settings_row = conn.execute("SELECT * FROM store_settings WHERE id = 1").fetchone()
+        check(
+            "init_db seeds the store_settings singleton row (Кабинет магазина schema, no UI yet)",
+            settings_row is not None and settings_row["name"] == "Магазин",
+        )
+
+        token = storage.set_current_db_path(path_a)
+        try:
+            with storage.get_conn() as conn:
+                auth.create_staff(conn, "a-owner", "pass", "A", "owner")
+        finally:
+            storage.reset_current_db_path(token)
+
+        token2 = storage.set_current_db_path(path_b)
+        try:
+            with storage.get_conn() as conn:
+                check(
+                    "switching the contextvar to db b sees an empty staff table (isolation from db a)",
+                    auth.get_staff_by_login(conn, "a-owner") is None,
+                )
+        finally:
+            storage.reset_current_db_path(token2)
+
+        with storage.get_conn(path_a) as conn:
+            check(
+                "the staff row written while the contextvar pointed at db a is actually there",
+                auth.get_staff_by_login(conn, "a-owner") is not None,
+            )
+        check(
+            "an explicit db_path argument always wins over whatever the contextvar holds",
+            storage._current_db_path.get() != path_a,
+        )
 
 
 def scenario_miniapp_boot_template() -> None:
@@ -1760,6 +1859,61 @@ def scenario_webapp_forms(db_path: str) -> None:
               "HTTP Тест Мастер Правка" in list_after_deactivate.text)
 
 
+def scenario_multi_store_http() -> None:
+    """Фаза A end-to-end regression guard: two different store_id tokens
+    hitting the SAME running FastAPI process must read/write two completely
+    separate SQLite files — proving webapp.main's middleware (not the fixed
+    CRM_DB_PATH the process started with) decides where a request's data
+    goes. Uses a real stores.json + two real staff DBs."""
+    print("scenario: multi-store request isolation over real HTTP requests")
+    prev_config = os.environ.get("CRM_STORES_CONFIG")
+    with tempfile.TemporaryDirectory() as tmp:
+        store_a_db = os.path.join(tmp, "storeA.sqlite3")
+        store_b_db = os.path.join(tmp, "storeB.sqlite3")
+        config_path = os.path.join(tmp, "stores.json")
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(
+                [
+                    {"id": "A", "name": "Магазин A", "db_path": store_a_db},
+                    {"id": "B", "name": "Магазин B", "db_path": store_b_db},
+                ],
+                f,
+            )
+
+        init_db(store_a_db)
+        init_db(store_b_db)
+        with get_conn(store_a_db) as conn:
+            staff_a = auth.create_staff(conn, "storeA-owner", "pass", "Владелец A", "owner")
+            auth.create_master(conn, "Уникальный Мастер Альфа", None, "fixed", 100)
+        with get_conn(store_b_db) as conn:
+            staff_b = auth.create_staff(conn, "storeB-owner", "pass", "Владелец B", "owner")
+
+        os.environ["CRM_STORES_CONFIG"] = config_path
+        try:
+            import webapp.main  # already imported by scenario_webapp_forms; re-import is a cached no-op
+
+            with TestClient(webapp.main.app) as client:
+                token_a = make_token(staff_a, "A")
+                token_b = make_token(staff_b, "B")
+
+                masters_a = client.get(f"/masters?t={token_a}")
+                check("store A's token reaches store A's own db (sees its master)",
+                      "Уникальный Мастер Альфа" in masters_a.text)
+
+                masters_b = client.get(f"/masters?t={token_b}")
+                check("store B's token never sees store A's data — real db-level isolation",
+                      "Уникальный Мастер Альфа" not in masters_b.text)
+
+                dash_b = client.get(f"/?t={token_b}")
+                check("store B's own owner can still reach their own dashboard (200, not leaked into store A)",
+                      dash_b.status_code == 200)
+        finally:
+            if prev_config is None:
+                os.environ.pop("CRM_STORES_CONFIG", None)
+            else:
+                os.environ["CRM_STORES_CONFIG"] = prev_config
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         db_path = os.path.join(tmp, "test.sqlite3")
@@ -1785,8 +1939,11 @@ def main() -> None:
     scenario_timefmt()
     scenario_telegram_auth()
     scenario_session_token()
+    scenario_stores_config()
+    scenario_storage_context()
     scenario_miniapp_boot_template()
     scenario_webapp_forms(_WEBAPP_TEST_DB)
+    scenario_multi_store_http()
     if os.path.exists(_WEBAPP_TEST_DB):
         os.remove(_WEBAPP_TEST_DB)
 

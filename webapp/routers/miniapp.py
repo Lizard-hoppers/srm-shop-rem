@@ -47,5 +47,9 @@ def miniapp_auto(request: Request, initData: str = Form(...)):
             error="Этот Telegram-аккаунт не привязан к CRM. Обратитесь к владельцу, чтобы он вас добавил.",
         )
 
-    token = make_token(staff["id"])
+    # request.state.store is set by webapp.main's middleware; with no ?t=
+    # token on this login POST it resolved to the default store (Фаза A —
+    # picking a store at login time by scanning all stores for this
+    # telegram_id is Фаза B, not implemented yet).
+    token = make_token(staff["id"], request.state.store.id)
     return RedirectResponse(f"/?t={token}", status_code=303)

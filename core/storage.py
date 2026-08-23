@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import sqlite3
 from contextlib import contextmanager
+from contextvars import ContextVar
 
 from core import device_catalog
 
@@ -265,6 +266,22 @@ CREATE TABLE IF NOT EXISTS cash_transactions (
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_cash_transactions_created ON cash_transactions(created_at);
+
+-- Store profile, editable per-store (Фаза A, 23.08 — schema only, no UI
+-- yet). One store = one SQLite file, so this is a singleton row (id=1) in
+-- each store's own DB, not a shared table — the eventual "Кабинет магазина"
+-- screen reads/writes this row for whichever store the request's contextvar
+-- currently points at. stores.json (core/stores.py) stays purely
+-- infrastructural (db_path + Telegram group ids); this table is the
+-- user-facing name/metrics a store owner edits themselves.
+CREATE TABLE IF NOT EXISTS store_settings (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    name TEXT NOT NULL DEFAULT 'Магазин',
+    address TEXT,
+    phone TEXT,
+    working_hours TEXT,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 
@@ -291,14 +308,35 @@ def init_db(db_path: str = DB_PATH) -> None:
         _ensure_column(conn, "staff", "pay_type", "pay_type TEXT")
         _ensure_column(conn, "staff", "pay_value", "pay_value INTEGER")
         device_catalog.seed(conn)
+        conn.execute("INSERT OR IGNORE INTO store_settings (id) VALUES (1)")
         conn.commit()
     finally:
         conn.close()
 
 
+# Per-request DB path (Фаза A, 23.08): a multi-store deployment has one
+# process serving every store, so the DB file to use can't be a fixed
+# module constant any more — webapp.main's middleware sets this from the
+# request's resolved store before the route runs, and resets it after.
+# Default is the legacy DB_PATH, so ~90 existing `get_conn()` call sites
+# with no explicit db_path keep working unchanged outside a request context
+# (CLI tools, tests, a bare `python -c ...`).
+_current_db_path: ContextVar[str] = ContextVar("current_db_path", default=DB_PATH)
+
+
+def set_current_db_path(path: str):
+    """Returns a token; pass it to reset_current_db_path() when done (use try/finally)."""
+    return _current_db_path.set(path)
+
+
+def reset_current_db_path(token) -> None:
+    _current_db_path.reset(token)
+
+
 @contextmanager
-def get_conn(db_path: str = DB_PATH):
-    conn = sqlite3.connect(db_path)
+def get_conn(db_path: str | None = None):
+    path = db_path or _current_db_path.get()
+    conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
