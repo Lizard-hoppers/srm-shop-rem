@@ -22,6 +22,8 @@ the button was pressed in — unambiguously names its store
 opens that store's DB explicitly, never the process-wide default."""
 from __future__ import annotations
 
+import asyncio
+
 from aiogram import F, Router
 from aiogram.types import CallbackQuery
 
@@ -65,16 +67,29 @@ async def _resolve_actor(callback: CallbackQuery, db_path: str):
     return staff
 
 
-async def _sync_after_change(order_id: int, db_path: str) -> None:
+def _sync_repair_cards_blocking(order_id: int, db_path: str) -> None:
     """Re-render every posted card for this order to match its current DB
     state — the same helper the web app calls after a manual status
-    change, so both channels always agree."""
+    change, so both channels always agree. Plain sync function (not async)
+    on purpose — see _sync_after_change below, it always runs off the
+    event loop via asyncio.to_thread, never awaited directly."""
     with get_conn(db_path) as conn:
         repair = core_repairs.get_repair(conn, order_id)
         messages = core_repairs.get_order_messages(conn, order_id)
     core_notify.sync_repair_cards(
         messages, core_repairs.render_card_text(repair), core_repairs.render_keyboard(order_id, repair["status"])
     )
+
+
+def _sync_after_change(order_id: int, db_path: str) -> None:
+    """Fire-and-forget: core.notify's httpx calls here used to run
+    synchronously on THIS coroutine, meaning the whole bot (every Telegram
+    user's messages, not just this button-presser's) froze for the round
+    trip on every single claim/complete/cancel tap. asyncio.to_thread gets
+    it off the event loop; create_task means the caller (repair_take etc.)
+    doesn't even wait for that thread — callback.answer() fires immediately,
+    the card updates a moment later."""
+    asyncio.create_task(asyncio.to_thread(_sync_repair_cards_blocking, order_id, db_path))
 
 
 @router.callback_query(F.data.startswith("repair_take:"))
@@ -98,7 +113,7 @@ async def repair_take(callback: CallbackQuery) -> None:
             await callback.answer(f"Уже взял: {repair['master_name'] or 'другой мастер'}", show_alert=True)
         return
 
-    await _sync_after_change(order_id, store.db_path)
+    _sync_after_change(order_id, store.db_path)
     await callback.answer("Взяли в работу ✅")
 
 
@@ -126,7 +141,7 @@ async def repair_done(callback: CallbackQuery) -> None:
             await callback.answer(f"Ремонт не за вами (мастер: {repair['master_name'] or '—'}).", show_alert=True)
         return
 
-    await _sync_after_change(order_id, store.db_path)
+    _sync_after_change(order_id, store.db_path)
     await callback.answer("Готов к выдаче ✅")
 
 
@@ -152,5 +167,5 @@ async def repair_cancel(callback: CallbackQuery) -> None:
             await callback.answer(f"Ремонт не за вами (мастер: {repair['master_name'] or '—'}).", show_alert=True)
         return
 
-    await _sync_after_change(order_id, store.db_path)
+    _sync_after_change(order_id, store.db_path)
     await callback.answer("Отмечено как не отремонтированное")

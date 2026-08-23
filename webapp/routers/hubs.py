@@ -3,6 +3,7 @@ several pages that don't fit as their own top-level tab."""
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, File, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, RedirectResponse
 
 from core import clients as core_clients
@@ -63,7 +64,9 @@ async def warehouse_scan_photo(photo: UploadFile = File(...), staff=Depends(requ
         return JSONResponse({"ok": False, "error": "Фото слишком большое (максимум 15 МБ)."}, status_code=413)
 
     try:
-        result = vision_ocr.extract_product_label(photo_bytes)
+        # See webapp/routers/repairs.py::scan_device_view for why this
+        # needs run_in_threadpool — same blocking-httpx-in-async-route issue.
+        result = await run_in_threadpool(vision_ocr.extract_product_label, photo_bytes)
     except vision_ocr.VisionOcrError as exc:
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
 

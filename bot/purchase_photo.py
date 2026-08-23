@@ -14,6 +14,8 @@ all-or-nothing no-op that points back to "Открыть и поправить".
 """
 from __future__ import annotations
 
+import asyncio
+
 from aiogram import F, Router
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, WebAppInfo
 
@@ -97,7 +99,13 @@ async def photo_invoice(message: Message) -> None:
     buf = await message.bot.download_file(file.file_path)
 
     try:
-        raw_items = vision_ocr.extract_invoice_items(buf.read())
+        # asyncio.to_thread: core.vision_ocr does a plain blocking httpx
+        # call to OpenAI — awaited directly on this aiogram coroutine it
+        # would freeze the WHOLE bot (every Telegram user's messages) for
+        # the entire OpenAI round trip. Still awaited here (this handler
+        # genuinely needs the result to build the draft), just off the
+        # event loop.
+        raw_items = await asyncio.to_thread(vision_ocr.extract_invoice_items, buf.read())
     except vision_ocr.VisionOcrError:
         await status_msg.edit_text(
             "Не смог распознать фото — попробуйте более чёткий снимок или введите приход вручную в приложении."

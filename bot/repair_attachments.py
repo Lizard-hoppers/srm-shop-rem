@@ -12,6 +12,7 @@ invoice) — the two must never both fire on the same photo.
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import uuid
 
@@ -64,7 +65,7 @@ async def photo_reply_to_repair(message: Message) -> None:
     buf = await message.bot.download_file(file.file_path)
 
     data = buf.read()
-    compressed = core_photos.compress_photo(data)
+    compressed = await asyncio.to_thread(core_photos.compress_photo, data)
     if compressed is not None:
         data = compressed
 

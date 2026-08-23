@@ -4,6 +4,7 @@ import os
 import uuid
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 
 from core import barcode_label
@@ -83,7 +84,9 @@ async def scan_product_label_view(photo: UploadFile = File(...), staff=Depends(r
         return JSONResponse({"ok": False, "error": "Фото слишком большое (максимум 15 МБ)."}, status_code=413)
 
     try:
-        result = vision_ocr.extract_product_label(photo_bytes)
+        # See webapp/routers/repairs.py::scan_device_view for why this
+        # needs run_in_threadpool — same blocking-httpx-in-async-route issue.
+        result = await run_in_threadpool(vision_ocr.extract_product_label, photo_bytes)
     except vision_ocr.VisionOcrError as exc:
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
 
@@ -257,7 +260,7 @@ async def product_photo_view(
     if len(data) > _MAX_PHOTO_BYTES:
         return JSONResponse({"ok": False, "error": "Фото слишком большое (максимум 15 МБ)."}, status_code=413)
 
-    compressed = core_photos.compress_photo(data)
+    compressed = await run_in_threadpool(core_photos.compress_photo, data)
     if compressed is not None:
         data, ext = compressed, ".jpg"
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, RedirectResponse
 
 from core import inventory as core_inventory
@@ -133,7 +134,9 @@ async def scan_invoice_view(
     if len(photo_bytes) > _MAX_PHOTO_BYTES:
         return JSONResponse({"rows": [], "error": "Фото слишком большое (максимум 15 МБ)."}, status_code=413)
     try:
-        raw_items = vision_ocr.extract_invoice_items(photo_bytes)
+        # See webapp/routers/repairs.py::scan_device_view for why this
+        # needs run_in_threadpool — same blocking-httpx-in-async-route issue.
+        raw_items = await run_in_threadpool(vision_ocr.extract_invoice_items, photo_bytes)
     except vision_ocr.VisionOcrError as exc:
         return JSONResponse({"rows": [], "error": str(exc)}, status_code=502)
 
