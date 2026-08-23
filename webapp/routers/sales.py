@@ -14,7 +14,7 @@ from webapp.templating import render
 
 router = APIRouter(prefix="/sales")
 
-INITIAL_ROWS = 3
+INITIAL_ROWS = 1
 
 
 def _list_context(conn) -> dict:
