@@ -10,6 +10,18 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(__file__))
 os.environ.setdefault("CRM_SECRET_KEY", "test-secret-not-for-production")
+# webapp.routers.miniapp reads CRM_BOT_TOKEN once at import time too — a
+# fallback here lets scenario_multi_store_login_and_switch_http actually
+# drive the real /miniapp/auto endpoint end-to-end (previously untested:
+# no scenario ever exercised a successful Telegram login over HTTP, only
+# core.telegram_auth.validate_init_data directly). setdefault(), not an
+# unconditional overwrite: validate_init_data never calls the network (pure
+# local HMAC check), so even if a sourced real .env leaves the genuine bot
+# token in place there's no incident-19.08-style risk of a real Telegram
+# call — the test just signs initData with whatever CRM_BOT_TOKEN actually
+# resolved to (read back from webapp.routers.miniapp.BOT_TOKEN itself,
+# never assumed) so it matches either way.
+os.environ.setdefault("CRM_BOT_TOKEN", "123456:test-bot-token-not-real")
 # webapp.main's startup hook calls core.storage.init_db() with no override,
 # so it always targets whatever CRM_DB_PATH resolved to at process start —
 # point that at a throwaway file too, before core.storage is ever imported.
@@ -26,6 +38,21 @@ os.environ.setdefault("CRM_SECRET_KEY", "test-secret-not-for-production")
 # that; this does.
 _WEBAPP_TEST_DB = os.path.join(tempfile.gettempdir(), "crm_simulate_tests_webapp.sqlite3")
 os.environ["CRM_DB_PATH"] = _WEBAPP_TEST_DB
+# Same reasoning, same unconditional-overwrite fix, for Фаза B's registry:
+# core.stores.load_stores() falls back to a synthetic single store built
+# from CRM_DB_PATH ONLY when stores.json doesn't exist at CRM_STORES_CONFIG
+# (or the default ./stores.json next to this file) — and since Фаза A this
+# repo's real deploy directory legitimately HAS a real stores.json (pointing
+# at the real crm.sqlite3/store2.sqlite3/store3.sqlite3). Running this suite
+# from inside that directory without overriding CRM_STORES_CONFIG made every
+# make_token(staff_id) call (no explicit store_id) default to the real store
+# 1 instead of the throwaway _WEBAPP_TEST_DB above — caught 23.08 while
+# testing Фаза B: scenario_webapp_forms silently authenticated against an
+# empty real-shaped db and its later assertions crashed on missing rows.
+# Point this at a path that can never exist so the legacy single-store
+# fallback always wins by default; scenarios that need a real multi-store
+# stores.json set CRM_STORES_CONFIG themselves and restore this value after.
+os.environ["CRM_STORES_CONFIG"] = os.path.join(tempfile.gettempdir(), "crm_simulate_tests_no_such_stores.json")
 
 import hashlib
 import hmac
@@ -37,7 +64,7 @@ import httpx
 import jinja2
 from PIL import Image
 
-from core import auth, barcode_label, cash, clients, device_catalog, inventory, masters, purchases, qr, repairs, sales, stores, timefmt
+from core import auth, barcode_label, cash, clients, device_catalog, inventory, masters, purchases, qr, repairs, sales, store_access, store_prefs, store_settings, stores, timefmt
 from core import session_token as _session_token
 from core import storage
 from core.session_token import make_token, read_token
@@ -1059,6 +1086,102 @@ def scenario_storage_context() -> None:
         )
 
 
+def scenario_store_prefs() -> None:
+    print("scenario: last-used-store preference (core.store_prefs)")
+    with tempfile.TemporaryDirectory() as tmp:
+        prefs_db = os.path.join(tmp, "prefs.sqlite3")
+        store_prefs.init_db(prefs_db)
+
+        check("an unknown telegram_id has no preference yet", store_prefs.get_last_store(999, prefs_db) is None)
+
+        store_prefs.set_last_store(111, "2", prefs_db)
+        check("the preference just set round-trips", store_prefs.get_last_store(111, prefs_db) == "2")
+
+        store_prefs.set_last_store(111, "3", prefs_db)
+        check("setting again overwrites, doesn't duplicate", store_prefs.get_last_store(111, prefs_db) == "3")
+        with get_conn(prefs_db) as conn:
+            count = conn.execute("SELECT COUNT(*) AS n FROM store_prefs WHERE telegram_id = 111").fetchone()["n"]
+        check("still exactly one row for this telegram_id after overwriting", count == 1)
+
+
+def scenario_store_access() -> None:
+    print("scenario: cross-store telegram_id lookup (core.store_access)")
+    prev_config = os.environ.get("CRM_STORES_CONFIG")
+    prev_prefs = os.environ.get("CRM_STORE_PREFS_PATH")
+    with tempfile.TemporaryDirectory() as tmp:
+        db1, db2, db3 = (os.path.join(tmp, f"s{i}.sqlite3") for i in (1, 2, 3))
+        for db_path in (db1, db2, db3):
+            init_db(db_path)
+        config_path = os.path.join(tmp, "stores.json")
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(
+                [
+                    {"id": "1", "name": "Один", "db_path": db1},
+                    {"id": "2", "name": "Два", "db_path": db2},
+                    {"id": "3", "name": "Три", "db_path": db3},
+                ],
+                f,
+            )
+        os.environ["CRM_STORES_CONFIG"] = config_path
+        os.environ["CRM_STORE_PREFS_PATH"] = os.path.join(tmp, "prefs.sqlite3")
+        store_prefs.init_db()
+        try:
+            with get_conn(db1) as conn:
+                owner_id_1 = auth.create_staff(conn, "owner", "pass", "Владелец", "owner")
+                auth.link_staff_telegram(conn, "owner", 777)
+            with get_conn(db3) as conn:
+                owner_id_3 = auth.create_staff(conn, "owner", "pass", "Владелец", "owner")
+                auth.link_staff_telegram(conn, "owner", 777)
+            with get_conn(db2) as conn:
+                auth.create_staff(conn, "somemaster", "pass", "Мастер Два", "master")
+                # telegram_id 777 deliberately NOT linked in store 2
+
+            found = store_access.accessible_stores(777)
+            check("accessible_stores finds exactly the 2 stores this telegram_id has an identity in",
+                  {s.id for s, _ in found} == {"1", "3"})
+            check("each match carries the right staff_id for its own store",
+                  {s.id: st["id"] for s, st in found} == {"1": owner_id_1, "3": owner_id_3})
+            check("a telegram_id with no identity anywhere finds nothing", store_access.accessible_stores(4242) == [])
+
+            single = [(s, st) for s, st in found if s.id == "1"]
+            check("pick_default_store with a single match just returns it",
+                  store_access.pick_default_store(777, single).id == "1")
+
+            check("pick_default_store with no preference recorded yet falls back to the first configured store",
+                  store_access.pick_default_store(777, found).id == "1")
+
+            store_prefs.set_last_store(777, "3")
+            check("pick_default_store honors a recorded preference among the accessible stores",
+                  store_access.pick_default_store(777, found).id == "3")
+
+            store_prefs.set_last_store(777, "2")
+            check("a stale preference pointing at a store this telegram_id no longer has access to falls back to the first",
+                  store_access.pick_default_store(777, found).id == "1")
+        finally:
+            for env_name, prev in (("CRM_STORES_CONFIG", prev_config), ("CRM_STORE_PREFS_PATH", prev_prefs)):
+                if prev is None:
+                    os.environ.pop(env_name, None)
+                else:
+                    os.environ[env_name] = prev
+
+
+def scenario_store_settings(db_path: str) -> None:
+    print("scenario: Кабинет магазина (core.store_settings)")
+    with get_conn(db_path) as conn:
+        seeded = store_settings.get_settings(conn)
+        check("a freshly init'd db has the default seeded name", seeded["name"] == "Магазин")
+        check("optional fields start out empty", seeded["address"] is None and seeded["phone"] is None)
+
+        store_settings.update_settings(conn, "  Ремонт-Плюс  ", "  ул. Ленина, 1  ", "+380501112233", "9:00–19:00")
+        updated = store_settings.get_settings(conn)
+        check("update_settings trims whitespace off the name", updated["name"] == "Ремонт-Плюс")
+        check("address/phone/hours are all stored", updated["address"] == "ул. Ленина, 1" and updated["phone"] == "+380501112233" and updated["working_hours"] == "9:00–19:00")
+
+        store_settings.update_settings(conn, "Снова Магазин", "", "", "")
+        cleared = store_settings.get_settings(conn)
+        check("blanking optional fields stores NULL, not an empty string", cleared["address"] is None and cleared["phone"] is None and cleared["working_hours"] is None)
+
+
 def scenario_miniapp_boot_template() -> None:
     """Regression guard: an unrecognized/failed Telegram login used to
     re-render the same boot page whose script always auto-submits, so a
@@ -1914,6 +2037,136 @@ def scenario_multi_store_http() -> None:
                 os.environ["CRM_STORES_CONFIG"] = prev_config
 
 
+def scenario_multi_store_login_and_switch_http() -> None:
+    """Фаза B end-to-end: a Telegram id with an owner identity in two
+    stores must actually land somewhere sensible at login, and switching
+    must be rememberd for the next login — the whole point of
+    core.store_access/core.store_prefs, exercised through the real
+    /miniapp/auto and /store/switch endpoints, not just their building
+    blocks in isolation."""
+    print("scenario: cross-store login + switcher over real HTTP requests")
+    prev_config = os.environ.get("CRM_STORES_CONFIG")
+    prev_prefs = os.environ.get("CRM_STORE_PREFS_PATH")
+    with tempfile.TemporaryDirectory() as tmp:
+        store_a_db = os.path.join(tmp, "loginA.sqlite3")
+        store_b_db = os.path.join(tmp, "loginB.sqlite3")
+        config_path = os.path.join(tmp, "stores.json")
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(
+                [
+                    {"id": "A", "name": "Магазин Логин A", "db_path": store_a_db},
+                    {"id": "B", "name": "Магазин Логин B", "db_path": store_b_db},
+                ],
+                f,
+            )
+        init_db(store_a_db)
+        init_db(store_b_db)
+        telegram_id = 555000111
+        with get_conn(store_a_db) as conn:
+            auth.create_staff(conn, "loginowner", "pass", "Мультивладелец", "owner")
+            auth.link_staff_telegram(conn, "loginowner", telegram_id)
+        with get_conn(store_b_db) as conn:
+            auth.create_staff(conn, "loginowner", "pass", "Мультивладелец", "owner")
+            auth.link_staff_telegram(conn, "loginowner", telegram_id)
+
+        os.environ["CRM_STORES_CONFIG"] = config_path
+        os.environ["CRM_STORE_PREFS_PATH"] = os.path.join(tmp, "login-prefs.sqlite3")
+        try:
+            import webapp.main
+            from webapp.routers import miniapp as miniapp_router
+
+            init_data = _build_init_data(miniapp_router.BOT_TOKEN, {"id": telegram_id, "first_name": "Тест"}, int(time.time()))
+
+            with TestClient(webapp.main.app) as client:
+                # follow_redirects=False: TestClient follows 303s by default,
+                # but the store_id we need to inspect only lives in the
+                # Location header of the redirect itself, not the page it
+                # points to.
+                first_login = client.post("/miniapp/auto", data={"initData": init_data}, follow_redirects=False)
+                token_after_first_login = first_login.headers["location"].split("t=", 1)[1]
+                check("first-ever login (no preference yet) lands in the first configured store",
+                      first_login.status_code == 303 and read_token(token_after_first_login)["store_id"] == "A")
+                dash = client.get(f"/?t={token_after_first_login}")
+                check("that token actually authenticates", dash.status_code == 200)
+
+                switch = client.post("/store/switch?t=" + token_after_first_login, data={"store_id": "B"}, follow_redirects=False)
+                check("switching to store B redirects (303)", switch.status_code == 303)
+                token_after_switch = switch.headers["location"].split("t=", 1)[1]
+                check("the new token really is for store B, not a no-op",
+                      token_after_switch != token_after_first_login)
+
+                second_login = client.post("/miniapp/auto", data={"initData": init_data}, follow_redirects=False)
+                token_after_second_login = second_login.headers["location"].split("t=", 1)[1]
+                dash2 = client.get(f"/?t={token_after_second_login}")
+                check("a second login (after switching) authenticates too", dash2.status_code == 200)
+                check("and it landed back on store B (the switch was remembered), not store A again",
+                      read_token(token_after_second_login)["store_id"] == "B")
+
+                bogus_switch = client.post("/store/switch?t=" + token_after_second_login, data={"store_id": "does-not-exist"})
+                check("switching to a store this telegram_id has no identity in doesn't crash, shows a friendly error",
+                      bogus_switch.status_code == 200 and "нет доступа" in bogus_switch.text)
+        finally:
+            for env_name, prev in (("CRM_STORES_CONFIG", prev_config), ("CRM_STORE_PREFS_PATH", prev_prefs)):
+                if prev is None:
+                    os.environ.pop(env_name, None)
+                else:
+                    os.environ[env_name] = prev
+
+
+def scenario_store_settings_http() -> None:
+    """Фаза B: Кабинет магазина over real HTTP — role gate + save round-trip."""
+    print("scenario: Кабинет магазина over HTTP (role gate + save)")
+    prev_config = os.environ.get("CRM_STORES_CONFIG")
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = os.path.join(tmp, "cabinet.sqlite3")
+        init_db(db_path)
+        with get_conn(db_path) as conn:
+            owner_id = auth.create_staff(conn, "cabowner", "pass", "Кабинет Владелец", "owner")
+            master_id = auth.create_staff(conn, "cabmaster", "pass", "Кабинет Мастер", "master")
+        owner_token = make_token(owner_id, "cab")
+        master_token = make_token(master_id, "cab")
+
+        config_path = os.path.join(tmp, "stores.json")
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump([{"id": "cab", "name": "Кабинет-тест", "db_path": db_path}], f)
+        os.environ["CRM_STORES_CONFIG"] = config_path
+        try:
+            import webapp.main
+
+            with TestClient(webapp.main.app) as client:
+                master_get = client.get(f"/store/settings?t={master_token}")
+                check("a master is denied the Кабинет магазина (403), not shown store settings",
+                      master_get.status_code == 403)
+
+                owner_get = client.get(f"/store/settings?t={owner_token}")
+                check("an owner sees the default seeded name on first visit", "Магазин" in owner_get.text)
+
+                empty_name = client.post(f"/store/settings?t={owner_token}", data={
+                    "name": "   ", "address": "", "phone": "", "working_hours": "",
+                })
+                check("an empty name is rejected with a friendly error, no raw 422",
+                      empty_name.status_code == 200 and "не может быть пустым" in empty_name.text)
+                with get_conn(db_path) as conn:
+                    check("the rejected empty-name save left the store's real name untouched",
+                          store_settings.get_settings(conn)["name"] == "Магазин")
+
+                saved = client.post(f"/store/settings?t={owner_token}", data={
+                    "name": "Ремонтная Мастерская №1", "address": "просп. Мира, 10",
+                    "phone": "+380671234567", "working_hours": "пн–сб 9:00–20:00",
+                })
+                check("a valid save succeeds (200, re-rendered with a success flash)", saved.status_code == 200)
+                check("the success flash is shown", "Изменения сохранены" in saved.text)
+
+                reload = client.get(f"/store/settings?t={owner_token}")
+                check("the saved name is really persisted, visible on a fresh GET", "Ремонтная Мастерская №1" in reload.text)
+                check("the saved address is really persisted too", "просп. Мира, 10" in reload.text)
+        finally:
+            if prev_config is None:
+                os.environ.pop("CRM_STORES_CONFIG", None)
+            else:
+                os.environ["CRM_STORES_CONFIG"] = prev_config
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         db_path = os.path.join(tmp, "test.sqlite3")
@@ -1935,15 +2188,20 @@ def main() -> None:
         scenario_repair_card_notify(db_path)
         scenario_repair_actions(db_path)
         scenario_repair_attachments(db_path)
+        scenario_store_settings(db_path)
 
     scenario_timefmt()
     scenario_telegram_auth()
     scenario_session_token()
     scenario_stores_config()
     scenario_storage_context()
+    scenario_store_prefs()
+    scenario_store_access()
     scenario_miniapp_boot_template()
     scenario_webapp_forms(_WEBAPP_TEST_DB)
     scenario_multi_store_http()
+    scenario_multi_store_login_and_switch_http()
+    scenario_store_settings_http()
     if os.path.exists(_WEBAPP_TEST_DB):
         os.remove(_WEBAPP_TEST_DB)
 

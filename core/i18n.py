@@ -45,6 +45,22 @@ _STRINGS: dict[str, dict[str, str]] = {
         "nav_masters": "Мастера",
         "more_masters_sub": "Ставки, статистика, добавление",
 
+        "more_store_settings": "Кабинет магазина",
+        "more_store_settings_sub": "Название, адрес, контакты",
+        "more_store_switch": "Сменить магазин",
+        "more_store_switch_sub": "Переключиться между магазинами",
+
+        "store_settings_title": "Кабинет магазина",
+        "store_settings_name": "Название магазина",
+        "store_settings_address": "Адрес",
+        "store_settings_phone": "Контактный телефон",
+        "store_settings_hours": "Рабочие часы",
+        "store_settings_save": "Сохранить",
+
+        "store_switch_title": "Выбор магазина",
+        "store_switch_current": "Текущий",
+        "store_switch_hint": "Доступны только магазины, где привязан ваш Telegram ID.",
+
         "settings_title": "Настройки",
         "settings_language": "Язык приложения",
         "settings_language_hint": "Сообщения об ошибках в формах пока остаются на русском независимо от выбранного языка — остальной интерфейс переведён полностью.",
@@ -365,6 +381,22 @@ _STRINGS: dict[str, dict[str, str]] = {
         "more_cash_sub": "Готівка, виручка, витрати",
         "nav_masters": "Майстри",
         "more_masters_sub": "Ставки, статистика, додавання",
+
+        "more_store_settings": "Кабінет магазину",
+        "more_store_settings_sub": "Назва, адреса, контакти",
+        "more_store_switch": "Змінити магазин",
+        "more_store_switch_sub": "Перемкнутися між магазинами",
+
+        "store_settings_title": "Кабінет магазину",
+        "store_settings_name": "Назва магазину",
+        "store_settings_address": "Адреса",
+        "store_settings_phone": "Контактний телефон",
+        "store_settings_hours": "Робочі години",
+        "store_settings_save": "Зберегти",
+
+        "store_switch_title": "Вибір магазину",
+        "store_switch_current": "Поточний",
+        "store_switch_hint": "Доступні лише магазини, де прив'язаний ваш Telegram ID.",
 
         "settings_title": "Налаштування",
         "settings_language": "Мова застосунку",

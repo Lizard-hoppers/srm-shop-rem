@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% import "_icons.html" as icons %}
+{% block title %}{{ t('store_settings_title') }}{% endblock %}
+{% block content %}
+<a class="back-link" href="{{ link('/more') }}">{{ icons.icon('back', 16) }} {{ t('nav_more') }}</a>
+
+<form method="post" action="{{ link('/store/settings') }}" class="edit-form">
+  <label>{{ t('store_settings_name') }}<input type="text" name="name" value="{{ settings.name }}" required></label>
+  <label>{{ t('store_settings_address') }}<input type="text" name="address" value="{{ settings.address or '' }}"></label>
+  <label>{{ t('store_settings_phone') }}<input type="text" name="phone" value="{{ settings.phone or '' }}"></label>
+  <label>{{ t('store_settings_hours') }}<input type="text" name="working_hours" value="{{ settings.working_hours or '' }}"></label>
+  <button type="submit">{{ t('store_settings_save') }}</button>
+</form>
+{% endblock %}

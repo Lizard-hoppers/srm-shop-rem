@@ -7,9 +7,10 @@ from starlette.staticfiles import StaticFiles
 
 from core import storage
 from core.storage import init_db
+from core.store_prefs import init_db as init_store_prefs_db
 from core.stores import load_stores
 from webapp.deps import resolve_store_for_request
-from webapp.routers import cash, clients, dashboard, hubs, inventory, masters, miniapp, print_agent, purchases, reports, repairs, sales, settings
+from webapp.routers import cash, clients, dashboard, hubs, inventory, masters, miniapp, print_agent, purchases, reports, repairs, sales, settings, store
 
 if not os.environ.get("CRM_SECRET_KEY"):
     raise RuntimeError("CRM_SECRET_KEY env var is required (auth token signing key)")
@@ -30,6 +31,7 @@ app.include_router(print_agent.router)
 app.include_router(settings.router)
 app.include_router(cash.router)
 app.include_router(masters.router)
+app.include_router(store.router)
 
 
 @app.middleware("http")
@@ -49,5 +51,6 @@ async def store_context_middleware(request: Request, call_next):
 
 @app.on_event("startup")
 def on_startup():
-    for store in load_stores():
-        init_db(store.db_path)
+    for store_config in load_stores():
+        init_db(store_config.db_path)
+    init_store_prefs_db()

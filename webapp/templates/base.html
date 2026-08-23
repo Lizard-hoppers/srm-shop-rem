@@ -15,7 +15,10 @@
 {% if staff %}
 {% set path = request.url.path %}
 <header class="appbar">
-  <div class="appbar-title">{% block header_title %}{{ self.title() }}{% endblock %}</div>
+  <div class="appbar-title-block">
+    <div class="appbar-title">{% block header_title %}{{ self.title() }}{% endblock %}</div>
+    {% if multi_store and store_name %}<div class="appbar-store">{{ store_name }}</div>{% endif %}
+  </div>
   <a class="avatar" href="{{ link('/more') }}" title="{{ staff.name }}">{{ (staff.name or '?')[0]|upper }}</a>
 </header>
 {% endif %}
@@ -38,7 +41,7 @@
   <a href="{{ link('/warehouse') }}" class="{{ 'active' if path.startswith('/warehouse') or path.startswith('/inventory') or path.startswith('/purchases') else '' }}">
     {{ icons.icon('box') }}<span>{{ t('nav_warehouse') }}</span>
   </a>
-  <a href="{{ link('/more') }}" class="{{ 'active' if path.startswith('/more') or path.startswith('/clients') or path.startswith('/reports') or path.startswith('/settings') else '' }}">
+  <a href="{{ link('/more') }}" class="{{ 'active' if path.startswith('/more') or path.startswith('/clients') or path.startswith('/reports') or path.startswith('/settings') or path.startswith('/store') else '' }}">
     {{ icons.icon('more') }}<span>{{ t('nav_more') }}</span>
   </a>
 </nav>

@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% import "_icons.html" as icons %}
+{% block title %}{{ t('store_switch_title') }}{% endblock %}
+{% block content %}
+<a class="back-link" href="{{ link('/more') }}">{{ icons.icon('back', 16) }} {{ t('nav_more') }}</a>
+
+<div class="nav-list">
+  {% for store, store_staff in accessible %}
+  <form method="post" action="{{ link('/store/switch') }}" style="margin:0;">
+    <input type="hidden" name="store_id" value="{{ store.id }}">
+    <button type="submit" class="card nav-card" style="width:100%;" {% if store.id == current_store_id %}disabled{% endif %}>
+      <div class="card-icon">{{ icons.icon('repeat', 18) }}</div>
+      <div class="nav-card-body">
+        <div class="nav-card-title">{{ store.name }}</div>
+        {% if store.id == current_store_id %}<div class="nav-card-sub">{{ t('store_switch_current') }}</div>{% endif %}
+      </div>
+    </button>
+  </form>
+  {% endfor %}
+</div>
+<p class="meta">{{ t('store_switch_hint') }}</p>
+{% endblock %}
