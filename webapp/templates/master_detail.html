@@ -16,6 +16,7 @@
 </div>
 
 <h2>{{ t('master_stats_title') }}</h2>
+<div class="table-scroll">
 <table class="table">
   <thead><tr><th></th><th>{{ t('stat_repairs_count') }}</th><th>{{ t('col_revenue') }}</th><th>{{ t('parts_cost_label') }}</th><th>{{ t('profit_label') }}</th><th>{{ t('payout_label') }}</th></tr></thead>
   <tbody>
@@ -45,6 +46,7 @@
     </tr>
   </tbody>
 </table>
+</div>
 
 <h2>{{ t('master_data_title') }}</h2>
 <form method="post" action="{{ link('/masters/' ~ master.id ~ '/edit') }}" class="edit-form">

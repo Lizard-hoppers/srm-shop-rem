@@ -3,6 +3,7 @@
 {% block content %}
 {% if error %}<div class="flash flash-error">{{ error }}</div>{% endif %}
 
+<div class="table-scroll">
 <table class="table">
   <thead><tr><th>{{ t('sales_col_client') }}</th><th>{{ t('channel_label') }}</th><th>{{ t('sales_col_payment') }}</th><th>{{ t('sales_col_amount') }}</th><th>{{ t('sales_col_warranty') }}</th><th>{{ t('sales_col_seller') }}</th><th>{{ t('col_date') }}</th></tr></thead>
   <tbody>
@@ -21,6 +22,7 @@
     {% endfor %}
   </tbody>
 </table>
+</div>
 
 <h2>{{ t('sales_new_title') }}</h2>
 <form method="post" action="{{ link('/sales') }}" class="edit-form" id="saleForm">

@@ -6,6 +6,7 @@
 <p class="meta">{{ t('sales_col_client') }}: {{ sale.client_name or t('sales_client_none') }} · {{ t('channel_label') }}: {{ t('channel_online') if sale.channel == 'online' else t('channel_offline') }} · {{ t('sale_meta_payment') }}: {{ t('payment_method_' ~ sale.payment_method) if sale.payment_method else '—' }} · {{ t('sales_col_seller') }}: {{ sale.staff_name or '—' }} · {{ sale.created_at | kyiv }}</p>
 {% if sale.warranty_until %}<p class="badge">{{ t('warranty_until_label') }} {{ sale.warranty_until | rudate }}</p>{% endif %}
 
+<div class="table-scroll">
 <table class="table">
   <thead><tr><th>{{ t('col_product') }}</th><th>{{ t('qty_col') }}</th><th>{{ t('sale_col_price') }}</th><th>{{ t('sales_col_amount') }}</th></tr></thead>
   <tbody>
@@ -19,4 +20,5 @@
     {% endfor %}
   </tbody>
 </table>
+</div>
 {% endblock %}

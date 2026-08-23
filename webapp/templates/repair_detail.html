@@ -79,7 +79,8 @@
     <div class="panel-box">
       <h3>{{ t('used_parts_title') }}</h3>
       {% if error %}<div class="flash flash-error">{{ error }}</div>{% endif %}
-      <table class="table">
+      <div class="table-scroll">
+<table class="table">
         <thead><tr><th>{{ t('part_col') }}</th><th>{{ t('qty_col') }}</th><th>{{ t('when_col') }}</th></tr></thead>
         <tbody>
           {% for p in parts %}
@@ -89,6 +90,7 @@
           {% endfor %}
         </tbody>
       </table>
+</div>
       <form method="post" action="{{ link('/repairs/' ~ repair.id ~ '/parts') }}" class="inline-form" style="margin-top: 10px;">
         <select name="product_id" required>
           {% for p in products %}<option value="{{ p.id }}">{{ p.name }}</option>{% endfor %}

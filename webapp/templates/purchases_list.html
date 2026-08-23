@@ -4,6 +4,7 @@
 {% block content %}
 <a class="back-link" href="{{ link('/warehouse') }}">{{ icons.icon('back', 16) }} {{ t('nav_warehouse') }}</a>
 
+<div class="table-scroll">
 <table class="table">
   <thead><tr><th>{{ t('col_supplier') }}</th><th>{{ t('col_invoice') }}</th><th>{{ t('col_who_accepted') }}</th><th>{{ t('col_date') }}</th></tr></thead>
   <tbody>
@@ -19,6 +20,7 @@
     {% endfor %}
   </tbody>
 </table>
+</div>
 
 <div class="grid-2">
   <div class="panel-box">

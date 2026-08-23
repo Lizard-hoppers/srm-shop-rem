@@ -62,6 +62,7 @@
 </div>
 
 <h2>{{ t('movements_history_title') }}</h2>
+<div class="table-scroll">
 <table class="table">
   <thead><tr><th>{{ t('col_when') }}</th><th>{{ t('col_product') }}</th><th>{{ t('col_reason') }}</th><th>{{ t('from_label') }}</th><th>{{ t('to_label') }}</th><th>{{ t('qty_col') }}</th><th>{{ t('comment_label') }}</th></tr></thead>
   <tbody>
@@ -80,4 +81,5 @@
     {% endfor %}
   </tbody>
 </table>
+</div>
 {% endblock %}

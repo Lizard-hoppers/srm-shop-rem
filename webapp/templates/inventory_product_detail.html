@@ -114,6 +114,7 @@
 {% endif %}
 
 <h2>{{ t('stock_by_cell_title') }}</h2>
+<div class="table-scroll">
 <table class="table">
   <thead><tr><th>{{ t('cell_col') }}</th><th>{{ t('qty_col') }}</th></tr></thead>
   <tbody>
@@ -124,6 +125,7 @@
     {% endfor %}
   </tbody>
 </table>
+</div>
 
 <form method="post" action="{{ link('/inventory/products/' ~ product.id ~ '/receive') }}" class="edit-form">
   <label>{{ t('add_stock_label') }}
@@ -140,6 +142,7 @@
 
 <h2>{{ t('suppliers_section_title') }}</h2>
 <p class="meta">{{ t('suppliers_section_hint') }}</p>
+<div class="table-scroll">
 <table class="table">
   <thead><tr><th>{{ t('col_date') }}</th><th>{{ t('col_supplier') }}</th><th>{{ t('col_invoice') }}</th><th>{{ t('qty_col') }}</th><th>{{ t('col_unit_cost') }}</th><th></th></tr></thead>
   <tbody>
@@ -163,6 +166,7 @@
     {% endfor %}
   </tbody>
 </table>
+</div>
 
 <form method="post" action="{{ link('/inventory/products/' ~ product.id ~ '/supplier-return') }}" class="edit-form" id="supplierReturnForm">
   <label>{{ t('return_form_label') }}
@@ -196,6 +200,7 @@
 
 {% if returns %}
 <h2>{{ t('returns_history_title') }}</h2>
+<div class="table-scroll">
 <table class="table">
   <thead><tr><th>{{ t('col_date') }}</th><th>{{ t('col_supplier') }}</th><th>{{ t('qty_col') }}</th><th>{{ t('col_reason') }}</th><th>{{ t('col_who') }}</th></tr></thead>
   <tbody>
@@ -210,6 +215,7 @@
     {% endfor %}
   </tbody>
 </table>
+</div>
 {% endif %}
 
 <h2>{{ t('product_data_title') }}</h2>

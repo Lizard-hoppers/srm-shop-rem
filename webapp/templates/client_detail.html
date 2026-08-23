@@ -17,6 +17,7 @@
 </div>
 
 <h2>{{ t('repair_history_title') }} {{ repair_history|length }}</h2>
+<div class="table-scroll">
 <table class="table">
   <thead><tr><th>{{ t('col_device') }}</th><th>{{ t('col_status') }}</th><th>{{ t('master_label') }}</th><th>{{ t('accepted_at_prefix') }}</th></tr></thead>
   <tbody>
@@ -32,9 +33,11 @@
     {% endfor %}
   </tbody>
 </table>
+</div>
 
 {% if sales_history %}
 <h2>{{ t('purchases_history_title') }} {{ sales_history|length }}</h2>
+<div class="table-scroll">
 <table class="table">
   <thead><tr><th>{{ t('channel_label') }}</th><th>{{ t('sales_col_amount') }}</th><th>{{ t('sales_col_seller') }}</th><th>{{ t('col_date') }}</th></tr></thead>
   <tbody>
@@ -48,6 +51,7 @@
     {% endfor %}
   </tbody>
 </table>
+</div>
 {% endif %}
 
 <h2>{{ t('client_data_title') }}</h2>

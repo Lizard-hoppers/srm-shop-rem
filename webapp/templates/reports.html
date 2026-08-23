@@ -20,6 +20,7 @@
 </div>
 
 <h2>{{ t('repairs_by_status_title') }}</h2>
+<div class="table-scroll">
 <table class="table">
   <thead><tr><th>{{ t('col_status') }}</th><th>{{ t('col_count') }}</th></tr></thead>
   <tbody>
@@ -30,8 +31,10 @@
     {% endfor %}
   </tbody>
 </table>
+</div>
 
 <h2>{{ t('masters_output_title') }}</h2>
+<div class="table-scroll">
 <table class="table">
   <thead><tr><th>{{ t('master_label') }}</th><th>{{ t('col_total_repairs') }}</th><th>{{ t('col_issued') }}</th></tr></thead>
   <tbody>
@@ -42,8 +45,10 @@
     {% endfor %}
   </tbody>
 </table>
+</div>
 
 <h2>{{ t('sales_by_channel_title') }}</h2>
+<div class="table-scroll">
 <table class="table">
   <thead><tr><th>{{ t('channel_label') }}</th><th>{{ t('col_orders') }}</th><th>{{ t('col_revenue') }}</th></tr></thead>
   <tbody>
@@ -54,8 +59,10 @@
     {% endfor %}
   </tbody>
 </table>
+</div>
 
 <h2>{{ t('low_stock_title') }}</h2>
+<div class="table-scroll">
 <table class="table">
   <thead><tr><th>{{ t('col_product') }}</th><th>{{ t('col_stock') }}</th><th>{{ t('col_min') }}</th></tr></thead>
   <tbody>
@@ -66,4 +73,5 @@
     {% endfor %}
   </tbody>
 </table>
+</div>
 {% endblock %}

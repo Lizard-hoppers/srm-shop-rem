@@ -5,6 +5,7 @@
 <a class="back-link" href="{{ link('/purchases') }}">{{ icons.icon('back', 16) }} {{ t('warehouse_nav_purchases_title') }}</a>
 <p class="meta">{{ t('col_supplier') }}: {{ receipt.supplier_name or '—' }} · {{ t('col_invoice') }}: {{ receipt.invoice_no or '—' }} · {{ t('accepted_by_label') }}: {{ receipt.staff_name or '—' }} · {{ receipt.created_at | kyiv }}</p>
 
+<div class="table-scroll">
 <table class="table">
   <thead><tr><th>{{ t('col_product') }}</th><th>{{ t('cell_col') }}</th><th>{{ t('qty_col') }}</th><th>{{ t('col_unit_cost') }}</th></tr></thead>
   <tbody>
@@ -18,4 +19,5 @@
     {% endfor %}
   </tbody>
 </table>
+</div>
 {% endblock %}

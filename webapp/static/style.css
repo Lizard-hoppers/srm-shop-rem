@@ -31,6 +31,13 @@ body {
   background: var(--bg);
   color: var(--text);
   -webkit-font-smoothing: antialiased;
+  /* Safety net: wide content (wide tables, etc.) must scroll inside its
+     own container (see .table-scroll below), never push the whole page
+     sideways. If something wide ever slips through anyway, this clips it
+     instead of letting the appbar/tabbar shift with the rest of the
+     screen — found 23.08, Продажи's table had no scroll wrapper and the
+     whole app shifted horizontally when it overflowed a narrow phone. */
+  overflow-x: hidden;
 }
 
 a { color: var(--accent); text-decoration: none; }
@@ -105,6 +112,19 @@ h3 { font-size: 12px; color: var(--muted); margin: 0 0 10px; font-weight: 700; t
 .back-link svg { flex-shrink: 0; }
 
 /* ---- tables ---- */
+
+/* Every <table class="table"> must be wrapped in this — a table with
+   several columns (repairs/sales/movements history etc.) is often wider
+   than a phone screen, and without this wrapper the table pushed the
+   WHOLE .container (and with it the whole visible screen) sideways
+   instead of just scrolling itself (found 23.08 on Продажи, was true of
+   every .table on every page — .container has no width clamp against
+   content wider than it). Rule going forward: any wide content (a table,
+   a long code block, anything that can't just wrap) gets its own
+   overflow-x:auto wrapper — never let the page itself grow wider than
+   the viewport. */
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.table-scroll .table { min-width: max-content; }
 
 .table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; box-shadow: var(--shadow); }
 .table th, .table td { text-align: left; padding: 11px 13px; border-bottom: 1px solid var(--border); font-size: 13.5px; }
