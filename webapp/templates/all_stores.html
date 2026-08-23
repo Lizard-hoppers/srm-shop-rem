@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% import "_icons.html" as icons %}
+{% block title %}{{ t('more_all_stores') }}{% endblock %}
+{% block content %}
+<a class="back-link" href="{{ link('/more') }}">{{ icons.icon('back', 16) }} {{ t('nav_more') }}</a>
+
+{% for row in rows %}
+<div class="panel-box" style="margin-bottom:12px;">
+  <h3 style="margin:0 0 10px;">{{ row.name }}</h3>
+  <div class="stat-row">
+    <div class="stat">
+      <div class="stat-num">{{ row.open_repairs }}</div>
+      <div class="stat-label">{{ t('dash_repairs_in_progress') }}</div>
+    </div>
+    <div class="stat">
+      <div class="stat-num">{{ row.sales_orders }}</div>
+      <div class="stat-label">{{ t('col_orders') }}</div>
+    </div>
+    <div class="stat">
+      <div class="stat-num">{{ row.low_stock_count }}</div>
+      <div class="stat-label">{{ t('stat_low_stock') }}</div>
+    </div>
+  </div>
+  <div class="stat-row" style="margin-top:8px;">
+    <div class="stat">
+      <div class="stat-num">{{ row.repairs_revenue }}</div>
+      <div class="stat-label">{{ t('nav_repairs') }}</div>
+    </div>
+    <div class="stat">
+      <div class="stat-num">{{ row.sales_revenue }}</div>
+      <div class="stat-label">{{ t('nav_sales') }}</div>
+    </div>
+    <div class="stat">
+      <div class="stat-num">{{ row.cash_balance }}</div>
+      <div class="stat-label">{{ t('nav_cash') }}</div>
+    </div>
+  </div>
+</div>
+{% else %}
+<p class="meta">{{ t('no_data_yet') }}</p>
+{% endfor %}
+
+{% if rows %}
+<div class="panel-box">
+  <h3 style="margin:0 0 10px;">{{ t('all_stores_total') }}</h3>
+  <div class="stat-row">
+    <div class="stat">
+      <div class="stat-num">{{ totals.open_repairs }}</div>
+      <div class="stat-label">{{ t('dash_repairs_in_progress') }}</div>
+    </div>
+    <div class="stat">
+      <div class="stat-num">{{ totals.sales_orders }}</div>
+      <div class="stat-label">{{ t('col_orders') }}</div>
+    </div>
+    <div class="stat">
+      <div class="stat-num">{{ totals.low_stock_count }}</div>
+      <div class="stat-label">{{ t('stat_low_stock') }}</div>
+    </div>
+  </div>
+  <div class="stat-row" style="margin-top:8px;">
+    <div class="stat">
+      <div class="stat-num">{{ totals.repairs_revenue }}</div>
+      <div class="stat-label">{{ t('nav_repairs') }}</div>
+    </div>
+    <div class="stat">
+      <div class="stat-num">{{ totals.sales_revenue }}</div>
+      <div class="stat-label">{{ t('nav_sales') }}</div>
+    </div>
+    <div class="stat">
+      <div class="stat-num">{{ totals.cash_balance }}</div>
+      <div class="stat-label">{{ t('nav_cash') }}</div>
+    </div>
+  </div>
+</div>
+{% endif %}
+{% endblock %}

@@ -57,6 +57,7 @@ os.environ["CRM_STORES_CONFIG"] = os.path.join(tempfile.gettempdir(), "crm_simul
 import hashlib
 import hmac
 import json
+import re
 import time
 import urllib.parse
 
@@ -2223,6 +2224,136 @@ def scenario_store_settings_http() -> None:
                 os.environ["CRM_STORES_CONFIG"] = prev_config
 
 
+def scenario_all_stores_report_http() -> None:
+    """Фаза D: «Все магазины» summary over real HTTP — two stores seeded
+    with deliberately DIFFERENT numbers on every metric (no shared values
+    between stores), so a bug that reads the wrong DB or sums wrong shows
+    up as a wrong number rather than accidentally passing."""
+    print("scenario: сводный отчёт «Все магазины» over HTTP")
+    prev_config = os.environ.get("CRM_STORES_CONFIG")
+    with tempfile.TemporaryDirectory() as tmp:
+        db_a = os.path.join(tmp, "allA.sqlite3")
+        db_b = os.path.join(tmp, "allB.sqlite3")
+        init_db(db_a)
+        init_db(db_b)
+        telegram_id = 700700700
+
+        # Store A: 1 open repair, 1 issued @1000, 1 sale (qty2*100=200),
+        # cash 500, 1 low-stock product.
+        with get_conn(db_a) as conn:
+            owner_a = auth.create_staff(conn, "owner", "pass", "Владелец", "owner")
+            auth.link_staff_telegram(conn, "owner", telegram_id)
+            store_settings.update_settings(conn, "Магазин Alpha", None, None, None)
+            client_id = clients.get_or_create_by_phone(conn, "Клиент A", "+380501110001", source="offline")
+            open_order = repairs.create_repair(
+                conn, client_id, "Смартфон", "Xiaomi", "Redmi", None, "не грузится", "offline", None, None, owner_a,
+            )
+            repairs.update_status(conn, open_order, "in_progress", owner_a)
+            issued_order = repairs.create_repair(
+                conn, client_id, "Ноутбук", "Dell", "XPS", None, "разбит экран", "offline", None, 1000, owner_a,
+            )
+            repairs.set_price(conn, issued_order, price_estimate=1000, price_final=1000)
+            repairs.update_status(conn, issued_order, "issued", owner_a)
+            product_a = inventory.create_product(conn, "Товар A", "SKU-ALL-A", None, "шт", False, True, 3, 100)
+            conn.execute(
+                "INSERT INTO sales_orders (client_id, channel, status, staff_id) VALUES (?, 'offline', 'completed', ?)",
+                (client_id, owner_a),
+            )
+            order_a_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+            conn.execute(
+                "INSERT INTO sales_order_items (order_id, product_id, qty, price) VALUES (?, ?, 2, 100)",
+                (order_a_id, product_a),
+            )
+            cash.record_income(conn, "cash", 500, "manual", 0, owner_a)
+
+        # Store B: 2 open repairs, 1 issued @3000, 2 sales (150+300=450),
+        # cash 1200, 2 low-stock products — every number deliberately
+        # different from store A's.
+        with get_conn(db_b) as conn:
+            owner_b = auth.create_staff(conn, "owner", "pass", "Владелец", "owner")
+            auth.link_staff_telegram(conn, "owner", telegram_id)
+            store_settings.update_settings(conn, "Магазин Bravo", None, None, None)
+            master_b = auth.create_staff(conn, "master", "pass", "Мастер Б", "master")
+            client_id = clients.get_or_create_by_phone(conn, "Клиент B", "+380501110002", source="offline")
+            for _ in range(2):
+                oid = repairs.create_repair(
+                    conn, client_id, "Смартфон", "Samsung", "A54", None, "не заряжается", "offline", None, None, owner_b,
+                )
+                repairs.update_status(conn, oid, "in_progress", owner_b)
+            issued_order_b = repairs.create_repair(
+                conn, client_id, "Планшет", "Apple", "iPad", None, "треснул экран", "offline", None, 3000, owner_b,
+            )
+            repairs.set_price(conn, issued_order_b, price_estimate=3000, price_final=3000)
+            repairs.update_status(conn, issued_order_b, "issued", owner_b)
+            product_b1 = inventory.create_product(conn, "Товар B1", "SKU-ALL-B1", None, "шт", False, True, 3, 50)
+            product_b2 = inventory.create_product(conn, "Товар B2", "SKU-ALL-B2", None, "шт", False, True, 3, 300)
+            conn.execute(
+                "INSERT INTO sales_orders (client_id, channel, status, staff_id) VALUES (?, 'offline', 'completed', ?)",
+                (client_id, owner_b),
+            )
+            order_b1_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+            conn.execute(
+                "INSERT INTO sales_order_items (order_id, product_id, qty, price) VALUES (?, ?, 3, 50)",
+                (order_b1_id, product_b1),
+            )
+            conn.execute(
+                "INSERT INTO sales_orders (client_id, channel, status, staff_id) VALUES (?, 'offline', 'completed', ?)",
+                (client_id, owner_b),
+            )
+            order_b2_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+            conn.execute(
+                "INSERT INTO sales_order_items (order_id, product_id, qty, price) VALUES (?, ?, 1, 300)",
+                (order_b2_id, product_b2),
+            )
+            cash.record_income(conn, "cash", 1200, "manual", 0, owner_b)
+
+        config_path = os.path.join(tmp, "stores.json")
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(
+                [
+                    {"id": "allA", "name": "Магазин Alpha", "db_path": db_a},
+                    {"id": "allB", "name": "Магазин Bravo", "db_path": db_b},
+                ],
+                f,
+            )
+        os.environ["CRM_STORES_CONFIG"] = config_path
+        try:
+            import webapp.main
+
+            with TestClient(webapp.main.app) as client:
+                owner_token = make_token(owner_a, "allA")
+                master_token = make_token(master_b, "allB")
+
+                master_resp = client.get(f"/reports/all-stores?t={master_token}")
+                check("a master role is denied «Все магазины» (403), not shown cross-store financials",
+                      master_resp.status_code == 403)
+
+                resp = client.get(f"/reports/all-stores?t={owner_token}")
+                text = resp.text
+                check("the page loads for an owner with identity in both stores", resp.status_code == 200)
+                check("both store names appear", "Магазин Alpha" in text and "Магазин Bravo" in text)
+
+                # Precise check, not just substring presence: extract every
+                # <div class="stat-num"> value in document order and compare
+                # against the exact expected sequence — store A's 6 stats,
+                # then store B's 6, then the totals' 6 (row order in the
+                # template: open_repairs, sales_orders, low_stock_count,
+                # repairs_revenue, sales_revenue, cash_balance).
+                stat_nums = re.findall(r'<div class="stat-num">([^<]*)</div>', text)
+                expected = [
+                    "1", "1", "1", "1000", "200", "500",       # store A
+                    "2", "2", "2", "3000", "450", "1200",      # store B
+                    "3", "3", "3", "4000", "650", "1700",      # итого — exact sum of both
+                ]
+                check("all 18 stat values (2 stores + totals, 6 each) appear in the exact expected order",
+                      stat_nums == expected)
+        finally:
+            if prev_config is None:
+                os.environ.pop("CRM_STORES_CONFIG", None)
+            else:
+                os.environ["CRM_STORES_CONFIG"] = prev_config
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         db_path = os.path.join(tmp, "test.sqlite3")
@@ -2258,6 +2389,7 @@ def main() -> None:
     scenario_multi_store_http()
     scenario_multi_store_login_and_switch_http()
     scenario_store_settings_http()
+    scenario_all_stores_report_http()
     if os.path.exists(_WEBAPP_TEST_DB):
         os.remove(_WEBAPP_TEST_DB)
 

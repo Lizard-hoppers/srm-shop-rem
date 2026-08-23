@@ -49,6 +49,8 @@ _STRINGS: dict[str, dict[str, str]] = {
         "more_store_settings_sub": "Название, адрес, контакты",
         "more_store_switch": "Сменить магазин",
         "more_store_switch_sub": "Переключиться между магазинами",
+        "more_all_stores": "Все магазины",
+        "more_all_stores_sub": "Сводка по всем магазинам",
 
         "store_settings_title": "Кабинет магазина",
         "store_settings_name": "Название магазина",
@@ -60,6 +62,8 @@ _STRINGS: dict[str, dict[str, str]] = {
         "store_switch_title": "Выбор магазина",
         "store_switch_current": "Текущий",
         "store_switch_hint": "Доступны только магазины, где привязан ваш Telegram ID.",
+
+        "all_stores_total": "Итого",
 
         "settings_title": "Настройки",
         "settings_language": "Язык приложения",
@@ -386,6 +390,8 @@ _STRINGS: dict[str, dict[str, str]] = {
         "more_store_settings_sub": "Назва, адреса, контакти",
         "more_store_switch": "Змінити магазин",
         "more_store_switch_sub": "Перемкнутися між магазинами",
+        "more_all_stores": "Всі магазини",
+        "more_all_stores_sub": "Зведення по всіх магазинах",
 
         "store_settings_title": "Кабінет магазину",
         "store_settings_name": "Назва магазину",
@@ -397,6 +403,8 @@ _STRINGS: dict[str, dict[str, str]] = {
         "store_switch_title": "Вибір магазину",
         "store_switch_current": "Поточний",
         "store_switch_hint": "Доступні лише магазини, де прив'язаний ваш Telegram ID.",
+
+        "all_stores_total": "Разом",
 
         "settings_title": "Налаштування",
         "settings_language": "Мова застосунку",

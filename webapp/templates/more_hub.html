@@ -67,6 +67,16 @@
     <div class="chevron">{{ icons.icon('chevron', 18) }}</div>
   </a>
   {% endif %}
+  {% if multi_store_access and staff.role in ('owner', 'admin') %}
+  <a class="card nav-card" href="{{ link('/reports/all-stores') }}">
+    <div class="card-icon">{{ icons.icon('chart', 18) }}</div>
+    <div class="nav-card-body">
+      <div class="nav-card-title">{{ t('more_all_stores') }}</div>
+      <div class="nav-card-sub">{{ t('more_all_stores_sub') }}</div>
+    </div>
+    <div class="chevron">{{ icons.icon('chevron', 18) }}</div>
+  </a>
+  {% endif %}
   <a class="card nav-card" href="{{ link('/settings') }}">
     <div class="card-icon">{{ icons.icon('settings', 18) }}</div>
     <div class="nav-card-body">
