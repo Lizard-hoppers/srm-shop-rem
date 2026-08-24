@@ -17,7 +17,6 @@ from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
-    BufferedInputFile,
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -30,7 +29,6 @@ from aiogram.types import (
 from bot.config import MINIAPP_URL
 from core import auth as core_auth
 from core import clients as core_clients
-from core import qr as core_qr
 from core import repairs as core_repairs
 from core import store_access
 from core.storage import get_conn
@@ -306,11 +304,7 @@ async def contact_confirm(callback: CallbackQuery, state: FSMContext) -> None:
 
     await state.clear()
     await callback.message.edit_text(f"✅ Клиент добавлен (№{client_id}).")
-    png = core_qr.generate_png(core_qr.client_code(client_id))
-    photo = BufferedInputFile(png, filename="card.png")
-    await callback.message.answer_photo(
-        photo, caption=f"Карта лояльности — номер №{client_id}", reply_markup=QUICK_ACTIONS_KEYBOARD,
-    )
+    await callback.message.answer("Готов к новому действию.", reply_markup=QUICK_ACTIONS_KEYBOARD)
     await callback.answer("Готово")
 
 
