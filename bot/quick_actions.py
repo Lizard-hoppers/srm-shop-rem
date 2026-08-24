@@ -56,16 +56,19 @@ _BUYBACK_ROLES = ("owner", "admin", "storekeeper")
 # Mirrors bot.purchase_photo._DRAFT_ROLES.
 _PURCHASE_ROLES = ("owner", "admin", "storekeeper")
 
-# Telegram's Bot API has no color field on KeyboardButton/
-# InlineKeyboardButton at all — a reply-keyboard button can't be given a
-# custom background color, full stop. A leading colored-circle emoji is
-# the closest real substitute (Павел asked for Ремонт/Отмена red,
-# Контакт blue, Скупка green, Приход left plain).
-BTN_REPAIR = "🔴 Ремонт"
-BTN_CONTACT = "🔵 Контакт"
-BTN_BUYBACK = "🟢 Скупка"
+# Real button colors: `style` isn't a typed aiogram field (not in
+# KeyboardButton.model_fields), but the Pydantic model has extra="allow"
+# and forwards whatever it's given straight into the Bot API JSON — the
+# same undocumented-but-real technique already used throughout
+# taki_vmeste/ui.py (style="primary"/blue, "success"/green,
+# "danger"/red), confirmed live against that bot 24.08. Leave the kwarg
+# off entirely for a plain/unstyled button — Приход stays plain, Павел's
+# call.
+BTN_REPAIR = "🔧 Ремонт"
+BTN_CONTACT = "👤 Контакт"
+BTN_BUYBACK = "💰 Скупка"
 BTN_PURCHASE = "📦 Приход"
-BTN_CANCEL = "🔴 Отмена"
+BTN_CANCEL = "❌ Отмена"
 
 # One single keyboard, always — Отмена lives on it permanently instead of
 # swapping to a separate cancel-only keyboard mid-flow. Telegram was
@@ -79,9 +82,9 @@ BTN_CANCEL = "🔴 Отмена"
 # what other messages/edits happen, so there's no need to re-attach it.
 QUICK_ACTIONS_KEYBOARD = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text=BTN_REPAIR), KeyboardButton(text=BTN_CONTACT)],
-        [KeyboardButton(text=BTN_BUYBACK), KeyboardButton(text=BTN_PURCHASE)],
-        [KeyboardButton(text=BTN_CANCEL)],
+        [KeyboardButton(text=BTN_REPAIR, style="danger"), KeyboardButton(text=BTN_CONTACT, style="primary")],
+        [KeyboardButton(text=BTN_BUYBACK, style="success"), KeyboardButton(text=BTN_PURCHASE)],
+        [KeyboardButton(text=BTN_CANCEL, style="danger")],
     ],
     resize_keyboard=True,
     is_persistent=True,
@@ -274,8 +277,8 @@ async def purchase_start(message: Message, state: FSMContext) -> None:
 async def cancel_flow(message: Message, state: FSMContext) -> None:
     """Deletes EVERYTHING from this flow attempt — the bot's own tracked
     message, every reply the staff member typed along the way (name,
-    phone, ...), the tap on the entry button (🔴 Ремонт etc.), and this
-    very "🔴 Отмена" tap itself. Telegram's Bot API explicitly allows a
+    phone, ...), the tap on the entry button (🔧 Ремонт etc.), and this
+    very "❌ Отмена" tap itself. Telegram's Bot API explicitly allows a
     bot to delete incoming messages in a private chat, not just its own,
     so nothing has to survive a cancel."""
     data = await state.get_data()
@@ -290,7 +293,7 @@ async def cancel_flow(message: Message, state: FSMContext) -> None:
 
 @router.message(F.text == BTN_CANCEL, F.chat.type == "private")
 async def cancel_noop(message: Message) -> None:
-    """🔴 Отмена tapped with nothing active — cancel_flow above (state-
+    """❌ Отмена tapped with nothing active — cancel_flow above (state-
     gated) doesn't match, so this would otherwise sit in the chat
     un-acted-on forever. Nothing to clean up but the tap itself."""
     await _safe_delete_many(message.bot, message.chat.id, [message.message_id])
@@ -371,8 +374,8 @@ async def repair_got_photo(message: Message, state: FSMContext) -> None:
         "Фото: приложено ✅"
     )
     keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="✅ Принять", callback_data="quick_repair_confirm"),
-        InlineKeyboardButton(text="❌ Отмена", callback_data="quick_repair_cancel"),
+        InlineKeyboardButton(text="✅ Принять", callback_data="quick_repair_confirm", style="success"),
+        InlineKeyboardButton(text="❌ Отмена", callback_data="quick_repair_cancel", style="danger"),
     ]])
     await _advance(message, state, text, reply_markup=keyboard)
 
@@ -563,8 +566,8 @@ async def buyback_got_photo(message: Message, state: FSMContext) -> None:
     lines.append("Фото: приложено ✅")
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="✅ Принять", callback_data="quick_buyback_confirm"),
-        InlineKeyboardButton(text="❌ Отмена", callback_data="quick_buyback_cancel"),
+        InlineKeyboardButton(text="✅ Принять", callback_data="quick_buyback_confirm", style="success"),
+        InlineKeyboardButton(text="❌ Отмена", callback_data="quick_buyback_cancel", style="danger"),
     ]])
     await _advance(message, state, "\n".join(lines), reply_markup=keyboard)
 
@@ -638,8 +641,8 @@ async def contact_got_phone(message: Message, state: FSMContext) -> None:
     data = await state.update_data(phone=phone)
     await state.set_state(QuickContact.confirm)
     keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="✅ Добавить", callback_data="quick_contact_confirm"),
-        InlineKeyboardButton(text="❌ Отмена", callback_data="quick_contact_cancel"),
+        InlineKeyboardButton(text="✅ Добавить", callback_data="quick_contact_confirm", style="success"),
+        InlineKeyboardButton(text="❌ Отмена", callback_data="quick_contact_cancel", style="danger"),
     ]])
     await _advance(message, state, f"📋 Проверьте:\nИмя: {data['name']}\nТелефон: {phone}", reply_markup=keyboard)
 
