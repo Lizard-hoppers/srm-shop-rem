@@ -15,6 +15,7 @@ from aiogram.types import (
 )
 
 from bot.config import MINIAPP_URL
+from bot.quick_actions import QUICK_ACTIONS_KEYBOARD
 from core import auth as core_auth
 from core import clients as core_clients
 from core import qr as core_qr
@@ -60,6 +61,11 @@ async def start(message: Message) -> None:
             inline_keyboard=[[InlineKeyboardButton(text="Открыть CRM", web_app=WebAppInfo(url=MINIAPP_URL))]]
         )
         await message.answer(STAFF_WELCOME.format(user_id=message.from_user.id), reply_markup=keyboard)
+        # A reply keyboard can't ride along on the same message as the
+        # inline one above (Telegram allows only one reply_markup kind per
+        # message) — a short second message sets the persistent quick-
+        # action buttons (bot/quick_actions.py) at the bottom of the chat.
+        await message.answer("Быстрые действия:", reply_markup=QUICK_ACTIONS_KEYBOARD)
         return
 
     if client:

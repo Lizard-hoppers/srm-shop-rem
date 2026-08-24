@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import uuid
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
@@ -14,7 +13,6 @@ from core import clients as core_clients
 from core import device_catalog
 from core import inventory as core_inventory
 from core import notify as core_notify
-from core import photos as core_photos
 from core import repairs as core_repairs
 from core import vision_ocr
 from core.inventory import InsufficientStockError
@@ -26,45 +24,10 @@ router = APIRouter(prefix="/repairs")
 
 _REPAIR_WRITE_ROLES = ("owner", "admin", "master")
 
-_PHOTO_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", "device_photos")
 _PHOTO_EXT_BY_CONTENT_TYPE = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
 _MAX_PHOTO_BYTES = 15 * 1024 * 1024  # comfortably under nginx's client_max_body_size (20M)
 
 INITIAL_DEVICE_ROWS = 1
-
-
-def _write_device_photo(device_id: int, data: bytes, ext: str) -> str:
-    compressed = core_photos.compress_photo(data)
-    if compressed is not None:
-        data, ext = compressed, ".jpg"
-
-    os.makedirs(_PHOTO_DIR, exist_ok=True)
-    filename = f"{device_id}_{uuid.uuid4().hex}{ext}"
-    with open(os.path.join(_PHOTO_DIR, filename), "wb") as f:
-        f.write(data)
-    return filename
-
-
-def _notify_new_repair(
-    store_db_path: str, order_id: int, text: str, keyboard: dict | None, photo: tuple[bytes, str] | None,
-    staff_group_chat_id, repair_topic_id, masters_group_chat_id,
-) -> None:
-    """Runs as a FastAPI BackgroundTask (see create_view) — the actual
-    Telegram calls (core.notify) are blocking httpx, several seconds worst
-    case with a photo attached; running them after the response is already
-    sent means the staff member who just took in a repair sees their own
-    redirect instantly instead of waiting on Telegram. db_path is passed
-    explicitly (not the request-scoped contextvar, which is already torn
-    down by the time a background task runs) — same explicit-conn pattern
-    as everywhere else in the multi-store code."""
-    sent = core_notify.notify_repair_card(
-        text, reply_markup=keyboard, photo=photo,
-        staff_group_chat_id=staff_group_chat_id, repair_topic_id=repair_topic_id,
-        masters_group_chat_id=masters_group_chat_id,
-    )
-    if sent:
-        with get_conn(store_db_path) as conn:
-            core_repairs.save_order_messages(conn, order_id, sent)
 
 
 async def _validate_intake_photo(upload) -> tuple[bytes, str] | None:
@@ -226,40 +189,30 @@ async def create_view(
     last_order_id = None
     store = request.state.store
     with get_conn() as conn:
-        client_id = core_clients.get_or_create_by_phone(conn, client_name, client_phone, source=channel)
         for device in devices:
-            order_id = core_repairs.create_repair(
-                conn, client_id, device["device_type"], device["brand"], device["model"],
-                device["serial_number"], device["defect_description"], channel,
-                optional_int(master_id), device["price_estimate"], staff["id"],
+            # core_repairs.create_repair_intake does the client/repair/photo/
+            # catalog writes (shared with the bot's quick-intake FSM — see
+            # its own docstring). Not threadpooled: it needs `conn`, which
+            # is thread-affine (sqlite3, no check_same_thread=False) — the
+            # brief Pillow compress it does inline is an acceptable trade
+            # for one shared code path instead of two that could drift.
+            order_id, card_text, keyboard, photo_for_notify = core_repairs.create_repair_intake(
+                conn,
+                client_name=client_name, client_phone=client_phone,
+                device_type=device["device_type"], brand=device["brand"], model=device["model"],
+                serial_number=device["serial_number"], defect_description=device["defect_description"],
+                channel=channel, master_id=optional_int(master_id), price_estimate=device["price_estimate"],
+                staff_id=staff["id"], photo=device["photo"],
             )
-            device_catalog.remember(conn, device["device_type"], device["brand"], device["model"])
-
-            photo_for_notify = None
-            if device["photo"]:
-                data, ext = device["photo"]
-                repair = core_repairs.get_repair(conn, order_id)
-                # run_in_threadpool: compress_photo (Pillow, CPU-bound) +
-                # disk write — doesn't touch `conn`, safe to run off the
-                # event loop without disturbing this transaction.
-                filename = await run_in_threadpool(_write_device_photo, repair["device_id"], data, ext)
-                core_repairs.set_device_photo(conn, repair["device_id"], filename)
-                photo_for_notify = (data, filename)
 
             # The card only goes out once its device is fully on record —
             # photo included, if there is one — never text-first with the
             # photo trickling in later via a separate trip to the card.
             # Posting it (and persisting the resulting message ids) happens
-            # as a background task, not here — see _notify_new_repair's
+            # as a background task, not here — see core_repairs.notify_and_save's
             # docstring: staff shouldn't wait on Telegram to see their own
             # intake confirmed.
-            repair = core_repairs.get_repair(conn, order_id)
-            keyboard = core_repairs.render_keyboard(order_id, repair["status"])
-            background_tasks.add_task(
-                _notify_new_repair, store.db_path, order_id,
-                core_repairs.render_card_text(repair), keyboard, photo_for_notify,
-                store.staff_group_chat_id, store.repair_topic_id, store.masters_group_chat_id,
-            )
+            background_tasks.add_task(core_repairs.notify_and_save, store, order_id, card_text, keyboard, photo_for_notify)
 
             last_order_id = order_id
 
@@ -357,12 +310,12 @@ async def repair_photo_view(
         device_id = repair["device_id"]
         old_photo_path = repair["device_photo_path"]
 
-    filename = await run_in_threadpool(_write_device_photo, device_id, data, ext)
+    filename = await run_in_threadpool(core_repairs.write_device_photo, device_id, data, ext)
 
     with get_conn() as conn:
         core_repairs.set_device_photo(conn, device_id, filename)
     if old_photo_path:
-        old_path = os.path.join(_PHOTO_DIR, old_photo_path)
+        old_path = os.path.join(core_repairs.PHOTO_DIR, old_photo_path)
         if os.path.exists(old_path):
             os.remove(old_path)
 

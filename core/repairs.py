@@ -2,9 +2,18 @@
 from __future__ import annotations
 
 import html
+import os
 import sqlite3
+import uuid
 
+from core import clients as _clients
+from core import device_catalog as _device_catalog
+from core import notify as _notify
+from core import photos as _photos
+from core.storage import get_conn as _get_conn
 from core.timefmt import kyiv_datetime
+
+PHOTO_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "webapp", "static", "device_photos")
 
 STATUS_LABELS = {
     "new": "Новый",
@@ -136,6 +145,92 @@ def assign_master(conn: sqlite3.Connection, order_id: int, master_id: int | None
 
 def set_device_photo(conn: sqlite3.Connection, device_id: int, photo_filename: str | None) -> None:
     conn.execute("UPDATE devices SET photo_path = ? WHERE id = ?", (photo_filename, device_id))
+
+
+def write_device_photo(device_id: int, data: bytes, ext: str) -> str:
+    """Compress (core.photos) and write a device photo to disk, returning
+    the filename to hand to set_device_photo. Shared by the web intake
+    form and the bot's quick-intake FSM (bot/quick_actions.py) — used to
+    be a private helper in webapp.routers.repairs, moved here so both
+    entry points write photos identically."""
+    compressed = _photos.compress_photo(data)
+    if compressed is not None:
+        data, ext = compressed, ".jpg"
+
+    os.makedirs(PHOTO_DIR, exist_ok=True)
+    filename = f"{device_id}_{uuid.uuid4().hex}{ext}"
+    with open(os.path.join(PHOTO_DIR, filename), "wb") as f:
+        f.write(data)
+    return filename
+
+
+def create_repair_intake(
+    conn: sqlite3.Connection,
+    *,
+    client_name: str,
+    client_phone: str,
+    device_type: str,
+    brand: str | None,
+    model: str | None,
+    serial_number: str | None,
+    defect_description: str | None,
+    channel: str,
+    master_id: int | None,
+    price_estimate: int | None,
+    staff_id: int,
+    photo: tuple[bytes, str] | None,
+) -> tuple[int, str, dict | None, tuple[bytes, str] | None]:
+    """One client (reused by phone, or created) + one repair order + its
+    device photo (if given) + catalog remember — the exact sequence
+    webapp.routers.repairs.create_view used to do inline, now shared with
+    the bot's quick-intake FSM so the two entry points can never drift on
+    required fields or on how a photo gets compressed/stored.
+
+    Returns (order_id, card_text, keyboard, photo_for_notify) — everything
+    a caller needs to post the Telegram card via notify_and_save, which is
+    deliberately a separate step (not done here): a bare DB-write
+    connection should never sit open across a Telegram HTTP call, and a
+    web request wants to defer/background that call while a bot handler
+    can just await it inline right after this returns."""
+    client_id = _clients.get_or_create_by_phone(conn, client_name, client_phone, source=channel)
+    order_id = create_repair(
+        conn, client_id, device_type, brand, model, serial_number,
+        defect_description, channel, master_id, price_estimate, staff_id,
+    )
+    _device_catalog.remember(conn, device_type, brand, model)
+
+    photo_for_notify = None
+    if photo:
+        data, ext = photo
+        repair = get_repair(conn, order_id)
+        filename = write_device_photo(repair["device_id"], data, ext)
+        set_device_photo(conn, repair["device_id"], filename)
+        photo_for_notify = (data, filename)
+
+    repair = get_repair(conn, order_id)
+    keyboard = render_keyboard(order_id, repair["status"])
+    card_text = render_card_text(repair)
+    return order_id, card_text, keyboard, photo_for_notify
+
+
+def notify_and_save(
+    store, order_id: int, card_text: str, keyboard: dict | None, photo: tuple[bytes, str] | None,
+) -> None:
+    """Posts the new-repair card to a store's groups (core.notify) and
+    persists the resulting message ids (save_order_messages — needed for
+    later status-change edits via sync_repair_cards). Opens its own
+    short-lived connection against store.db_path, same as the FastAPI
+    BackgroundTask this used to be inlined into (webapp.routers.repairs)
+    — safe to call from a bot handler the same way, right after
+    create_repair_intake."""
+    sent = _notify.notify_repair_card(
+        card_text, reply_markup=keyboard, photo=photo,
+        staff_group_chat_id=store.staff_group_chat_id, repair_topic_id=store.repair_topic_id,
+        masters_group_chat_id=store.masters_group_chat_id,
+    )
+    if sent:
+        with _get_conn(store.db_path) as conn:
+            save_order_messages(conn, order_id, sent)
 
 
 def claim_repair(conn: sqlite3.Connection, order_id: int, staff_id: int) -> bool:
