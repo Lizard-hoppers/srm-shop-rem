@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% import "_icons.html" as icons %}
+{% block title %}{{ t('buyback_detail_title') }} №{{ order.id }}{% endblock %}
+{% block content %}
+<a class="back-link" href="{{ link('/buyback') }}">{{ icons.icon('back', 16) }} {{ t('warehouse_nav_buyback_title') }}</a>
+
+{% if order.photo_path %}
+<img class="thumb-card-photo" style="width:100%; max-width:320px; margin-bottom:14px;" src="/static/buyback_photos/{{ order.photo_path }}" alt="{{ order.device_type }}">
+{% endif %}
+
+<p class="meta">
+  <span class="pill pill-{{ order.purpose }}">{{ t('buyback_purpose_' ~ order.purpose) }}</span>
+  · {{ order.created_at | kyiv }}
+</p>
+
+<h2>{{ order.device_type }} {{ order.brand or '' }} {{ order.model or '' }}</h2>
+{% if order.serial_number %}<p class="meta">{{ t('device_serial_label') }}: {{ order.serial_number }}</p>{% endif %}
+{% if order.condition_note %}<p class="meta">{{ t('buyback_condition_label') }}: {{ order.condition_note }}</p>{% endif %}
+
+<p class="meta">{{ t('buyback_seller_label') }}: {{ order.client_name }} · {{ order.client_phone }}</p>
+<p class="meta">{{ t('buyback_price_paid_label') }}: {{ order.purchase_price }} ₴</p>
+<p class="meta">{{ t('buyback_staff_label') }}: {{ order.staff_name or '—' }}</p>
+
+{% if order.product_id %}
+<p><a href="{{ link('/inventory/products/' ~ order.product_id) }}">📦 {{ t('buyback_product_link') }}</a></p>
+{% endif %}
+{% endblock %}

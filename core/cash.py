@@ -22,6 +22,7 @@ EXPENSE_CATEGORIES = {
     "rent": "Аренда",
     "salary": "Зарплата",
     "supplies": "Закупка",
+    "buyback": "Скупка техники",
     "other": "Прочее",
 }
 
@@ -45,14 +46,15 @@ def record_income(
 
 
 def record_expense(
-    conn: sqlite3.Connection, method: str, amount: int, category: str, comment: str | None, staff_id: int
+    conn: sqlite3.Connection, method: str, amount: int, category: str, comment: str | None, staff_id: int,
+    *, ref_type: str | None = None, ref_id: int | None = None,
 ) -> int:
     if amount <= 0:
         raise ValueError("сумма должна быть положительной")
     return conn.execute(
-        """INSERT INTO cash_transactions (kind, method, amount, category, comment, staff_id)
-           VALUES ('expense', ?, ?, ?, ?, ?)""",
-        (method, amount, category, comment, staff_id),
+        """INSERT INTO cash_transactions (kind, method, amount, category, ref_type, ref_id, comment, staff_id)
+           VALUES ('expense', ?, ?, ?, ?, ?, ?, ?)""",
+        (method, amount, category, ref_type, ref_id, comment, staff_id),
     ).lastrowid
 
 

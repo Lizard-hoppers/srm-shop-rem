@@ -310,6 +310,8 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .pill-cancelled { background: var(--error-bg); color: var(--error); }
 .pill-online { background: #182338; color: #7fa8f5; }
 .pill-offline { background: var(--panel-alt); color: var(--muted); }
+.pill-parts { background: var(--panel-alt); color: var(--muted); border: 1px solid var(--border); }
+.pill-resale { background: var(--success-bg); color: var(--success); }
 
 .timeline { list-style: none; margin: 0; padding: 0; }
 .timeline li { padding: 10px 0; border-bottom: 1px solid var(--border); font-size: 13px; }

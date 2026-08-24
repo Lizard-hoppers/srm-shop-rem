@@ -65,7 +65,7 @@ import httpx
 import jinja2
 from PIL import Image
 
-from core import auth, barcode_label, cash, clients, device_catalog, inventory, masters, purchases, qr, repairs, sales, store_access, store_prefs, store_settings, stores, timefmt
+from core import auth, barcode_label, buyback, cash, clients, device_catalog, inventory, masters, purchases, qr, repairs, sales, store_access, store_prefs, store_settings, stores, timefmt
 from core import session_token as _session_token
 from core import storage
 from core.session_token import make_token, read_token
@@ -2089,6 +2089,113 @@ def scenario_webapp_forms(db_path: str) -> None:
               "HTTP Тест Мастер Правка" in list_after_deactivate.text)
 
 
+def scenario_buyback_http(db_path: str) -> None:
+    """Скупка техники у клиентов (24.08) — real HTTP requests, same
+    TestClient/token shape as scenario_webapp_forms. purpose='parts' is
+    just a log entry + cash expense; purpose='resale' also auto-creates a
+    products row (qty=1) so the item is immediately sellable through the
+    ordinary Продажи/Инвентарь flow, unchanged — that's the actual
+    regression risk here, not the buyback_orders row itself."""
+    print("scenario: Скупка (buyback) over real HTTP requests")
+    if os.path.exists(db_path):
+        os.remove(db_path)
+    init_db(db_path)
+    with get_conn(db_path) as conn:
+        staff_id = auth.create_staff(conn, "buybacktest", "pass", "Скупка Тест", "owner")
+    token = make_token(staff_id)
+
+    import webapp.main  # noqa: F401 -- import after CRM_DB_PATH is set for this test
+
+    fake_jpeg = b"\xff\xd8\xff-fake-jpeg-bytes"
+
+    with TestClient(webapp.main.app) as client:
+        form_resp = client.get(f"/buyback?t={token}")
+        check("GET /buyback renders the intake form", 'id="buybackIntakeForm"' in form_resp.text)
+
+        hub_resp = client.get(f"/warehouse?t={token}")
+        check("Склад hub links to /buyback", '/buyback' in hub_resp.text)
+
+        missing_phone_resp = client.post(f"/buyback?t={token}", data={
+            "client_name": "Тест", "device_type": "Смартфон", "model": "X",
+            "purchase_price": "500", "payment_method": "cash", "purpose": "parts",
+        }, files={"photo": ("d.jpg", fake_jpeg, "image/jpeg")})
+        check("missing client_phone: friendly error, no raw 422",
+              missing_phone_resp.status_code != 422 and "Заполните имя и телефон" in missing_phone_resp.text)
+
+        no_photo_resp = client.post(f"/buyback?t={token}", data={
+            "client_name": "Тест", "client_phone": "+380501110001", "device_type": "Смартфон",
+            "model": "X", "purchase_price": "500", "payment_method": "cash", "purpose": "parts",
+        })
+        check("missing photo: friendly error, no repair created",
+              "Загрузите фото устройства" in no_photo_resp.text)
+
+        missing_resale_price_resp = client.post(f"/buyback?t={token}", data={
+            "client_name": "Без Цены", "client_phone": "+380501110002", "device_type": "Смартфон",
+            "model": "X", "purchase_price": "500", "payment_method": "cash", "purpose": "resale",
+        }, files={"photo": ("d.jpg", fake_jpeg, "image/jpeg")})
+        check("purpose=resale without resale_price: friendly error",
+              "Укажите цену продажи" in missing_resale_price_resp.text)
+
+        parts_resp = client.post(f"/buyback?t={token}", data={
+            "client_name": "Продавец Запчасти", "client_phone": "+380501110003", "device_type": "Смартфон",
+            "model": "iPhone X", "purchase_price": "1000", "payment_method": "cash", "purpose": "parts",
+        }, files={"photo": ("d.jpg", fake_jpeg, "image/jpeg")}, follow_redirects=False)
+        check("purpose=parts intake redirects (303)", parts_resp.status_code == 303)
+        parts_order_id = int(parts_resp.headers["location"].split("/buyback/")[1].split("?")[0])
+
+        with get_conn(db_path) as conn:
+            parts_order = buyback.get_buyback_order(conn, parts_order_id)
+            check("parts order has no linked product", parts_order["product_id"] is None)
+            cash_row = conn.execute(
+                "SELECT * FROM cash_transactions WHERE ref_type='buyback_order' AND ref_id=?", (parts_order_id,)
+            ).fetchone()
+            check("parts intake recorded a cash expense for the exact amount paid",
+                  cash_row is not None and cash_row["kind"] == "expense" and cash_row["amount"] == 1000
+                  and cash_row["category"] == "buyback")
+
+        resale_resp = client.post(f"/buyback?t={token}", data={
+            "client_name": "Продавец Резейл", "client_phone": "+380501110004", "device_type": "Смартфон",
+            "brand": "Apple", "model": "iPhone 12", "purchase_price": "3000", "payment_method": "card",
+            "purpose": "resale", "resale_price": "5000",
+        }, files={"photo": ("d.jpg", fake_jpeg, "image/jpeg")}, follow_redirects=False)
+        check("purpose=resale intake redirects (303)", resale_resp.status_code == 303)
+        resale_order_id = int(resale_resp.headers["location"].split("/buyback/")[1].split("?")[0])
+
+        with get_conn(db_path) as conn:
+            resale_order = buyback.get_buyback_order(conn, resale_order_id)
+            check("resale order got a linked product", bool(resale_order["product_id"]))
+            product = inventory.get_product(conn, resale_order["product_id"])
+            check("the auto-created product carries the resale price", product["price"] == 5000)
+            check("the auto-created product's photo is the buyback photo", bool(product["photo_path"]))
+            check("the auto-created product name mentions «Б/У»", "Б/У" in product["name"])
+            check("the auto-created product is sellable", product["is_sellable"] == 1)
+            total_qty = inventory.product_total_qty(conn, resale_order["product_id"])
+            check("the auto-created product has exactly qty=1 in stock", total_qty == 1)
+
+        product_page_resp = client.get(f"/inventory/products/{resale_order['product_id']}?t={token}")
+        check("the auto-created product's own card renders normally (real Склад flow, untouched)",
+              product_page_resp.status_code == 200 and "iPhone 12" in product_page_resp.text)
+
+        detail_resp = client.get(f"/buyback/{resale_order_id}?t={token}")
+        check("buyback detail page renders and links to the product",
+              detail_resp.status_code == 200 and f"/inventory/products/{resale_order['product_id']}" in detail_resp.text)
+
+        filtered_resp = client.get(f"/buyback?t={token}&purpose=resale")
+        check("purpose filter shows the resale order but not the parts one",
+              "Продавец Резейл" in filtered_resp.text and "Продавец Запчасти" not in filtered_resp.text)
+
+    # Photos land on real disk (webapp/static/buyback_photos) regardless of
+    # which sqlite file db_path points at — same reason
+    # scenario_webapp_forms cleans up intake_photo_file for repairs.
+    for filename in (parts_order["photo_path"], resale_order["photo_path"]):
+        path = os.path.join(buyback.PHOTO_DIR, filename)
+        if os.path.exists(path):
+            os.remove(path)
+
+    if os.path.exists(db_path):
+        os.remove(db_path)
+
+
 def scenario_multi_store_http() -> None:
     """Фаза A end-to-end regression guard: two different store_id tokens
     hitting the SAME running FastAPI process must read/write two completely
@@ -2447,6 +2554,7 @@ def main() -> None:
     scenario_store_access()
     scenario_miniapp_boot_template()
     scenario_webapp_forms(_WEBAPP_TEST_DB)
+    scenario_buyback_http(_WEBAPP_TEST_DB)
     scenario_multi_store_http()
     scenario_multi_store_login_and_switch_http()
     scenario_store_settings_http()

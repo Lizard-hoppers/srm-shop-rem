@@ -10,7 +10,7 @@ from core.storage import init_db
 from core.store_prefs import init_db as init_store_prefs_db
 from core.stores import load_stores
 from webapp.deps import resolve_store_for_request
-from webapp.routers import cash, clients, dashboard, hubs, inventory, masters, miniapp, print_agent, purchases, reports, repairs, sales, settings, store
+from webapp.routers import buyback, cash, clients, dashboard, hubs, inventory, masters, miniapp, print_agent, purchases, reports, repairs, sales, settings, store
 
 if not os.environ.get("CRM_SECRET_KEY"):
     raise RuntimeError("CRM_SECRET_KEY env var is required (auth token signing key)")
@@ -32,6 +32,7 @@ app.include_router(settings.router)
 app.include_router(cash.router)
 app.include_router(masters.router)
 app.include_router(store.router)
+app.include_router(buyback.router)
 
 
 @app.middleware("http")

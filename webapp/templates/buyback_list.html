@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% import "_icons.html" as icons %}
+{% block title %}{{ t('warehouse_nav_buyback_title') }}{% endblock %}
+{% block content %}
+<div class="repairs-layout">
+<div>
+<h2>{{ t('buyback_intake_title') }}</h2>
+
+<form method="post" action="{{ link('/buyback') }}" class="edit-form" enctype="multipart/form-data" id="buybackIntakeForm">
+  <label>{{ t('client_name_label') }}<span class="required-mark">*</span><input type="text" name="client_name" required></label>
+  <label>{{ t('client_phone_label') }}<span class="required-mark">*</span><input type="text" name="client_phone" value="+380" required></label>
+
+  <label>{{ t('device_type_label') }}<span class="required-mark">*</span>
+    <input type="text" name="device_type" placeholder="{{ t('device_type_placeholder') }}" required>
+  </label>
+  <label>{{ t('device_brand_label') }}<input type="text" name="brand" placeholder="{{ t('device_brand_placeholder') }}"></label>
+  <label>{{ t('device_model_label') }}<span class="required-mark">*</span><input type="text" name="model" required></label>
+  <label>{{ t('device_serial_label') }}<input type="text" name="serial_number"></label>
+  <label>{{ t('buyback_condition_label') }}<textarea name="condition_note" placeholder="{{ t('buyback_condition_placeholder') }}"></textarea></label>
+  <label>{{ t('device_photo_label') }}<span class="required-mark">*</span><input type="file" name="photo" accept="image/jpeg,image/png,image/webp" capture="environment" required></label>
+
+  <label>{{ t('buyback_price_label') }}<span class="required-mark">*</span><input type="number" name="purchase_price" required></label>
+  <label>{{ t('payment_method_label') }}
+    <select name="payment_method">
+      {% for key, name in payment_methods.items() %}<option value="{{ key }}">{{ name }}</option>{% endfor %}
+    </select>
+  </label>
+
+  <label>{{ t('buyback_purpose_label') }}<span class="required-mark">*</span>
+    <select name="purpose" id="buybackPurpose">
+      {% for key in purposes %}<option value="{{ key }}">{{ t('buyback_purpose_' ~ key) }}</option>{% endfor %}
+    </select>
+  </label>
+  <label id="buybackResalePriceRow" style="display:none;">
+    {{ t('buyback_resale_price_label') }}<span class="required-mark">*</span>
+    <input type="number" name="resale_price">
+    <span class="meta">{{ t('buyback_resale_price_hint') }}</span>
+  </label>
+
+  <button type="submit">{{ t('buyback_submit_btn') }}</button>
+</form>
+</div>
+
+<div>
+<h2>{{ t('warehouse_nav_buyback_title') }}</h2>
+<div class="section-btns">
+  <a href="{{ link('/buyback') }}"><button type="button" class="secondary" {% if not purpose %}style="border-color: var(--accent); color: var(--accent-2);"{% endif %}>{{ t('filter_all') }}</button></a>
+  {% for key in purposes %}
+  <a href="{{ link('/buyback?purpose=' ~ key) }}"><button type="button" class="secondary" {% if purpose == key %}style="border-color: var(--accent); color: var(--accent-2);"{% endif %}>{{ t('buyback_purpose_' ~ key) }}</button></a>
+  {% endfor %}
+</div>
+
+<div class="cards">
+  {% for o in orders %}
+  <a class="card thumb-card" href="{{ link('/buyback/' ~ o.id) }}">
+    {% if o.photo_path %}
+    <img class="thumb-card-photo" src="/static/buyback_photos/{{ o.photo_path }}" alt="{{ o.device_type }}">
+    {% else %}
+    <div class="thumb-card-photo-placeholder">{{ icons.icon('box', 26) }}</div>
+    {% endif %}
+    <div class="thumb-card-name">{{ o.client_name }}</div>
+    <div class="thumb-card-meta">{{ o.device_type }} {{ o.brand or '' }} {{ o.model or '' }}</div>
+    <div class="thumb-card-meta">
+      <span class="pill pill-{{ o.purpose }}">{{ t('buyback_purpose_' ~ o.purpose) }}</span>
+      <span class="meta">{{ o.purchase_price }} ₴</span>
+    </div>
+    <div class="thumb-card-meta">{{ o.created_at | kyiv }}</div>
+  </a>
+  {% else %}
+  <p class="meta">{{ t('buyback_empty') }}</p>
+  {% endfor %}
+</div>
+</div>
+</div>
+
+<script>
+(function () {
+  var purposeSelect = document.getElementById("buybackPurpose");
+  var resaleRow = document.getElementById("buybackResalePriceRow");
+  var resaleInput = resaleRow.querySelector("input");
+
+  function sync() {
+    var isResale = purposeSelect.value === "resale";
+    resaleRow.style.display = isResale ? "flex" : "none";
+    resaleInput.required = isResale;
+  }
+  purposeSelect.addEventListener("change", sync);
+  sync();
+})();
+</script>
+{% endblock %}

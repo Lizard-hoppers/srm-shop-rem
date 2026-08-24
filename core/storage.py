@@ -282,6 +282,29 @@ CREATE TABLE IF NOT EXISTS store_settings (
     working_hours TEXT,
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Скупка техники у клиентов (24.08) — purpose='parts' is just a log
+-- entry (staff disassembles by hand, adds resulting parts via the
+-- ordinary Приход flow); purpose='resale' also gets a matching row in
+-- products (qty=1, see core.buyback.create_buyback_intake) so the item
+-- sells through the existing Продажи pipeline unchanged — product_id
+-- stays NULL for purpose='parts'.
+CREATE TABLE IF NOT EXISTS buyback_orders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_id INTEGER NOT NULL REFERENCES clients(id),
+    device_type TEXT NOT NULL,
+    brand TEXT,
+    model TEXT,
+    serial_number TEXT,
+    condition_note TEXT,
+    photo_path TEXT,
+    purchase_price INTEGER NOT NULL,
+    purpose TEXT NOT NULL CHECK(purpose IN ('parts','resale')),
+    product_id INTEGER REFERENCES products(id),
+    staff_id INTEGER REFERENCES staff(id),
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_buyback_orders_client ON buyback_orders(client_id);
 """
 
 

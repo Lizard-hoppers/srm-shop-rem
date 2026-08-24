@@ -42,6 +42,14 @@
     </div>
     <div class="chevron">{{ icons.icon('chevron', 18) }}</div>
   </a>
+  <a class="card nav-card" href="{{ link('/buyback') }}">
+    <div class="card-icon">{{ icons.icon('cash', 18) }}</div>
+    <div class="nav-card-body">
+      <div class="nav-card-title">{{ t('warehouse_nav_buyback_title') }}</div>
+      <div class="nav-card-sub">{{ t('warehouse_nav_buyback_sub') }}</div>
+    </div>
+    <div class="chevron">{{ icons.icon('chevron', 18) }}</div>
+  </a>
   <a class="card nav-card" href="{{ link('/inventory/movements') }}">
     <div class="card-icon">{{ icons.icon('repeat', 18) }}</div>
     <div class="nav-card-body">
