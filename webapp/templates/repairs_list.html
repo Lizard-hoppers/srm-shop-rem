@@ -9,8 +9,8 @@
 <datalist id="deviceBrandList">{% for b in device_brands %}<option value="{{ b }}">{% endfor %}</datalist>
 
 <form method="post" action="{{ link('/repairs') }}" class="edit-form" enctype="multipart/form-data" id="repairIntakeForm">
-  <label>{{ t('client_name_label') }}<input type="text" name="client_name" required></label>
-  <label>{{ t('client_phone_label') }}<input type="text" name="client_phone" value="+380" required></label>
+  <label>{{ t('client_name_label') }}<span class="required-mark">*</span><input type="text" name="client_name" required></label>
+  <label>{{ t('client_phone_label') }}<span class="required-mark">*</span><input type="text" name="client_phone" value="+380" required></label>
   <label>{{ t('channel_label') }}
     <select name="channel">
       <option value="offline">{{ t('channel_offline_full') }}</option>
@@ -28,14 +28,14 @@
   <div id="deviceRows">
     {% for i in device_rows %}
     <div class="repair-device-row" style="display:flex; flex-direction:column; gap:12px; padding-top:12px; border-top: 1px solid var(--border);">
-      <label>{{ t('device_type_label') }}
+      <label>{{ t('device_type_label') }}<span class="required-mark">*</span>
         <input type="text" name="device_type_{{ i }}" class="device-type-input" list="deviceTypeList" placeholder="{{ t('device_type_placeholder') }}" required>
       </label>
       <label>{{ t('device_brand_label') }}
         <input type="text" name="brand_{{ i }}" class="device-brand-input" list="deviceBrandList" placeholder="{{ t('device_brand_placeholder') }}">
       </label>
-      <label>{{ t('device_model_label') }}
-        <input type="text" name="model_{{ i }}" class="device-model-input" list="deviceModelList_{{ i }}" placeholder="{{ t('device_model_placeholder') }}">
+      <label>{{ t('device_model_label') }}<span class="required-mark">*</span>
+        <input type="text" name="model_{{ i }}" class="device-model-input" list="deviceModelList_{{ i }}" placeholder="{{ t('device_model_placeholder') }}" required>
         <datalist id="deviceModelList_{{ i }}"></datalist>
       </label>
       <label>{{ t('device_serial_label') }}
@@ -45,8 +45,8 @@
         </div>
       </label>
       <div class="device-scan-status meta" style="display:none;"></div>
-      <label>{{ t('defect_description_label') }}<textarea name="defect_description_{{ i }}"></textarea></label>
-      <label>{{ t('device_photo_label') }}<input type="file" name="photo_{{ i }}" accept="image/jpeg,image/png,image/webp" capture="environment"></label>
+      <label>{{ t('defect_description_label') }}<span class="required-mark">*</span><textarea name="defect_description_{{ i }}" required></textarea></label>
+      <label>{{ t('device_photo_label') }}<span class="required-mark">*</span><input type="file" name="photo_{{ i }}" accept="image/jpeg,image/png,image/webp" capture="environment" required></label>
       <label>{{ t('price_estimate_label') }}<input type="number" name="price_estimate_{{ i }}"></label>
     </div>
     {% endfor %}
@@ -91,14 +91,14 @@
 
 <template id="deviceRowTemplate">
   <div class="repair-device-row" style="display:flex; flex-direction:column; gap:12px; padding-top:12px; border-top: 1px solid var(--border);">
-    <label>{{ t('device_type_label') }}
-      <input type="text" name="device_type___IDX__" class="device-type-input" list="deviceTypeList" placeholder="{{ t('device_type_placeholder') }}">
+    <label>{{ t('device_type_label') }}<span class="required-mark">*</span>
+      <input type="text" name="device_type___IDX__" class="device-type-input" list="deviceTypeList" placeholder="{{ t('device_type_placeholder') }}" required>
     </label>
     <label>{{ t('device_brand_label') }}
       <input type="text" name="brand___IDX__" class="device-brand-input" list="deviceBrandList" placeholder="{{ t('device_brand_placeholder') }}">
     </label>
-    <label>{{ t('device_model_label') }}
-      <input type="text" name="model___IDX__" class="device-model-input" list="deviceModelList___IDX__" placeholder="{{ t('device_model_placeholder') }}">
+    <label>{{ t('device_model_label') }}<span class="required-mark">*</span>
+      <input type="text" name="model___IDX__" class="device-model-input" list="deviceModelList___IDX__" placeholder="{{ t('device_model_placeholder') }}" required>
       <datalist id="deviceModelList___IDX__"></datalist>
     </label>
     <label>{{ t('device_serial_label') }}
@@ -108,8 +108,8 @@
       </div>
     </label>
     <div class="device-scan-status meta" style="display:none;"></div>
-    <label>{{ t('defect_description_label') }}<textarea name="defect_description___IDX__"></textarea></label>
-    <label>{{ t('device_photo_label') }}<input type="file" name="photo___IDX__" accept="image/jpeg,image/png,image/webp" capture="environment"></label>
+    <label>{{ t('defect_description_label') }}<span class="required-mark">*</span><textarea name="defect_description___IDX__" required></textarea></label>
+    <label>{{ t('device_photo_label') }}<span class="required-mark">*</span><input type="file" name="photo___IDX__" accept="image/jpeg,image/png,image/webp" capture="environment" required></label>
     <label>{{ t('price_estimate_label') }}<input type="number" name="price_estimate___IDX__"></label>
   </div>
 </template>

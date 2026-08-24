@@ -68,8 +68,9 @@ def _notify_new_repair(
 
 
 async def _validate_intake_photo(upload) -> tuple[bytes, str] | None:
-    """None if this device row's file input was left empty — perfectly
-    normal, a photo at intake is optional. Raises ValueError with a
+    """None if this device row's file input was left empty — create_view
+    itself turns that into a "photo required" error for touched rows, so
+    an empty file input isn't rejected here. Raises ValueError with a
     user-facing message on a real but invalid upload (wrong type, too
     big) so create_view can reject the whole submission before creating
     anything, rather than silently dropping just that one photo."""
@@ -180,12 +181,36 @@ async def create_view(
                 error=f"Укажите тип устройства для каждого добавленного устройства (устройство {i + 1}).", **ctx,
             )
 
+        if not model:
+            with get_conn() as conn:
+                ctx = _list_context(conn, None)
+            return render(
+                request, "repairs_list.html", staff=staff,
+                error=f"Укажите модель устройства для каждого добавленного устройства (устройство {i + 1}).", **ctx,
+            )
+
+        if not defect_description:
+            with get_conn() as conn:
+                ctx = _list_context(conn, None)
+            return render(
+                request, "repairs_list.html", staff=staff,
+                error=f"Опишите неисправность для каждого добавленного устройства (устройство {i + 1}).", **ctx,
+            )
+
         try:
             photo = await _validate_intake_photo(form.get(f"photo_{i}"))
         except ValueError as exc:
             with get_conn() as conn:
                 ctx = _list_context(conn, None)
             return render(request, "repairs_list.html", staff=staff, error=str(exc), **ctx)
+
+        if not photo:
+            with get_conn() as conn:
+                ctx = _list_context(conn, None)
+            return render(
+                request, "repairs_list.html", staff=staff,
+                error=f"Загрузите фото устройства для каждого добавленного устройства (устройство {i + 1}).", **ctx,
+            )
 
         devices.append({
             "device_type": device_type, "brand": brand or None, "model": model or None,

@@ -1287,8 +1287,9 @@ def scenario_webapp_forms(db_path: str) -> None:
         # master_id/price_estimate submitted empty (exactly what an unset <select>/<input> sends).
         resp = client.post(f"/repairs?t={token}", data={
             "client_name": "Реальный Клиент", "client_phone": "+380501234567",
-            "device_type_0": "Ноутбук", "channel": "offline", "master_id": "", "price_estimate_0": "",
-        })
+            "device_type_0": "Ноутбук", "model_0": "ThinkPad X1", "defect_description_0": "Не включается",
+            "channel": "offline", "master_id": "", "price_estimate_0": "",
+        }, files={"photo_0": ("device.jpg", b"\xff\xd8\xff-fake-jpeg-bytes", "image/jpeg")})
         check("empty master_id/price_estimate: repair created (303)", resp.status_code == 303 or (resp.history and resp.history[0].status_code == 303))
 
         # Multi-device intake: one client, two devices in the same visit
@@ -1296,8 +1297,11 @@ def scenario_webapp_forms(db_path: str) -> None:
         multi_resp = client.post(f"/repairs?t={token}", data={
             "client_name": "Два Устройства", "client_phone": "+380501234599", "channel": "offline",
             "device_count": "2",
-            "device_type_0": "Смартфон", "brand_0": "Apple", "model_0": "iPhone 11",
-            "device_type_1": "Ноутбук", "brand_1": "Dell", "model_1": "XPS 13",
+            "device_type_0": "Смартфон", "brand_0": "Apple", "model_0": "iPhone 11", "defect_description_0": "Треснул экран",
+            "device_type_1": "Ноутбук", "brand_1": "Dell", "model_1": "XPS 13", "defect_description_1": "Не держит батарея",
+        }, files={
+            "photo_0": ("device0.jpg", b"\xff\xd8\xff-fake-jpeg-bytes", "image/jpeg"),
+            "photo_1": ("device1.jpg", b"\xff\xd8\xff-fake-jpeg-bytes", "image/jpeg"),
         })
         check("multi-device intake redirects to a repair (303)",
               multi_resp.status_code == 303 or (multi_resp.history and multi_resp.history[0].status_code == 303))
@@ -1317,6 +1321,30 @@ def scenario_webapp_forms(db_path: str) -> None:
         })
         check("a device row with no device_type is rejected with a friendly error",
               "Укажите тип устройства" in incomplete_row_resp.text)
+
+        # Regression guard: model, defect description and a device photo
+        # are now required on intake, not just device_type.
+        no_model_resp = client.post(f"/repairs?t={token}", data={
+            "client_name": "Без Модели", "client_phone": "+380501234511", "channel": "offline",
+            "device_count": "1", "device_type_0": "Смартфон", "defect_description_0": "Не включается",
+        }, files={"photo_0": ("device.jpg", b"\xff\xd8\xff-fake-jpeg-bytes", "image/jpeg")})
+        check("a device row with no model is rejected with a friendly error",
+              "Укажите модель устройства" in no_model_resp.text)
+
+        no_defect_resp = client.post(f"/repairs?t={token}", data={
+            "client_name": "Без Описания", "client_phone": "+380501234522", "channel": "offline",
+            "device_count": "1", "device_type_0": "Смартфон", "model_0": "Galaxy S21",
+        }, files={"photo_0": ("device.jpg", b"\xff\xd8\xff-fake-jpeg-bytes", "image/jpeg")})
+        check("a device row with no defect description is rejected with a friendly error",
+              "Опишите неисправность" in no_defect_resp.text)
+
+        no_photo_resp = client.post(f"/repairs?t={token}", data={
+            "client_name": "Без Фото", "client_phone": "+380501234533", "channel": "offline",
+            "device_count": "1", "device_type_0": "Смартфон", "model_0": "Galaxy S21",
+            "defect_description_0": "Не включается",
+        })
+        check("a device row with no photo is rejected with a friendly error",
+              "Загрузите фото устройства" in no_photo_resp.text)
 
         # Submitting with every device row left blank is rejected too,
         # not a silent no-op.
@@ -1633,8 +1661,8 @@ def scenario_webapp_forms(db_path: str) -> None:
         catalog_resp = client.post(f"/repairs?t={token}", data={
             "client_name": "Каталог Тест", "client_phone": "+380990002233",
             "device_type_0": "Экзотика", "brand_0": "НовыйБренд", "model_0": "СуперМодель X",
-            "channel": "offline",
-        })
+            "defect_description_0": "Не заряжается", "channel": "offline",
+        }, files={"photo_0": ("device.jpg", b"\xff\xd8\xff-fake-jpeg-bytes", "image/jpeg")})
         with get_conn(db_path) as conn:
             learned = device_catalog.list_all(conn)
         check("a brand-new device typed on intake is remembered in the catalog",
@@ -1647,7 +1675,8 @@ def scenario_webapp_forms(db_path: str) -> None:
         # be on record from the moment the repair (and its card) exists.
         intake_photo_resp = client.post(f"/repairs?t={token}", data={
             "client_name": "С Фото На Приёме", "client_phone": "+380990002244",
-            "device_count": "1", "device_type_0": "Смартфон", "channel": "offline",
+            "device_count": "1", "device_type_0": "Смартфон", "model_0": "Galaxy S21",
+            "defect_description_0": "Не включается", "channel": "offline",
         }, files={"photo_0": ("device.jpg", b"\xff\xd8\xff-fake-jpeg-bytes", "image/jpeg")})
         intake_photo_order_id = int(str(intake_photo_resp.url).split("/repairs/")[1].split("?")[0])
         with get_conn(db_path) as conn:
@@ -1661,7 +1690,8 @@ def scenario_webapp_forms(db_path: str) -> None:
 
         bad_intake_photo_resp = client.post(f"/repairs?t={token}", data={
             "client_name": "Плохое Фото", "client_phone": "+380990002255",
-            "device_count": "1", "device_type_0": "Смартфон", "channel": "offline",
+            "device_count": "1", "device_type_0": "Смартфон", "model_0": "Galaxy S21",
+            "defect_description_0": "Не включается", "channel": "offline",
         }, files={"photo_0": ("note.txt", b"not an image", "text/plain")})
         check("an invalid photo on the intake form is rejected with a friendly error, no repair created",
               "Фото устройства должно быть" in bad_intake_photo_resp.text)

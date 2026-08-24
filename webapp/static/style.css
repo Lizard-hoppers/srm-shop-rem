@@ -194,6 +194,7 @@ form.inline-form { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
 form.search-bar { display: flex; gap: 8px; margin-bottom: 16px; align-items: center; }
 form.edit-form { display: flex; flex-direction: column; gap: 12px; margin-top: 8px; }
 form.edit-form label { display: flex; flex-direction: column; gap: 5px; font-size: 12.5px; color: var(--muted); font-weight: 600; }
+.required-mark { color: var(--error); margin-left: 2px; }
 .checkbox-row { display: flex; flex-direction: row; flex-wrap: wrap; gap: 10px; }
 form.edit-form label.checkbox-label {
   /* display:block on purpose, not flex — a flex-display <label> that
