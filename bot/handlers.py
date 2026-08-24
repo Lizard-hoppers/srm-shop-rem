@@ -11,10 +11,8 @@ from aiogram.types import (
     Message,
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
-    WebAppInfo,
 )
 
-from bot.config import MINIAPP_URL
 from bot.quick_actions import QUICK_ACTIONS_KEYBOARD
 from core import auth as core_auth
 from core import clients as core_clients
@@ -25,15 +23,14 @@ from core.stores import store_for_chat_id
 
 router = Router()
 
-STAFF_WELCOME = "Здравствуйте! Нажмите кнопку ниже, чтобы открыть CRM сервис-центра."
-
 # Shown only to someone not yet in any store's staff list AND not already a
 # registered client — the ID line is for a future staff member who needs to
 # send it to the owner for core.link_telegram. Once linked, every future
-# /start matches is_staff=True (STAFF_WELCOME above, no ID line) — this
-# message never repeats for them again. Was on STAFF_WELCOME itself before
-# (backwards — already-approved staff saw "если доступ ещё не открыт" on
-# every single /start; Павел flagged it 24.08).
+# /start matches is_staff=True (straight to QUICK_ACTIONS_KEYBOARD below,
+# no ID line) — this message never repeats for them again. Was on the old
+# staff-welcome message itself before (backwards — already-approved staff
+# saw "если доступ ещё не открыт" on every single /start; Павел flagged it
+# 24.08).
 CLIENT_ASK_PHONE = (
     "Здравствуйте! Это бот сервис-центра.\n\n"
     "Поделитесь номером телефона, чтобы получить карту скидок — при следующем визите "
@@ -62,14 +59,10 @@ async def start(message: Message) -> None:
             client = core_clients.get_by_telegram_id(conn, message.from_user.id)
 
     if is_staff:
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text="Открыть CRM", web_app=WebAppInfo(url=MINIAPP_URL))]]
-        )
-        await message.answer(STAFF_WELCOME, reply_markup=keyboard)
-        # A reply keyboard can't ride along on the same message as the
-        # inline one above (Telegram allows only one reply_markup kind per
-        # message) — a short second message sets the persistent quick-
-        # action buttons (bot/quick_actions.py) at the bottom of the chat.
+        # No separate "Открыть CRM" message/button — the chat's menu
+        # button (bottom-left, set in bot/bot.py) already opens the Mini
+        # App directly, so a staff member always has that regardless of
+        # /start. Straight to the quick-action buttons.
         await message.answer("Быстрые действия:", reply_markup=QUICK_ACTIONS_KEYBOARD)
         return
 
