@@ -82,7 +82,7 @@ BTN_CANCEL = "❌ Отмена"
 # what other messages/edits happen, so there's no need to re-attach it.
 QUICK_ACTIONS_KEYBOARD = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text=BTN_REPAIR, style="danger"), KeyboardButton(text=BTN_CONTACT, style="primary")],
+        [KeyboardButton(text=BTN_REPAIR), KeyboardButton(text=BTN_CONTACT, style="primary")],
         [KeyboardButton(text=BTN_BUYBACK, style="success"), KeyboardButton(text=BTN_PURCHASE)],
         [KeyboardButton(text=BTN_CANCEL, style="danger")],
     ],
