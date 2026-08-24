@@ -5,7 +5,13 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import MenuButtonWebApp, WebAppInfo
+from aiogram.types import (
+    BotCommand,
+    BotCommandScopeAllGroupChats,
+    BotCommandScopeAllPrivateChats,
+    MenuButtonWebApp,
+    WebAppInfo,
+)
 
 from bot.config import BOT_TOKEN, MINIAPP_URL
 from bot.handlers import router
@@ -41,6 +47,20 @@ async def main() -> None:
     await bot.delete_webhook(drop_pending_updates=True)
     await bot.set_chat_menu_button(
         menu_button=MenuButtonWebApp(text="CRM", web_app=WebAppInfo(url=MINIAPP_URL))
+    )
+    # The chat menu button above (WebApp) is a separate thing from the "/"
+    # suggestion popup — that one is driven purely by set_my_commands and
+    # was never set here, so typing "/" showed nothing at all. /start goes
+    # to private chats (that's the only place it does anything — see
+    # bot/handlers.py's start()); /chatid to groups (its actual use case:
+    # onboarding a new store's staff/masters group, see its own docstring).
+    await bot.set_my_commands(
+        [BotCommand(command="start", description="Открыть меню CRM")],
+        scope=BotCommandScopeAllPrivateChats(),
+    )
+    await bot.set_my_commands(
+        [BotCommand(command="chatid", description="Узнать chat_id этой группы")],
+        scope=BotCommandScopeAllGroupChats(),
     )
     await dp.start_polling(bot)
 
