@@ -25,16 +25,21 @@ from core.stores import store_for_chat_id
 
 router = Router()
 
-STAFF_WELCOME = (
-    "Здравствуйте! Нажмите кнопку ниже, чтобы открыть CRM сервис-центра.\n\n"
-    "Ваш Telegram ID: <code>{user_id}</code>\n"
-    "Если доступ ещё не открыт — пришлите этот ID владельцу."
-)
+STAFF_WELCOME = "Здравствуйте! Нажмите кнопку ниже, чтобы открыть CRM сервис-центра."
 
+# Shown only to someone not yet in any store's staff list AND not already a
+# registered client — the ID line is for a future staff member who needs to
+# send it to the owner for core.link_telegram. Once linked, every future
+# /start matches is_staff=True (STAFF_WELCOME above, no ID line) — this
+# message never repeats for them again. Was on STAFF_WELCOME itself before
+# (backwards — already-approved staff saw "если доступ ещё не открыт" on
+# every single /start; Павел flagged it 24.08).
 CLIENT_ASK_PHONE = (
     "Здравствуйте! Это бот сервис-центра.\n\n"
     "Поделитесь номером телефона, чтобы получить карту скидок — при следующем визите "
-    "мы найдём вас по QR-коду за секунду."
+    "мы найдём вас по QR-коду за секунду.\n\n"
+    "Ваш Telegram ID: <code>{user_id}</code>\n"
+    "Если вы сотрудник и доступ к CRM ещё не открыт — пришлите этот ID владельцу."
 )
 
 CLIENT_WELCOME_BACK = "С возвращением! Вот ваша карта скидок — покажите её в сервисе."
@@ -60,7 +65,7 @@ async def start(message: Message) -> None:
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[[InlineKeyboardButton(text="Открыть CRM", web_app=WebAppInfo(url=MINIAPP_URL))]]
         )
-        await message.answer(STAFF_WELCOME.format(user_id=message.from_user.id), reply_markup=keyboard)
+        await message.answer(STAFF_WELCOME, reply_markup=keyboard)
         # A reply keyboard can't ride along on the same message as the
         # inline one above (Telegram allows only one reply_markup kind per
         # message) — a short second message sets the persistent quick-
@@ -77,7 +82,7 @@ async def start(message: Message) -> None:
         resize_keyboard=True,
         one_time_keyboard=True,
     )
-    await message.answer(CLIENT_ASK_PHONE, reply_markup=keyboard)
+    await message.answer(CLIENT_ASK_PHONE.format(user_id=message.from_user.id), reply_markup=keyboard)
 
 
 @router.message(Command("chatid"))
