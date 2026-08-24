@@ -127,7 +127,12 @@ def _resolve_staff_for_dm(telegram_id: int) -> tuple[StoreConfig, object] | None
     return store, staff
 
 
-# --- Clean Chat helpers: one tracked message per flow, edited in place ---
+# --- Clean Chat helpers: one tracked bot message per flow, edited in
+# place, PLUS every incoming reply (name, phone, ...) tracked so it can
+# be wiped too. Telegram's Bot API explicitly allows a bot to delete
+# INCOMING messages in a private chat, not just its own outgoing ones —
+# so a cancelled (or completed) flow really can leave nothing behind,
+# not just the bot's side of it. ---
 
 async def _safe_edit(bot, chat_id: int, message_id: int, text: str, reply_markup=None) -> None:
     try:
@@ -136,25 +141,45 @@ async def _safe_edit(bot, chat_id: int, message_id: int, text: str, reply_markup
         pass  # already edited/deleted (e.g. a duplicate/late update) — never worth crashing the handler over
 
 
-async def _safe_delete(bot, chat_id: int, message_id: int) -> None:
+async def _safe_delete_many(bot, chat_id: int, message_ids: list[int]) -> None:
+    if not message_ids:
+        return
     try:
-        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+        await bot.delete_messages(chat_id=chat_id, message_ids=message_ids)
     except TelegramBadRequest:
-        pass  # already gone, or too old — bots can only delete their OWN
-              # messages in a DM anyway (Bot API limit, not our choice),
-              # so this only ever touches the tracked flow message itself
+        # One bad id (already gone, too old, ...) fails the WHOLE batch —
+        # fall back to one-by-one so the other, perfectly deletable
+        # messages don't get stranded over it.
+        for mid in message_ids:
+            try:
+                await bot.delete_message(chat_id=chat_id, message_id=mid)
+            except TelegramBadRequest:
+                pass
+
+
+async def _track(state: FSMContext, message: Message) -> None:
+    """Remember this incoming message's id (the staff member's own reply,
+    or their tap on an entry button) so a later cleanup can delete it
+    alongside the bot's own tracked message."""
+    data = await state.get_data()
+    ids = data.get("user_message_ids", [])
+    ids.append(message.message_id)
+    await state.update_data(user_message_ids=ids)
 
 
 async def _send_prompt(message: Message, state: FSMContext, text: str) -> None:
-    """Start (or restart) a flow's one tracked message — every later step
-    edits THIS message (see _advance/_nudge) instead of sending a new
-    one."""
+    """Start (or restart) a flow's one tracked bot message — every later
+    step edits THIS message (see _advance/_nudge) instead of sending a
+    new one. Also tracks `message` itself (the tap on the entry button),
+    so cleanup can reach it too."""
+    await _track(state, message)
     sent = await message.answer(text)
     await state.update_data(prompt_message_id=sent.message_id, prompt_text=text)
 
 
 async def _advance(message: Message, state: FSMContext, text: str, reply_markup: InlineKeyboardMarkup | None = None) -> None:
     """Move the flow forward: edit the tracked message into the next step."""
+    await _track(state, message)
     data = await state.get_data()
     await _safe_edit(message.bot, message.chat.id, data["prompt_message_id"], text, reply_markup)
     await state.update_data(prompt_text=text)
@@ -164,6 +189,7 @@ async def _nudge(message: Message, state: FSMContext, hint: str) -> None:
     """Invalid input mid-flow: show the hint above the still-current
     question (not instead of it — a fresh message.answer would both lose
     the question and pile up, exactly what this whole pattern avoids)."""
+    await _track(state, message)
     data = await state.get_data()
     await _safe_edit(message.bot, message.chat.id, data["prompt_message_id"], f"⚠️ {hint}\n\n{data.get('prompt_text', '')}")
 
@@ -241,18 +267,20 @@ async def purchase_start(message: Message, state: FSMContext) -> None:
 
 @router.message(F.text == BTN_CANCEL, StateFilter(RepairIntake, QuickContact, BuybackIntake))
 async def cancel_flow(message: Message, state: FSMContext) -> None:
-    """Deletes the flow's own tracked message entirely rather than
-    editing it to "Отменено." — Павел asked for nothing left behind from
-    the moment a flow started. The one thing this can't reach is the
-    staff member's OWN typed replies (name, phone, ...) still sitting in
-    the chat — Bot API only lets a bot delete messages it sent itself in
-    a DM, not the other side's; that's a Telegram-wide limit, not a
-    choice made here."""
+    """Deletes EVERYTHING from this flow attempt — the bot's own tracked
+    message, every reply the staff member typed along the way (name,
+    phone, ...), the tap on the entry button (🔧 Ремонт etc.), and this
+    very "❌ Отмена" tap itself. Telegram's Bot API explicitly allows a
+    bot to delete incoming messages in a private chat, not just its own,
+    so nothing has to survive a cancel."""
     data = await state.get_data()
+    ids = list(data.get("user_message_ids", []))
+    ids.append(message.message_id)
     prompt_message_id = data.get("prompt_message_id")
-    await state.clear()
     if prompt_message_id:
-        await _safe_delete(message.bot, message.chat.id, prompt_message_id)
+        ids.append(prompt_message_id)
+    await state.clear()
+    await _safe_delete_many(message.bot, message.chat.id, ids)
 
 
 # --- Ремонт: step by step ---
@@ -372,7 +400,11 @@ async def repair_confirm(callback: CallbackQuery, state: FSMContext) -> None:
     # would freeze the whole bot (every user's messages) for that long.
     await asyncio.to_thread(core_repairs.notify_and_save, store, order_id, card_text, keyboard, photo_for_notify)
 
+    user_message_ids = data.get("user_message_ids", [])
     await state.clear()
+    # Clean Chat: wipe the whole Q&A trail (name/phone/... replies), leave
+    # only the final confirmation card as this flow's one lasting trace.
+    await _safe_delete_many(callback.bot, callback.message.chat.id, user_message_ids)
     open_keyboard = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(
             text="Открыть в CRM", web_app=WebAppInfo(url=f"{MINIAPP_URL.rstrip('/')}/repairs/{order_id}"),
@@ -556,7 +588,9 @@ async def buyback_confirm(callback: CallbackQuery, state: FSMContext) -> None:
             staff_id=staff["id"], photo=(data["photo_bytes"], ".jpg"),
         )
 
+    user_message_ids = data.get("user_message_ids", [])
     await state.clear()
+    await _safe_delete_many(callback.bot, callback.message.chat.id, user_message_ids)
     open_keyboard = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(
             text="Открыть в CRM", web_app=WebAppInfo(url=f"{MINIAPP_URL.rstrip('/')}/buyback/{order_id}"),
@@ -615,15 +649,24 @@ async def contact_confirm(callback: CallbackQuery, state: FSMContext) -> None:
             return
         client_id = core_clients.get_or_create_by_phone(conn, data["name"], data["phone"], source="offline")
 
+    user_message_ids = data.get("user_message_ids", [])
     await state.clear()
+    await _safe_delete_many(callback.bot, callback.message.chat.id, user_message_ids)
     await callback.message.edit_text(f"✅ Клиент добавлен (№{client_id}).")
     await callback.answer("Готово")
 
 
 @router.callback_query(F.data.in_({"quick_repair_cancel", "quick_contact_cancel", "quick_buyback_cancel"}))
 async def quick_cancel_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    """Inline ❌ Отмена on the confirm card — same full cleanup as
+    cancel_flow, minus the entry-tap-of-cancel (a button tap doesn't
+    create a chat message the way a reply-keyboard tap does, so there's
+    nothing extra to add here beyond what was already tracked)."""
+    data = await state.get_data()
+    ids = list(data.get("user_message_ids", []))
+    ids.append(callback.message.message_id)
     await state.clear()
-    await _safe_delete(callback.bot, callback.message.chat.id, callback.message.message_id)
+    await _safe_delete_many(callback.bot, callback.message.chat.id, ids)
     await callback.answer("Отменено")
 
 
