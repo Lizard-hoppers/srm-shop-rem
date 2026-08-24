@@ -283,6 +283,14 @@ async def cancel_flow(message: Message, state: FSMContext) -> None:
     await _safe_delete_many(message.bot, message.chat.id, ids)
 
 
+@router.message(F.text == BTN_CANCEL, F.chat.type == "private")
+async def cancel_noop(message: Message) -> None:
+    """❌ Отмена tapped with nothing active — cancel_flow above (state-
+    gated) doesn't match, so this would otherwise sit in the chat
+    un-acted-on forever. Nothing to clean up but the tap itself."""
+    await _safe_delete_many(message.bot, message.chat.id, [message.message_id])
+
+
 # --- Ремонт: step by step ---
 
 @router.message(RepairIntake.name, F.text)
