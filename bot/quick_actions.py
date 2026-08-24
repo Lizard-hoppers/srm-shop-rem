@@ -50,11 +50,21 @@ BTN_CONTACT = "👤 Контакт"
 BTN_BUYBACK = "💰 Скупка"
 BTN_CANCEL = "❌ Отмена"
 
+# One single keyboard, always — Отмена lives on it permanently instead of
+# swapping to a separate cancel-only keyboard mid-flow. Telegram was
+# collapsing/hiding the custom keyboard between messages without
+# is_persistent=True (Bot API 7.0+, "always show the keyboard when the
+# regular keyboard is hidden") — Павел reported the buttons kept
+# disappearing; swapping between two different keyboards made it worse
+# (every swap is a fresh chance for a client to auto-collapse it).
 QUICK_ACTIONS_KEYBOARD = ReplyKeyboardMarkup(
-    keyboard=[[KeyboardButton(text=BTN_REPAIR), KeyboardButton(text=BTN_CONTACT)], [KeyboardButton(text=BTN_BUYBACK)]],
+    keyboard=[
+        [KeyboardButton(text=BTN_REPAIR), KeyboardButton(text=BTN_CONTACT)],
+        [KeyboardButton(text=BTN_BUYBACK), KeyboardButton(text=BTN_CANCEL)],
+    ],
     resize_keyboard=True,
+    is_persistent=True,
 )
-_CANCEL_KEYBOARD = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text=BTN_CANCEL)]], resize_keyboard=True)
 
 
 class RepairIntake(StatesGroup):
@@ -117,7 +127,7 @@ async def repair_start(message: Message, state: FSMContext) -> None:
     await state.set_state(RepairIntake.name)
     await state.update_data(store_id=store.id)
     await message.answer(
-        "🔧 Быстрый приём ремонта.\n\nИмя клиента:", reply_markup=_CANCEL_KEYBOARD,
+        "🔧 Быстрый приём ремонта.\n\nИмя клиента:", reply_markup=QUICK_ACTIONS_KEYBOARD,
     )
 
 
@@ -132,7 +142,7 @@ async def contact_start(message: Message, state: FSMContext) -> None:
     await state.set_state(QuickContact.name)
     await state.update_data(store_id=store.id)
     await message.answer(
-        "👤 Быстрое добавление клиента.\n\nИмя клиента:", reply_markup=_CANCEL_KEYBOARD,
+        "👤 Быстрое добавление клиента.\n\nИмя клиента:", reply_markup=QUICK_ACTIONS_KEYBOARD,
     )
 
 
@@ -150,7 +160,7 @@ async def buyback_start(message: Message, state: FSMContext) -> None:
     await state.set_state(BuybackIntake.name)
     await state.update_data(store_id=store.id)
     await message.answer(
-        "💰 Быстрая скупка техники.\n\nИмя клиента (продавца):", reply_markup=_CANCEL_KEYBOARD,
+        "💰 Быстрая скупка техники.\n\nИмя клиента (продавца):", reply_markup=QUICK_ACTIONS_KEYBOARD,
     )
 
 
