@@ -44,10 +44,13 @@ router = Router()
 _REPAIR_ROLES = ("owner", "admin", "master")
 # Mirrors webapp.routers.buyback._BUYBACK_ROLES.
 _BUYBACK_ROLES = ("owner", "admin", "storekeeper")
+# Mirrors bot.purchase_photo._DRAFT_ROLES.
+_PURCHASE_ROLES = ("owner", "admin", "storekeeper")
 
 BTN_REPAIR = "🔧 Ремонт"
 BTN_CONTACT = "👤 Контакт"
 BTN_BUYBACK = "💰 Скупка"
+BTN_PURCHASE = "📦 Приход"
 BTN_CANCEL = "❌ Отмена"
 
 # One single keyboard, always — Отмена lives on it permanently instead of
@@ -60,7 +63,8 @@ BTN_CANCEL = "❌ Отмена"
 QUICK_ACTIONS_KEYBOARD = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text=BTN_REPAIR), KeyboardButton(text=BTN_CONTACT)],
-        [KeyboardButton(text=BTN_BUYBACK), KeyboardButton(text=BTN_CANCEL)],
+        [KeyboardButton(text=BTN_BUYBACK), KeyboardButton(text=BTN_PURCHASE)],
+        [KeyboardButton(text=BTN_CANCEL)],
     ],
     resize_keyboard=True,
     is_persistent=True,
@@ -162,6 +166,28 @@ async def buyback_start(message: Message, state: FSMContext) -> None:
     await message.answer(
         "💰 Быстрая скупка техники.\n\nИмя клиента (продавца):", reply_markup=QUICK_ACTIONS_KEYBOARD,
     )
+
+
+@router.message(F.text == BTN_PURCHASE, F.chat.type == "private")
+async def purchase_start(message: Message, state: FSMContext) -> None:
+    """No FSM state of its own — just a discoverable prompt for an
+    already-working, photo-triggered flow (bot/purchase_photo.py's
+    photo_invoice handler already fires on any DM photo from receiving
+    staff, OCRs it via OpenAI vision, and offers a draft to confirm).
+    state.clear() matters here: without it, a photo sent right after this
+    while some OTHER flow's own .photo state was still active (forgot to
+    cancel) would get grabbed by that flow's photo handler instead of
+    ever reaching purchase_photo.py."""
+    resolved = _resolve_staff_for_dm(message.from_user.id)
+    if not resolved:
+        return
+    _store, staff = resolved
+    if staff["role"] not in _PURCHASE_ROLES:
+        await message.answer("Недостаточно прав для приёма накладной.")
+        return
+
+    await state.clear()
+    await message.answer("📦 Пришлите фото накладной — распознаю позиции и предложу оприходовать.")
 
 
 @router.message(F.text == BTN_CANCEL, StateFilter(RepairIntake, QuickContact, BuybackIntake))
