@@ -81,30 +81,37 @@ async def scan_product_label_view(photo: UploadFile = File(...), staff=Depends(r
     core.vision_ocr.extract_product_label). Read-only: never writes to
     the DB.
 
-    Barcode decode is tried locally first (core.barcode_scan, zbar —
-    milliseconds, no network): if the label carries a scannable Code128
-    (a re-print of one of our own labels, e.g. re-labeling restocked
-    parts), this returns the SKU near-instantly with no name — the
-    common fast path. OpenAI vision (core.vision_ocr) only runs when
-    zbar finds nothing, which is the real case for a brand-new part's
-    original manufacturer packaging (no barcode symbol, or one that
-    doesn't decode) where a name still needs OCR/reading off the label."""
+    Unlike /warehouse/scan-photo (find-by-SKU, name irrelevant there),
+    this button's whole point on a brand-new product is filling the
+    NAME too — that only OpenAI vision can read off the label, so
+    vision always runs here, unlike the Склад scanner's zbar-or-vision
+    shortcut. zbar (core.barcode_scan, milliseconds, no network) still
+    runs alongside it and, when it decodes a symbol, WINS over vision's
+    own sku guess — reading the barcode's actual encoded digits is
+    exact, where an LLM reading digits off a photo of a barcode can
+    misread similar-looking ones. If vision itself fails (no API key,
+    OpenAI outage) but zbar already got a sku, that's still returned
+    instead of erroring out — a photo of one of our own printed labels
+    (sku readable, no name to read anyway) then degrades gracefully."""
     photo_bytes = await photo.read(_MAX_PHOTO_BYTES + 1)
     if len(photo_bytes) > _MAX_PHOTO_BYTES:
         return JSONResponse({"ok": False, "error": "Фото слишком большое (максимум 15 МБ)."}, status_code=413)
 
-    sku = await run_in_threadpool(barcode_scan.decode_barcode, photo_bytes)
-    if sku:
-        return JSONResponse({"ok": True, "name": None, "sku": sku})
+    barcode_sku = await run_in_threadpool(barcode_scan.decode_barcode, photo_bytes)
 
+    name = None
+    sku = barcode_sku
     try:
         # See webapp/routers/repairs.py::scan_device_view for why this
         # needs run_in_threadpool — same blocking-httpx-in-async-route issue.
         result = await run_in_threadpool(vision_ocr.extract_product_label, photo_bytes)
+        name = result["name"]
+        sku = barcode_sku or result["sku"]
     except vision_ocr.VisionOcrError as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
+        if not barcode_sku:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
 
-    return JSONResponse({"ok": True, "name": result["name"], "sku": result["sku"]})
+    return JSONResponse({"ok": True, "name": name, "sku": sku})
 
 
 def _product_detail_context(conn, product_id: int) -> dict | None:
