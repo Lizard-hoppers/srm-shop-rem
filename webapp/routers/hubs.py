@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, File, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, RedirectResponse
 
+from core import barcode_scan
 from core import clients as core_clients
 from core import inventory as core_inventory
 from core import qr as core_qr
@@ -52,28 +53,38 @@ def warehouse_find(request: Request, code: str = "", staff=Depends(require_staff
 @router.post("/warehouse/scan-photo")
 async def warehouse_scan_photo(photo: UploadFile = File(...), staff=Depends(require_staff)):
     """Photo-based alternative to a live camera feed (19.08) — snapping a
-    single photo of a barcode and reading it via OpenAI vision
-    (core.vision_ocr.extract_product_label, same function the SKU
-    scan-fill button uses) turned out much more reliable in practice than
-    a live getUserMedia+ZXing video stream, which was crashing/hanging
-    Telegram Desktop's sandboxed WebKitGTK renderer. Returns a SKU for
-    the client to hand to /warehouse/find, same as any other scan
-    source — no redirect here, this endpoint never touches the DB."""
+    single photo of a barcode and reading it turned out much more
+    reliable in practice than a live getUserMedia+ZXing video stream,
+    which was crashing/hanging Telegram Desktop's sandboxed WebKitGTK
+    renderer. Returns a SKU for the client to hand to /warehouse/find,
+    same as any other scan source — no redirect here, this endpoint
+    never touches the DB.
+
+    Barcode decode is tried locally first (core.barcode_scan, zbar —
+    milliseconds, no network) since every SKU scanned here is our own
+    printed Code128 label (core.barcode_label); OpenAI vision
+    (core.vision_ocr) only runs as a fallback when zbar can't read the
+    symbol at all (blurry, glare, bad angle) — this is what made
+    scanning feel slow before, now it's the rare path instead of every
+    scan."""
     photo_bytes = await photo.read(_MAX_PHOTO_BYTES + 1)
     if len(photo_bytes) > _MAX_PHOTO_BYTES:
         return JSONResponse({"ok": False, "error": "Фото слишком большое (максимум 15 МБ)."}, status_code=413)
 
-    try:
-        # See webapp/routers/repairs.py::scan_device_view for why this
-        # needs run_in_threadpool — same blocking-httpx-in-async-route issue.
-        result = await run_in_threadpool(vision_ocr.extract_product_label, photo_bytes)
-    except vision_ocr.VisionOcrError as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
+    sku = await run_in_threadpool(barcode_scan.decode_barcode, photo_bytes)
+    if not sku:
+        try:
+            # See webapp/routers/repairs.py::scan_device_view for why this
+            # needs run_in_threadpool — same blocking-httpx-in-async-route issue.
+            result = await run_in_threadpool(vision_ocr.extract_product_label, photo_bytes)
+        except vision_ocr.VisionOcrError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
+        sku = result["sku"]
 
-    if not result["sku"]:
+    if not sku:
         return JSONResponse({"ok": False, "error": "Не распознал штрихкод на фото — попробуйте чётче и ближе."})
 
-    return JSONResponse({"ok": True, "sku": result["sku"]})
+    return JSONResponse({"ok": True, "sku": sku})
 
 
 @router.get("/more")

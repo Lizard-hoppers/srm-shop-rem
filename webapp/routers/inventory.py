@@ -8,6 +8,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 
 from core import barcode_label
+from core import barcode_scan
 from core import inventory as core_inventory
 from core import photos as core_photos
 from core import print_queue
@@ -74,14 +75,27 @@ def products_create(
 @router.post("/products/scan-label")
 async def scan_product_label_view(photo: UploadFile = File(...), staff=Depends(require_role(*_STOCK_WRITE_ROLES))):
     """Scan-to-fill button next to the SKU field (create form and product
-    card edit form): photo of a barcode/label -> OpenAI vision -> {name,
-    sku} to fill in client-side. No product_id — used before a product
-    exists too. Deliberately never returns a price (see
+    card edit form): photo of a barcode/label -> {name, sku} to fill in
+    client-side. No product_id — used before a product exists too.
+    Deliberately never returns a price (see
     core.vision_ocr.extract_product_label). Read-only: never writes to
-    the DB."""
+    the DB.
+
+    Barcode decode is tried locally first (core.barcode_scan, zbar —
+    milliseconds, no network): if the label carries a scannable Code128
+    (a re-print of one of our own labels, e.g. re-labeling restocked
+    parts), this returns the SKU near-instantly with no name — the
+    common fast path. OpenAI vision (core.vision_ocr) only runs when
+    zbar finds nothing, which is the real case for a brand-new part's
+    original manufacturer packaging (no barcode symbol, or one that
+    doesn't decode) where a name still needs OCR/reading off the label."""
     photo_bytes = await photo.read(_MAX_PHOTO_BYTES + 1)
     if len(photo_bytes) > _MAX_PHOTO_BYTES:
         return JSONResponse({"ok": False, "error": "Фото слишком большое (максимум 15 МБ)."}, status_code=413)
+
+    sku = await run_in_threadpool(barcode_scan.decode_barcode, photo_bytes)
+    if sku:
+        return JSONResponse({"ok": True, "name": None, "sku": sku})
 
     try:
         # See webapp/routers/repairs.py::scan_device_view for why this

@@ -1600,6 +1600,18 @@ def scenario_webapp_forms(db_path: str) -> None:
         check("POST /warehouse/scan-photo without an API key returns a structured error, not a 500",
               scan_photo_resp.status_code == 502 and scan_photo_resp.json()["ok"] is False)
 
+        # Fast local decode (zbar, core.barcode_scan): a real barcode —
+        # one of our own printed labels — decodes without ever touching
+        # OpenAI, so this must succeed even with no API key configured.
+        real_barcode_png = barcode_label.generate_label_png(sku="4600000000012", name="Тестовая Деталь", price=100)
+        real_scan_resp = client.post(
+            f"/warehouse/scan-photo?t={token}",
+            files={"photo": ("barcode.png", real_barcode_png, "image/png")},
+        )
+        check("a real barcode photo decodes instantly via zbar, no OpenAI key needed",
+              real_scan_resp.status_code == 200
+              and real_scan_resp.json() == {"ok": True, "sku": "4600000000012"})
+
         oversized_scan_photo_resp = client.post(
             f"/warehouse/scan-photo?t={token}",
             files={"photo": ("huge.jpg", b"x" * (16 * 1024 * 1024), "image/jpeg")},
@@ -1835,6 +1847,14 @@ def scenario_webapp_forms(db_path: str) -> None:
         )
         check("POST /inventory/products/scan-label without an API key returns a structured error, not a 500",
               label_scan_resp.status_code == 502 and label_scan_resp.json()["ok"] is False)
+
+        real_label_scan_resp = client.post(
+            f"/inventory/products/scan-label?t={token}",
+            files={"photo": ("label.png", barcode_label.generate_label_png(sku="4600000000029", name="Тест", price=50), "image/png")},
+        )
+        check("a real barcode photo on the SKU scanner decodes instantly via zbar (sku only, no name)",
+              real_label_scan_resp.status_code == 200
+              and real_label_scan_resp.json() == {"ok": True, "name": None, "sku": "4600000000029"})
 
         oversized_label_resp = client.post(
             f"/inventory/products/scan-label?t={token}",
