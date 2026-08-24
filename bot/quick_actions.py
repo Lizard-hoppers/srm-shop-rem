@@ -56,11 +56,16 @@ _BUYBACK_ROLES = ("owner", "admin", "storekeeper")
 # Mirrors bot.purchase_photo._DRAFT_ROLES.
 _PURCHASE_ROLES = ("owner", "admin", "storekeeper")
 
-BTN_REPAIR = "🔧 Ремонт"
-BTN_CONTACT = "👤 Контакт"
-BTN_BUYBACK = "💰 Скупка"
+# Telegram's Bot API has no color field on KeyboardButton/
+# InlineKeyboardButton at all — a reply-keyboard button can't be given a
+# custom background color, full stop. A leading colored-circle emoji is
+# the closest real substitute (Павел asked for Ремонт/Отмена red,
+# Контакт blue, Скупка green, Приход left plain).
+BTN_REPAIR = "🔴 Ремонт"
+BTN_CONTACT = "🔵 Контакт"
+BTN_BUYBACK = "🟢 Скупка"
 BTN_PURCHASE = "📦 Приход"
-BTN_CANCEL = "❌ Отмена"
+BTN_CANCEL = "🔴 Отмена"
 
 # One single keyboard, always — Отмена lives on it permanently instead of
 # swapping to a separate cancel-only keyboard mid-flow. Telegram was
@@ -269,8 +274,8 @@ async def purchase_start(message: Message, state: FSMContext) -> None:
 async def cancel_flow(message: Message, state: FSMContext) -> None:
     """Deletes EVERYTHING from this flow attempt — the bot's own tracked
     message, every reply the staff member typed along the way (name,
-    phone, ...), the tap on the entry button (🔧 Ремонт etc.), and this
-    very "❌ Отмена" tap itself. Telegram's Bot API explicitly allows a
+    phone, ...), the tap on the entry button (🔴 Ремонт etc.), and this
+    very "🔴 Отмена" tap itself. Telegram's Bot API explicitly allows a
     bot to delete incoming messages in a private chat, not just its own,
     so nothing has to survive a cancel."""
     data = await state.get_data()
@@ -285,7 +290,7 @@ async def cancel_flow(message: Message, state: FSMContext) -> None:
 
 @router.message(F.text == BTN_CANCEL, F.chat.type == "private")
 async def cancel_noop(message: Message) -> None:
-    """❌ Отмена tapped with nothing active — cancel_flow above (state-
+    """🔴 Отмена tapped with nothing active — cancel_flow above (state-
     gated) doesn't match, so this would otherwise sit in the chat
     un-acted-on forever. Nothing to clean up but the tap itself."""
     await _safe_delete_many(message.bot, message.chat.id, [message.message_id])
