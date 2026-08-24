@@ -136,6 +136,15 @@ async def _safe_edit(bot, chat_id: int, message_id: int, text: str, reply_markup
         pass  # already edited/deleted (e.g. a duplicate/late update) — never worth crashing the handler over
 
 
+async def _safe_delete(bot, chat_id: int, message_id: int) -> None:
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except TelegramBadRequest:
+        pass  # already gone, or too old — bots can only delete their OWN
+              # messages in a DM anyway (Bot API limit, not our choice),
+              # so this only ever touches the tracked flow message itself
+
+
 async def _send_prompt(message: Message, state: FSMContext, text: str) -> None:
     """Start (or restart) a flow's one tracked message — every later step
     edits THIS message (see _advance/_nudge) instead of sending a new
@@ -232,11 +241,18 @@ async def purchase_start(message: Message, state: FSMContext) -> None:
 
 @router.message(F.text == BTN_CANCEL, StateFilter(RepairIntake, QuickContact, BuybackIntake))
 async def cancel_flow(message: Message, state: FSMContext) -> None:
+    """Deletes the flow's own tracked message entirely rather than
+    editing it to "Отменено." — Павел asked for nothing left behind from
+    the moment a flow started. The one thing this can't reach is the
+    staff member's OWN typed replies (name, phone, ...) still sitting in
+    the chat — Bot API only lets a bot delete messages it sent itself in
+    a DM, not the other side's; that's a Telegram-wide limit, not a
+    choice made here."""
     data = await state.get_data()
     prompt_message_id = data.get("prompt_message_id")
     await state.clear()
     if prompt_message_id:
-        await _safe_edit(message.bot, message.chat.id, prompt_message_id, "Отменено.")
+        await _safe_delete(message.bot, message.chat.id, prompt_message_id)
 
 
 # --- Ремонт: step by step ---
@@ -607,8 +623,8 @@ async def contact_confirm(callback: CallbackQuery, state: FSMContext) -> None:
 @router.callback_query(F.data.in_({"quick_repair_cancel", "quick_contact_cancel", "quick_buyback_cancel"}))
 async def quick_cancel_callback(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
-    await callback.message.edit_text("❌ Отменено.")
-    await callback.answer()
+    await _safe_delete(callback.bot, callback.message.chat.id, callback.message.message_id)
+    await callback.answer("Отменено")
 
 
 # --- catch-all: anything unexpected mid-flow (wrong content type, a stray
