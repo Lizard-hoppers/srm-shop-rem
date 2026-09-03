@@ -9,19 +9,19 @@ core.repairs.create_repair_intake, так что поведение не мож�
 запишется, следующий /start или повторный тап на кнопку начнёт всё
 заново без остатков).
 
-Clean Chat (манифест §2): каждый диалог — ОДНО сообщение бота, которое
-редактируется на каждом шаге (_send_prompt/_advance/_nudge ниже), а не
-плодит новое сообщение на каждый вопрос. Telegram не даёт боту удалять
-чужие (пользовательские) сообщения в личке — это ограничение самого Bot
-API, не наше решение, так что ответы сотрудника (имя, телефон и т.д.)
-по-прежнему остаются в чате; редактируется только собственная сторона
-бота."""
+Clean Chat (манифест §2): в чате в любой момент ровно ОДИН экран — одно
+сообщение бота, всегда последнее, а ответы сотрудника (имя, телефон и
+т.д.) удаляются сразу после того, как прочитаны. Введённое не теряется:
+каждый экран показывает шапку с уже заполненными полями (_flow_screen
+ниже). Подробнее про то, почему шаг переотправляется, а не
+редактируется — в комментарии к блоку хелперов."""
 from __future__ import annotations
 
 import asyncio
+import html
 
 from aiogram import F, Router
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -69,6 +69,11 @@ BTN_CONTACT = "👤 Контакт"
 BTN_BUYBACK = "💰 Скупка"
 BTN_PURCHASE = "📦 Приход"
 BTN_CANCEL = "❌ Отмена"
+
+# Один словарь на оба места, где способ оплаты показывается сотруднику
+# (шапка экрана и карточка подтверждения) — раньше метки были продублированы
+# инлайновым тернарником в карточке.
+_PAYMENT_LABELS = {"cash": "Наличные", "card": "Карта/перевод"}
 
 # One single keyboard, always — Отмена lives on it permanently instead of
 # swapping to a separate cancel-only keyboard mid-flow. Telegram was
@@ -135,12 +140,115 @@ def _resolve_staff_for_dm(telegram_id: int) -> tuple[StoreConfig, object] | None
     return store, staff
 
 
-# --- Clean Chat helpers: one tracked bot message per flow, edited in
-# place, PLUS every incoming reply (name, phone, ...) tracked so it can
-# be wiped too. Telegram's Bot API explicitly allows a bot to delete
-# INCOMING messages in a private chat, not just its own outgoing ones —
-# so a cancelled (or completed) flow really can leave nothing behind,
-# not just the bot's side of it. ---
+# --- Clean Chat helpers (манифест §2). Инвариант: у диалога ровно ОДНО
+# сообщение бота, оно всегда ПОСЛЕДНЕЕ в чате, а ответы сотрудника
+# удаляются сразу, как только прочитаны.
+#
+# Раньше это же сообщение редактировалось на месте — и это неверно для
+# чата: правка оставляет сообщение там, где оно уже висит, поэтому сразу
+# после ответа сотрудника следующий вопрос оказывается ВЫШЕ его ответа —
+# за экраном, без уведомления и без бейджа непрочитанного. Павел
+# сообщил об этом 03.09: «отвечаю, а бот ничего не присылает».
+#
+# Отсюда правило: шаг, вызванный СООБЩЕНИЕМ, переотправляется (послать
+# новое → удалить старое); шаг, вызванный НАЖАТИЕМ КНОПКИ, по-прежнему
+# редактируется на месте — нажатие ничего не добавляет в чат, значит
+# сообщение бота и так последнее (переотправка дала бы только мигание).
+#
+# Удалять чужие сообщения бот вправе: Bot API прямо разрешает удаление
+# ВХОДЯЩИХ сообщений в личном чате, не только собственных исходящих —
+# на этом и держится «удалить ответ, как только он прочитан». ---
+
+_SEPARATOR = "──────────────"
+
+
+def _steps_repair(_data: dict) -> list[str]:
+    return ["name", "phone", "device_type", "model", "defect", "photo"]
+
+
+def _steps_contact(_data: dict) -> list[str]:
+    return ["name", "phone"]
+
+
+def _steps_buyback(data: dict) -> list[str]:
+    steps = ["name", "phone", "device_type", "model", "price",
+             "payment_method", "purpose", "resale_price", "photo"]
+    if data.get("purpose") == "parts":
+        # «На запчасти» пропускает вопрос о цене продажи — не считаем шаг,
+        # которого уже точно не будет.
+        steps.remove("resale_price")
+    return steps
+
+
+# HTML везде ниже: бот поднят с parse_mode=HTML (bot/bot.py), а имя клиента
+# и описание неисправности сотрудник вводит руками. Без экранирования имя
+# вида «Вася <дома>» валит editMessageText/sendMessage на разборе HTML —
+# и раньше это тихо съедалось _safe_edit, то есть диалог просто замирал
+# без единого следа в логах (манифест §7).
+
+def _client_line(label: str, data: dict) -> str | None:
+    name = data.get("client_name")
+    if not name:
+        return None
+    phone = data.get("client_phone")
+    return f"{label}: {html.escape(name)}" + (f" · {html.escape(phone)}" if phone else "")
+
+
+def _device_line(data: dict) -> str | None:
+    device = " ".join(x for x in (data.get("device_type"), data.get("model")) if x)
+    return f"Устройство: {html.escape(device)}" if device else None
+
+
+def _summary_repair(data: dict) -> list[str]:
+    lines = [_client_line("Клиент", data), _device_line(data)]
+    if data.get("defect_description"):
+        lines.append(f"Неисправность: {html.escape(data['defect_description'])}")
+    return [line for line in lines if line]
+
+
+def _summary_buyback(data: dict) -> list[str]:
+    lines = [_client_line("Продавец", data), _device_line(data)]
+    if data.get("purchase_price"):
+        method = _PAYMENT_LABELS.get(data.get("payment_method"))
+        lines.append(f"Платим клиенту: {data['purchase_price']} грн" + (f" ({method})" if method else ""))
+    if data.get("purpose"):
+        lines.append(f"Назначение: {core_buyback.PURPOSES[data['purpose']]}")
+    if data.get("resale_price"):
+        lines.append(f"Цена продажи: {data['resale_price']} грн")
+    return [line for line in lines if line]
+
+
+def _summary_contact(data: dict) -> list[str]:
+    return [f"Имя: {html.escape(data['name'])}"] if data.get("name") else []
+
+
+# Ключ — имя StatesGroup ровно так, как aiogram отдаёт его в
+# state.get_state() ("RepairIntake:model").
+_FLOWS = {
+    "RepairIntake": ("🔧 Приём ремонта", _steps_repair, _summary_repair),
+    "BuybackIntake": ("💰 Скупка техники", _steps_buyback, _summary_buyback),
+    "QuickContact": ("👤 Новый клиент", _steps_contact, _summary_contact),
+}
+
+
+def _flow_screen(state_name: str | None, data: dict, question: str) -> str:
+    """Экран шага: шапка («шаг 3 из 6»), всё уже введённое, и текущий
+    вопрос. Блок «уже введённое» важнее, чем кажется: ответы сотрудника
+    удаляются по мере прочтения, так что до карточки подтверждения это
+    единственное место, где введённое вообще видно."""
+    group, _, step_name = (state_name or "").partition(":")
+    spec = _FLOWS.get(group)
+    if not spec:
+        return question
+    title, steps_of, summary_of = spec
+    steps = steps_of(data)
+    if step_name not in steps:
+        # Карточки подтверждения (RepairIntake.confirm и т.д.) приносят
+        # свой полный текст со всей сводкой — шапку добавлять некуда.
+        return question
+    header = f"{title} · шаг {steps.index(step_name) + 1} из {len(steps)}"
+    return "\n".join([header, *summary_of(data), _SEPARATOR, question])
+
 
 async def _safe_edit(bot, chat_id: int, message_id: int, text: str, reply_markup=None) -> None:
     try:
@@ -166,40 +274,96 @@ async def _safe_delete_many(bot, chat_id: int, message_ids: list[int]) -> None:
 
 
 async def _track(state: FSMContext, message: Message) -> None:
-    """Remember this incoming message's id (the staff member's own reply,
-    or their tap on an entry button) so a later cleanup can delete it
-    alongside the bot's own tracked message."""
+    """Запасной путь: id входящего сообщения, которое НЕ удалось удалить
+    сразу (см. _consume), чтобы подмести его на выходе из диалога."""
     data = await state.get_data()
     ids = data.get("user_message_ids", [])
     ids.append(message.message_id)
     await state.update_data(user_message_ids=ids)
 
 
-async def _send_prompt(message: Message, state: FSMContext, text: str) -> None:
-    """Start (or restart) a flow's one tracked bot message — every later
-    step edits THIS message (see _advance/_nudge) instead of sending a
-    new one. Also tracks `message` itself (the tap on the entry button),
-    so cleanup can reach it too."""
-    await _track(state, message)
-    sent = await message.answer(text)
-    await state.update_data(prompt_message_id=sent.message_id, prompt_text=text)
+async def _consume(state: FSMContext, message: Message) -> None:
+    """Удалить собственное сообщение сотрудника сразу, как только оно
+    прочитано — тап по кнопке входа, ответ на вопрос, присланное фото."""
+    try:
+        await message.bot.delete_message(chat_id=message.chat.id, message_id=message.message_id)
+    except TelegramAPIError:
+        # Намеренно шире, чем TelegramBadRequest у _safe_edit: неудачная
+        # уборка не должна стоить сотруднику шага диалога. Что бы ни
+        # случилось — запоминаем id и подметём в конце.
+        await _track(state, message)
 
 
-async def _advance(message: Message, state: FSMContext, text: str, reply_markup: InlineKeyboardMarkup | None = None) -> None:
-    """Move the flow forward: edit the tracked message into the next step."""
-    await _track(state, message)
+async def _repost(message: Message, state: FSMContext, text: str, reply_markup=None, remember: str | None = None) -> None:
+    """Отправить экран диалога НОВЫМ сообщением вниз чата и удалить
+    предыдущее. Именно в таком порядке: чат ни на мгновение не остаётся
+    без экрана, а неудачная отправка не уносит с собой тот вопрос, на
+    который сотрудник прямо сейчас смотрит."""
     data = await state.get_data()
-    await _safe_edit(message.bot, message.chat.id, data["prompt_message_id"], text, reply_markup)
-    await state.update_data(prompt_text=text)
+    previous_id = data.get("prompt_message_id")
+    sent = await message.answer(text, reply_markup=reply_markup)
+    await state.update_data(
+        prompt_message_id=sent.message_id,
+        # Что потом переотрисует _nudge под своим предупреждением: сам
+        # экран, а не экран, уже несущий предупреждение.
+        prompt_text=text if remember is None else remember,
+        # Класть сюда aiogram-объект безопасно: бот поднят на MemoryStorage
+        # (обычный dict, без pickle), а InlineKeyboardMarkup не держит
+        # ссылку на живой Bot — то есть это не та ловушка, что уронила
+        # рассылку в taki_vmeste. Зато _nudge теперь может вернуть кнопки
+        # карточки подтверждения, а не потерять их молча.
+        prompt_markup=reply_markup,
+    )
+    if previous_id:
+        await _safe_delete_many(message.bot, message.chat.id, [previous_id])
+
+
+async def _reset(message: Message, state: FSMContext) -> None:
+    """Бросить недоделанный диалог вместе с его следами перед началом
+    нового. Голый state.clear() забывал prompt_message_id — экран
+    брошенного диалога оставался висеть в чате навсегда."""
+    data = await state.get_data()
+    ids = list(data.get("user_message_ids", []))
+    if data.get("prompt_message_id"):
+        ids.append(data["prompt_message_id"])
+    await state.clear()
+    await _safe_delete_many(message.bot, message.chat.id, ids)
+
+
+async def _send_prompt(message: Message, state: FSMContext, question: str) -> None:
+    """Открыть диалог: съесть тап по кнопке входа (🔧 Ремонт и т.д.) и
+    выложить первый экран."""
+    await _consume(state, message)
+    await _repost(message, state, _flow_screen(await state.get_state(), await state.get_data(), question))
+
+
+async def _advance(message: Message, state: FSMContext, question: str, reply_markup: InlineKeyboardMarkup | None = None) -> None:
+    """Шаг вперёд после ответа сообщением: съесть ответ, выложить
+    следующий экран вниз чата. Вызывать ПОСЛЕ set_state/update_data —
+    шапка и сводка рисуются по тому, что в состоянии прямо сейчас."""
+    await _consume(state, message)
+    await _repost(message, state, _flow_screen(await state.get_state(), await state.get_data(), question), reply_markup)
+
+
+async def _advance_callback(callback: CallbackQuery, state: FSMContext, question: str, reply_markup: InlineKeyboardMarkup | None = None) -> None:
+    """Шаг вперёд после нажатия инлайн-кнопки. Нажатие не добавляет в чат
+    сообщения, значит экран диалога и так последний — правим на месте,
+    без переотправки."""
+    data = await state.get_data()
+    text = _flow_screen(await state.get_state(), data, question)
+    message_id = data.get("prompt_message_id") or callback.message.message_id
+    await _safe_edit(callback.bot, callback.message.chat.id, message_id, text, reply_markup)
+    await state.update_data(prompt_text=text, prompt_markup=reply_markup)
 
 
 async def _nudge(message: Message, state: FSMContext, hint: str) -> None:
-    """Invalid input mid-flow: show the hint above the still-current
-    question (not instead of it — a fresh message.answer would both lose
-    the question and pile up, exactly what this whole pattern avoids)."""
-    await _track(state, message)
+    """Некорректный ввод: переотправить ТОТ ЖЕ экран с предупреждением
+    сверху. Вопрос обязан ехать вместе с ним, иначе у сотрудника остаётся
+    претензия без единого намёка, о чём вообще спрашивали."""
+    await _consume(state, message)
     data = await state.get_data()
-    await _safe_edit(message.bot, message.chat.id, data["prompt_message_id"], f"⚠️ {hint}\n\n{data.get('prompt_text', '')}")
+    screen = data.get("prompt_text", "")
+    await _repost(message, state, f"⚠️ {hint}\n\n{screen}", data.get("prompt_markup"), remember=screen)
 
 
 # --- entry points — always available, even mid-flow (restarts fresh) ---
@@ -214,10 +378,10 @@ async def repair_start(message: Message, state: FSMContext) -> None:
         await message.answer("Недостаточно прав для приёма ремонта.")
         return
 
-    await state.clear()
+    await _reset(message, state)
     await state.set_state(RepairIntake.name)
     await state.update_data(store_id=store.id)
-    await _send_prompt(message, state, "🔧 Быстрый приём ремонта.\n\nИмя клиента:")
+    await _send_prompt(message, state, "Имя клиента:")
 
 
 @router.message(F.text == BTN_CONTACT, F.chat.type == "private")
@@ -227,10 +391,10 @@ async def contact_start(message: Message, state: FSMContext) -> None:
         return
     store, _staff = resolved
 
-    await state.clear()
+    await _reset(message, state)
     await state.set_state(QuickContact.name)
     await state.update_data(store_id=store.id)
-    await _send_prompt(message, state, "👤 Быстрое добавление клиента.\n\nИмя клиента:")
+    await _send_prompt(message, state, "Имя клиента:")
 
 
 @router.message(F.text == BTN_BUYBACK, F.chat.type == "private")
@@ -243,10 +407,10 @@ async def buyback_start(message: Message, state: FSMContext) -> None:
         await message.answer("Недостаточно прав для скупки.")
         return
 
-    await state.clear()
+    await _reset(message, state)
     await state.set_state(BuybackIntake.name)
     await state.update_data(store_id=store.id)
-    await _send_prompt(message, state, "💰 Быстрая скупка техники.\n\nИмя клиента (продавца):")
+    await _send_prompt(message, state, "Имя клиента (продавца):")
 
 
 @router.message(F.text == BTN_PURCHASE, F.chat.type == "private")
@@ -269,7 +433,8 @@ async def purchase_start(message: Message, state: FSMContext) -> None:
         await message.answer("Недостаточно прав для приёма накладной.")
         return
 
-    await state.clear()
+    await _reset(message, state)
+    await _consume(state, message)
     await message.answer("📦 Пришлите фото накладной — распознаю позиции и предложу оприходовать.")
 
 
@@ -367,10 +532,10 @@ async def repair_got_photo(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     text = (
         "📋 Проверьте данные:\n\n"
-        f"Клиент: {data['client_name']}\n"
-        f"Телефон: {data['client_phone']}\n"
-        f"Устройство: {data['device_type']} {data['model']}\n"
-        f"Неисправность: {data['defect_description']}\n"
+        f"Клиент: {html.escape(data['client_name'])}\n"
+        f"Телефон: {html.escape(data['client_phone'])}\n"
+        f"Устройство: {html.escape(data['device_type'])} {html.escape(data['model'])}\n"
+        f"Неисправность: {html.escape(data['defect_description'])}\n"
         "Фото: приложено ✅"
     )
     keyboard = InlineKeyboardMarkup(inline_keyboard=[[
@@ -511,9 +676,7 @@ async def buyback_got_payment_method(callback: CallbackQuery, state: FSMContext)
         InlineKeyboardButton(text="🔧 На запчасти", callback_data="buyback_purpose_parts"),
         InlineKeyboardButton(text="💵 На продажу", callback_data="buyback_purpose_resale"),
     ]])
-    text = "Назначение:"
-    await callback.message.edit_text(text, reply_markup=keyboard)
-    await state.update_data(prompt_text=text)
+    await _advance_callback(callback, state, "Назначение:", keyboard)
     await callback.answer()
 
 
@@ -528,8 +691,7 @@ async def buyback_got_purpose(callback: CallbackQuery, state: FSMContext) -> Non
     else:
         await state.set_state(BuybackIntake.photo)
         text = "📷 Пришлите фото устройства:"
-    await callback.message.edit_text(text)
-    await state.update_data(prompt_text=text)
+    await _advance_callback(callback, state, text)
     await callback.answer()
 
 
@@ -555,10 +717,10 @@ async def buyback_got_photo(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     lines = [
         "📋 Проверьте данные:", "",
-        f"Продавец: {data['client_name']}",
-        f"Телефон: {data['client_phone']}",
-        f"Устройство: {data['device_type']} {data['model']}",
-        f"Платим клиенту: {data['purchase_price']} грн ({'Наличные' if data['payment_method'] == 'cash' else 'Карта/перевод'})",
+        f"Продавец: {html.escape(data['client_name'])}",
+        f"Телефон: {html.escape(data['client_phone'])}",
+        f"Устройство: {html.escape(data['device_type'])} {html.escape(data['model'])}",
+        f"Платим клиенту: {data['purchase_price']} грн ({_PAYMENT_LABELS[data['payment_method']]})",
         f"Назначение: {core_buyback.PURPOSES[data['purpose']]}",
     ]
     if data["purpose"] == "resale":
@@ -644,7 +806,7 @@ async def contact_got_phone(message: Message, state: FSMContext) -> None:
         InlineKeyboardButton(text="✅ Добавить", callback_data="quick_contact_confirm", style="success"),
         InlineKeyboardButton(text="❌ Отмена", callback_data="quick_contact_cancel", style="danger"),
     ]])
-    await _advance(message, state, f"📋 Проверьте:\nИмя: {data['name']}\nТелефон: {phone}", reply_markup=keyboard)
+    await _advance(message, state, f"📋 Проверьте:\nИмя: {html.escape(data['name'])}\nТелефон: {html.escape(phone)}", reply_markup=keyboard)
 
 
 @router.callback_query(F.data == "quick_contact_confirm", QuickContact.confirm)

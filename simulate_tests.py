@@ -980,6 +980,196 @@ def scenario_repair_attachments(db_path: str) -> None:
               and attachments[0]["caption"] == "старая батарея" and attachments[0]["staff_name"] == "Владелец")
 
 
+def scenario_quick_intake_chat() -> None:
+    """bot/quick_actions.py's step-by-step intake, driven through a fake
+    private chat. The invariant under test: the flow leaves exactly ONE bot
+    message and it is always the LAST message in the chat. Before 03.09 the
+    flow edited a single message in place — an edit leaves a message where
+    it already is, so the next question ended up ABOVE the staff member's
+    reply, off screen and without a notification ("отвечаю, а бот ничего не
+    присылает"). No aiogram Bot is ever built here: the handlers only ever
+    touch message.bot/message.answer, so the fakes below are enough and
+    nothing can reach the network."""
+    print("scenario: quick intake dialog keeps one screen at the bottom of the chat")
+    import asyncio
+    from types import SimpleNamespace
+
+    # bot.config raises at import time without this one. Nothing here calls
+    # Telegram (see the docstring), so a placeholder suffices — setdefault
+    # rather than an overwrite because a real value would be equally inert.
+    os.environ.setdefault("CRM_MINIAPP_URL", "https://example.invalid/miniapp")
+
+    from aiogram.fsm.context import FSMContext
+    from aiogram.fsm.storage.base import StorageKey
+    from aiogram.fsm.storage.memory import MemoryStorage
+
+    from bot import quick_actions as qa
+
+    CHAT_ID = 777001
+    STAFF_TG_ID = 1417059280
+
+    class _Chat:
+        """A private chat as Telegram would keep it: messages in order, with
+        deletions actually removing them."""
+
+        def __init__(self) -> None:
+            self.log: list[dict] = []
+            self._next_id = 1000
+
+        def add(self, author: str, text: str, markup=None) -> int:
+            self._next_id += 1
+            self.log.append({"id": self._next_id, "author": author, "text": text, "markup": markup})
+            return self._next_id
+
+        def delete(self, message_id: int) -> None:
+            self.log = [m for m in self.log if m["id"] != message_id]
+
+        def edit(self, message_id: int, text: str, markup) -> None:
+            for m in self.log:
+                if m["id"] == message_id:
+                    m["text"], m["markup"] = text, markup
+
+        @property
+        def bot_messages(self) -> list[dict]:
+            return [m for m in self.log if m["author"] == "bot"]
+
+        @property
+        def staff_messages(self) -> list[dict]:
+            return [m for m in self.log if m["author"] == "staff"]
+
+        def last(self) -> dict | None:
+            return self.log[-1] if self.log else None
+
+    class _Bot:
+        def __init__(self, chat: _Chat) -> None:
+            self.chat = chat
+
+        async def delete_message(self, chat_id, message_id):
+            self.chat.delete(message_id)
+
+        async def delete_messages(self, chat_id, message_ids):
+            for mid in message_ids:
+                self.chat.delete(mid)
+
+        async def edit_message_text(self, chat_id, message_id, text, reply_markup=None):
+            self.chat.edit(message_id, text, reply_markup)
+
+        async def get_file(self, file_id):
+            return SimpleNamespace(file_path=f"photos/{file_id}.jpg")
+
+        async def download_file(self, file_path):
+            return io.BytesIO(b"\xff\xd8fake-jpeg")
+
+    class _Msg:
+        def __init__(self, chat: _Chat, bot: _Bot, text=None, photo=None) -> None:
+            self._chat_log = chat
+            self.bot = bot
+            self.chat = SimpleNamespace(id=CHAT_ID, type="private")
+            self.from_user = SimpleNamespace(id=STAFF_TG_ID, full_name="Мастер")
+            self.text = text
+            self.photo = photo
+            self.message_id = chat.add("staff", text if text is not None else "[фото]")
+
+        async def answer(self, text, reply_markup=None):
+            return SimpleNamespace(message_id=self._chat_log.add("bot", text, reply_markup))
+
+    original_resolve = qa._resolve_staff_for_dm
+    # The entry handlers resolve a real store + staff row out of the DB;
+    # everything under test starts after that, so stub it and drive the
+    # genuine handlers from the tap onward.
+    qa._resolve_staff_for_dm = lambda telegram_id: (
+        SimpleNamespace(id="test-store", db_path=":memory:"), {"role": "master"},
+    )
+
+    async def run() -> None:
+        chat = _Chat()
+        bot = _Bot(chat)
+        state = FSMContext(
+            storage=MemoryStorage(),
+            key=StorageKey(bot_id=1, chat_id=CHAT_ID, user_id=STAFF_TG_ID),
+        )
+
+        def say(text=None, photo=None) -> _Msg:
+            return _Msg(chat, bot, text=text, photo=photo)
+
+        def screen() -> dict:
+            return chat.bot_messages[-1]
+
+        await qa.repair_start(say(qa.BTN_REPAIR), state)
+        check("tap on 🔧 Ремонт leaves exactly one bot message", len(chat.bot_messages) == 1)
+        check("the tap itself is deleted right away", chat.staff_messages == [])
+        check("first screen is step 1 of 6 and asks for the name",
+              "шаг 1 из 6" in screen()["text"] and "Имя клиента:" in screen()["text"])
+
+        first_screen_id = screen()["id"]
+        await qa.repair_got_name(say("Вася <дома>"), state)
+        check("answering REPOSTS a new message instead of editing the old one in place",
+              screen()["id"] != first_screen_id)
+        check("still exactly one bot message after the repost", len(chat.bot_messages) == 1)
+        check("the screen is the last message in the chat", chat.last()["author"] == "bot")
+        check("the answer itself is gone from the chat", chat.staff_messages == [])
+        check("step 2 asks for the phone", "шаг 2 из 6" in screen()["text"] and "Телефон клиента:" in screen()["text"])
+        check("what was already entered is recapped on the screen", "Клиент: Вася" in screen()["text"])
+        check("staff-typed text is HTML-escaped in the recap (parse_mode=HTML)",
+              "&lt;дома&gt;" in screen()["text"] and "<дома>" not in screen()["text"])
+
+        # "+380" — ровно то, что остаётся, если отправить телефон, не
+        # дописав его после кода страны; normalize_phone трактует это как
+        # «ничего не ввели» (см. её docstring).
+        await qa.repair_got_phone(say("+380"), state)
+        check("a bad answer warns WITHOUT losing the question",
+              screen()["text"].startswith("⚠️") and "Телефон клиента:" in screen()["text"])
+        check("a warning still leaves one bot message, still last",
+              len(chat.bot_messages) == 1 and chat.last()["author"] == "bot")
+        check("the warning screen still carries the recap", "Клиент: Вася" in screen()["text"])
+
+        await qa.repair_got_phone(say("0501234567"), state)
+        check("the phone is normalized into the recap", "+380501234567" in screen()["text"])
+        check("a warning never sticks to the next screen", not screen()["text"].startswith("⚠️"))
+
+        await qa.repair_got_device_type(say("Смартфон"), state)
+        await qa.repair_got_model(say("iPhone 12"), state)
+        check("device and model are recapped as one line", "Устройство: Смартфон iPhone 12" in screen()["text"])
+        check("step 5 asks for the defect", "шаг 5 из 6" in screen()["text"] and "неисправность" in screen()["text"].lower())
+
+        await qa.repair_got_defect(say("не включается"), state)
+        check("step 6 asks for the photo", "шаг 6 из 6" in screen()["text"] and "фото" in screen()["text"].lower())
+
+        await qa.repair_got_photo(say(photo=[SimpleNamespace(file_id="photo-1")]), state)
+        card = screen()
+        check("the confirm card carries its accept/cancel buttons", card["markup"] is not None)
+        check("the confirm card lists everything collected",
+              all(part in card["text"] for part in ("Вася", "+380501234567", "Смартфон iPhone 12", "не включается")))
+        check("the confirm card escapes the staff-typed name too", "&lt;дома&gt;" in card["text"])
+        check("the sent photo is not left lying in the chat", chat.staff_messages == [])
+        check("the confirm card is the last message in the chat", chat.last()["id"] == card["id"])
+
+        await qa.quick_flow_fallback(say("а что дальше?"), state)
+        check("a stray message on the confirm card KEEPS its buttons — the flow stays finishable",
+              screen()["markup"] is not None)
+        check("...and still shows the collected data under the warning", "не включается" in screen()["text"])
+
+        # Бросить диалог на середине и начать другой: экран брошенного не
+        # должен остаться висеть в чате (голый state.clear() забывал его).
+        await qa.contact_start(say(qa.BTN_CONTACT), state)
+        check("starting another flow wipes the abandoned one's screen", len(chat.bot_messages) == 1)
+        check("the new flow starts at its own step 1 of 2", "шаг 1 из 2" in screen()["text"])
+
+    try:
+        asyncio.run(run())
+    finally:
+        qa._resolve_staff_for_dm = original_resolve
+
+    # Скупка ветвится: «на запчасти» вообще не спрашивает цену продажи,
+    # поэтому этот шаг не должен попадать в знаменатель.
+    parts = qa._flow_screen("BuybackIntake:photo", {"purpose": "parts"}, "📷 Пришлите фото устройства:")
+    check("buyback 'на запчасти' doesn't count the resale-price step it will never ask", "шаг 8 из 8" in parts)
+    resale = qa._flow_screen("BuybackIntake:photo", {"purpose": "resale"}, "📷 Пришлите фото устройства:")
+    check("buyback 'на продажу' counts all nine steps", "шаг 9 из 9" in resale)
+    confirm = qa._flow_screen("RepairIntake:confirm", {"client_name": "Вася"}, "📋 Проверьте данные:")
+    check("a confirm card gets no step header prepended — it renders its own recap",
+          confirm == "📋 Проверьте данные:")
+
 def _build_init_data(bot_token: str, user: dict, auth_date: int) -> str:
     data = {"auth_date": str(auth_date), "user": json.dumps(user, separators=(",", ":"))}
     check_string = "\n".join(f"{k}={v}" for k, v in sorted(data.items()))
@@ -2553,6 +2743,7 @@ def main() -> None:
     scenario_store_prefs()
     scenario_store_access()
     scenario_miniapp_boot_template()
+    scenario_quick_intake_chat()
     scenario_webapp_forms(_WEBAPP_TEST_DB)
     scenario_buyback_http(_WEBAPP_TEST_DB)
     scenario_multi_store_http()
