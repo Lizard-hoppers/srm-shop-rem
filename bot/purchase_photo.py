@@ -15,6 +15,7 @@ all-or-nothing no-op that points back to "Открыть и поправить".
 from __future__ import annotations
 
 import asyncio
+import html
 
 from aiogram import F, Router
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, WebAppInfo
@@ -70,7 +71,11 @@ def _draft_preview_text(items: list[dict]) -> str:
         qty = it["qty"] if it["qty"] is not None else "?"
         cost = f" × {it['unit_cost']}" if it["unit_cost"] is not None else ""
         mark = "✅" if it["product_id"] else "🆕"
-        lines.append(f"{mark} {it['name_guess']} — {qty} шт{cost}")
+        # html.escape: название читается с бумажной накладной через OpenAI
+        # vision, то есть это произвольный текст в сообщении с parse_mode=HTML.
+        # «AT&T» или «USB <-> Lightning» валили бы отправку, а сотрудник
+        # остался бы с «📷 Распознаю накладную…» навсегда (манифест §7).
+        lines.append(f"{mark} {html.escape(str(it['name_guess']))} — {qty} шт{cost}")
     lines.append("")
     lines.append("🆕 — не найдено в каталоге, будет создано новым товаром.")
     return "\n".join(lines)

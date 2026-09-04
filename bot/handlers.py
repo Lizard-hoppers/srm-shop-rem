@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import html
+
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
@@ -139,7 +141,13 @@ async def offer_add_client(message: Message) -> None:
     keyboard = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="➕ Добавить как клиента", callback_data="contact_add_client"),
     ]])
-    await message.reply(f"Добавить в CRM как клиента?\n{name} — {contact.phone_number}", reply_markup=keyboard)
+    # html.escape: бот поднят с parse_mode=HTML (bot/bot.py), а имя приходит
+    # из чужой карточки контакта — «Вася <дома>» уронил бы отправку на
+    # разборе HTML (манифест §7).
+    await message.reply(
+        f"Добавить в CRM как клиента?\n{html.escape(name)} — {html.escape(contact.phone_number)}",
+        reply_markup=keyboard,
+    )
 
 
 @router.callback_query(F.data == "contact_add_client")
@@ -176,7 +184,7 @@ async def confirm_add_client(callback: CallbackQuery) -> None:
     with get_conn(store.db_path) as conn:
         client_id = core_clients.get_or_create_by_phone(conn, name, contact.phone_number, source="offline")
 
-    await callback.message.edit_text(f"✅ Добавлен клиент: {name} (№{client_id})")
+    await callback.message.edit_text(f"✅ Добавлен клиент: {html.escape(name)} (№{client_id})")
     await callback.answer("Готово")
 
 

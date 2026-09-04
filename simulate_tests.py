@@ -980,6 +980,78 @@ def scenario_repair_attachments(db_path: str) -> None:
               and attachments[0]["caption"] == "старая батарея" and attachments[0]["staff_name"] == "Владелец")
 
 
+def scenario_phone_normalization(db_path: str) -> None:
+    """core.clients.normalize_phone canonicalizes a number AND decides
+    whether the thing it was handed is a phone number at all. Until
+    04.09.2026 it only did the first job — every caller reads "" as «no
+    phone», and free text was returned unchanged, so «не помню» passed
+    every check in the codebase and landed in the clients table."""
+    print("scenario: phone numbers are canonicalized, and free text is not a phone")
+    check("an already-canonical number passes through", clients.normalize_phone("+380501234567") == "+380501234567")
+    check("Telegram's no-plus form gets its +", clients.normalize_phone("380501234567") == "+380501234567")
+    check("the local 0-prefixed form becomes international", clients.normalize_phone("0501234567") == "+380501234567")
+    check("spaces, brackets and dashes are stripped", clients.normalize_phone("+38 (050) 123-45-67") == "+380501234567")
+    check("a foreign number is still accepted as-is", clients.normalize_phone("+12125550123") == "+12125550123")
+
+    check("a blank field means no phone", clients.normalize_phone("   ") == "")
+    check("the untouched «+380» template means no phone", clients.normalize_phone("+380") == "")
+    check("free text is not a phone number", clients.normalize_phone("не помню") == "")
+    check("a number with a letter in it is not a phone number", clients.normalize_phone("050123456O") == "")
+    check("too few digits is not a phone number", clients.normalize_phone("12345") == "")
+    check("more digits than E.164 allows is not a phone number", clients.normalize_phone("+1234567890123456") == "")
+
+    check("a blank field doesn't look entered", not clients.phone_looks_entered("  "))
+    check("the «+380» template doesn't look entered", not clients.phone_looks_entered(" +380 "))
+    check("free text DOES look entered — a typo to report back, not an empty field",
+          clients.phone_looks_entered("не помню"))
+
+    with get_conn(db_path) as conn:
+        first = clients.get_or_create_by_phone(conn, "Телефонный Тест", "0996667788", source="offline")
+        again = clients.get_or_create_by_phone(conn, "Телефонный Тест", "+38 (099) 666-77-88", source="offline")
+        check("the same number typed two ways resolves to one client record", first == again)
+        nobody_a = clients.get_or_create_by_phone(conn, "Безномерный А", "", source="offline")
+        nobody_b = clients.get_or_create_by_phone(conn, "Безномерный Б", "", source="offline")
+        check("two phoneless clients are never merged into each other", nobody_a != nobody_b)
+        check("a phoneless client stores NULL, not an empty string",
+              clients.get_client(conn, nobody_a)["phone"] is None)
+
+
+def scenario_bot_html_safety() -> None:
+    """Манифест §7 для сообщений бота: он поднят с parse_mode=HTML, поэтому
+    любой текст не от нас — имя из чужой карточки контакта, название
+    позиции, прочитанное с бумажной накладной через OpenAI vision —
+    обязан экранироваться. Иначе Telegram роняет отправку на разборе HTML,
+    и сотрудник остаётся, например, навсегда на «📷 Распознаю накладную…»."""
+    print("scenario: bot messages escape text that isn't ours (parse_mode=HTML)")
+    import asyncio
+    from types import SimpleNamespace
+
+    os.environ.setdefault("CRM_MINIAPP_URL", "https://example.invalid/miniapp")
+    from bot import handlers as bot_handlers
+    from bot import purchase_photo
+
+    preview = purchase_photo._draft_preview_text([
+        {"name_guess": "Кабель USB <-> Lightning AT&T", "qty": 2, "unit_cost": 150, "product_id": None},
+    ])
+    check("a line-item name read off a photo is escaped", "&lt;-&gt;" in preview and "&amp;T" in preview)
+    check("...while the preview's own markup survives", "<b>Распознано с фото:</b>" in preview)
+    check("...and the quantity and cost still render", "2 шт × 150" in preview)
+
+    sent: list[str] = []
+
+    class _ContactMessage:
+        def __init__(self, contact) -> None:
+            self.contact = contact
+
+        async def reply(self, text, reply_markup=None):
+            sent.append(text)
+
+    asyncio.run(bot_handlers.offer_add_client(_ContactMessage(
+        SimpleNamespace(first_name="Вася <дома>", last_name="&Co", phone_number="+380501234567")
+    )))
+    check("a name off someone's contact card is escaped before it goes out",
+          "&lt;дома&gt;" in sent[0] and "&amp;Co" in sent[0])
+
 def scenario_quick_intake_chat() -> None:
     """bot/quick_actions.py's step-by-step intake, driven through a fake
     private chat. The invariant under test: the flow leaves exactly ONE bot
@@ -1122,6 +1194,13 @@ def scenario_quick_intake_chat() -> None:
         check("a warning still leaves one bot message, still last",
               len(chat.bot_messages) == 1 and chat.last()["author"] == "bot")
         check("the warning screen still carries the recap", "Клиент: Вася" in screen()["text"])
+
+        # До 04.09 normalize_phone возвращала свободный текст как есть, и
+        # «не помню» уходило в БД как телефон клиента — подсказка ниже была
+        # недостижима для всего, кроме пустой строки и «+380».
+        await qa.repair_got_phone(say("не помню"), state)
+        check("free text is no longer accepted as a phone number",
+              "Не похоже на номер телефона" in screen()["text"])
 
         await qa.repair_got_phone(say("0501234567"), state)
         check("the phone is normalized into the recap", "+380501234567" in screen()["text"])
@@ -1548,6 +1627,36 @@ def scenario_webapp_forms(db_path: str) -> None:
         resp = client.post(f"/clients?t={token}", data={"name": "", "phone": "+380501111111"})
         check("missing client name: no raw 422", resp.status_code != 422)
         check("missing client name: friendly error shown", "Введите имя клиента" in resp.text)
+
+        # Телефон здесь необязателен — но «введён и не разобран» должно
+        # отличаться от «не введён», иначе опечатка тихо сохраняет клиента
+        # вообще без номера (04.09).
+        resp = client.post(f"/clients?t={token}", data={"name": "Опечатка Тест", "phone": "не помню"})
+        check("a typed-but-unparseable phone is reported, not silently dropped",
+              resp.status_code != 422 and "Проверьте номер телефона" in resp.text)
+        with get_conn(db_path) as conn:
+            check("...and no client was created from that rejected submission",
+                  conn.execute("SELECT COUNT(*) c FROM clients WHERE name = 'Опечатка Тест'").fetchone()["c"] == 0)
+
+        resp = client.post(f"/clients?t={token}", data={"name": "Без Телефона", "phone": ""})
+        check("a blank optional phone still creates the client (303)",
+              resp.status_code == 303 or (resp.history and resp.history[0].status_code == 303))
+        resp = client.post(f"/clients?t={token}", data={"name": "Со Скобками", "phone": "+38 (050) 123-45-67"})
+        check("a number typed with spaces/brackets/dashes is accepted (303)",
+              resp.status_code == 303 or (resp.history and resp.history[0].status_code == 303))
+        with get_conn(db_path) as conn:
+            stored = conn.execute("SELECT phone FROM clients WHERE name = 'Со Скобками'").fetchone()
+            check("...and stored in canonical form", stored["phone"] == "+380501234567")
+            blank = conn.execute("SELECT phone FROM clients WHERE name = 'Без Телефона'").fetchone()
+            check("a client with no phone stores NULL, not an empty string", blank["phone"] is None)
+
+        with get_conn(db_path) as conn:
+            edit_target = conn.execute("SELECT id FROM clients WHERE name = 'Без Телефона'").fetchone()["id"]
+        bad_edit = client.post(
+            f"/clients/{edit_target}/edit?t={token}", data={"name": "Опечатка Правка", "phone": "звонить маме"}
+        )
+        check("editing a client with an unparseable phone is reported too",
+              bad_edit.status_code != 422 and "Проверьте номер телефона" in bad_edit.text)
 
         resp = client.post(f"/inventory/products?t={token}", data={"name": "", "price": ""})
         check("missing product name: no raw 422", resp.status_code != 422)
@@ -2733,6 +2842,7 @@ def main() -> None:
         scenario_repair_card_notify(db_path)
         scenario_repair_actions(db_path)
         scenario_repair_attachments(db_path)
+        scenario_phone_normalization(db_path)
         scenario_store_settings(db_path)
 
     scenario_timefmt()
@@ -2744,6 +2854,7 @@ def main() -> None:
     scenario_store_access()
     scenario_miniapp_boot_template()
     scenario_quick_intake_chat()
+    scenario_bot_html_safety()
     scenario_webapp_forms(_WEBAPP_TEST_DB)
     scenario_buyback_http(_WEBAPP_TEST_DB)
     scenario_multi_store_http()

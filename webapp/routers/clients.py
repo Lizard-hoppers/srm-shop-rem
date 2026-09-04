@@ -13,6 +13,20 @@ from webapp.templating import render
 
 router = APIRouter(prefix="/clients")
 
+# Имя обязательно, телефон — нет. Но «введён и не разобран» ≠ «не введён»:
+# без этой развилки опечатка в номере молча сохранила бы клиента вообще без
+# телефона (normalize_phone отдаёт "" в обоих случаях, см. её docstring).
+_BAD_PHONE = "Проверьте номер телефона — например 0501234567."
+
+
+def _checked_phone(raw: str) -> tuple[str | None, str | None]:
+    """(phone_to_store, error) — телефон в каноничном виде либо None, и
+    сообщение об ошибке, если человек что-то ввёл, а это не номер."""
+    normalized = core_clients.normalize_phone(raw)
+    if not normalized and core_clients.phone_looks_entered(raw):
+        return None, _BAD_PHONE
+    return normalized or None, None
+
 
 @router.get("")
 def list_view(request: Request, q: str | None = None, source: str | None = None, staff=Depends(require_staff)):
@@ -29,14 +43,16 @@ def create_view(
     notes: str = Form(""),
     staff=Depends(require_staff),
 ):
-    if not name.strip():
+    stored_phone, phone_error = _checked_phone(phone)
+    error = "Введите имя клиента." if not name.strip() else phone_error
+    if error:
         with get_conn() as conn:
             rows = core_clients.list_clients(conn)
-        return render(request, "clients_list.html", staff=staff, clients=rows, query=None, source=None, error="Введите имя клиента.")
+        return render(request, "clients_list.html", staff=staff, clients=rows, query=None, source=None, error=error)
 
     with get_conn() as conn:
         client_id = core_clients.create_client(
-            conn, name=name.strip(), phone=core_clients.normalize_phone(phone) or None, notes=notes.strip() or None
+            conn, name=name.strip(), phone=stored_phone, notes=notes.strip() or None
         )
     return RedirectResponse(link(request, f"/clients/{client_id}"), status_code=303)
 
@@ -81,16 +97,18 @@ def edit_view(
     notes: str = Form(""),
     staff=Depends(require_staff),
 ):
+    stored_phone, phone_error = _checked_phone(phone)
+    error = "Введите имя клиента." if not name.strip() else phone_error
     with get_conn() as conn:
-        if not name.strip():
+        if error:
             client = core_clients.get_client(conn, client_id)
             repair_history = core_repairs.list_repairs_by_client(conn, client_id)
             sales_history = core_sales.list_sales_by_client(conn, client_id)
             return render(
                 request, "client_detail.html", staff=staff, client=client,
-                repair_history=repair_history, sales_history=sales_history, error="Введите имя клиента.",
+                repair_history=repair_history, sales_history=sales_history, error=error,
             )
         core_clients.update_client(
-            conn, client_id, name=name.strip(), phone=core_clients.normalize_phone(phone) or None, notes=notes.strip() or None
+            conn, client_id, name=name.strip(), phone=stored_phone, notes=notes.strip() or None
         )
     return RedirectResponse(link(request, f"/clients/{client_id}"), status_code=303)
