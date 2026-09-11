@@ -25,8 +25,10 @@ from __future__ import annotations
 import asyncio
 
 from aiogram import F, Router
-from aiogram.types import CallbackQuery
+from aiogram.exceptions import TelegramForbiddenError
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 
+from bot.miniapp_links import crm_link
 from core import auth as core_auth
 from core import notify as core_notify
 from core import repairs as core_repairs
@@ -65,6 +67,17 @@ async def _resolve_actor(callback: CallbackQuery, db_path: str):
         await callback.answer("Вы не подключены как мастер в CRM.", show_alert=True)
         return None
     return staff
+
+
+async def _resolve_any_staff(callback: CallbackQuery, db_path: str):
+    """Staff row for whoever tapped, any role — used only by
+    open_crm_repair below. Viewing the CRM isn't the same privilege
+    boundary as claiming/completing/cancelling a repair (mirrors
+    webapp.deps.require_staff, not this module's _ACTOR_ROLES-gated
+    _resolve_actor), so a storekeeper who'd fail _resolve_actor can still
+    open a repair card to look something up."""
+    with get_conn(db_path) as conn:
+        return core_auth.get_staff_by_telegram_id(conn, callback.from_user.id)
 
 
 def _sync_repair_cards_blocking(order_id: int, db_path: str) -> None:
@@ -169,3 +182,31 @@ async def repair_cancel(callback: CallbackQuery) -> None:
 
     _sync_after_change(order_id, store.db_path)
     await callback.answer("Отмечено как не отремонтированное")
+
+
+@router.callback_query(F.data.startswith("open_crm:repair:"))
+async def open_crm_repair(callback: CallbackQuery) -> None:
+    """"🔗 Открыть в CRM" on a repair card. The card sits in a shared group
+    indefinitely (see core.repairs.render_keyboard's docstring on why this
+    row is a callback, not a plain link baked in at post time) — so this
+    mints a link scoped to whoever actually tapped, right now, and DMs it
+    to them privately rather than answering inside the group."""
+    store = await _resolve_store(callback)
+    if not store:
+        return
+    order_id = int(callback.data.rsplit(":", 1)[1])
+    staff = await _resolve_any_staff(callback, store.db_path)
+    if not staff:
+        await callback.answer("Вы не подключены как сотрудник в CRM.", show_alert=True)
+        return
+
+    link = crm_link(f"/repairs/{order_id}", staff["id"], store.id)
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text=f"🔗 Ремонт №{order_id} в CRM", web_app=WebAppInfo(url=link)),
+    ]])
+    try:
+        await callback.bot.send_message(callback.from_user.id, "Открываю карточку ремонта:", reply_markup=keyboard)
+    except TelegramForbiddenError:
+        await callback.answer("Сначала напишите боту в личку /start, затем нажмите ещё раз.", show_alert=True)
+        return
+    await callback.answer("Ссылка отправлена в личные сообщения с ботом")

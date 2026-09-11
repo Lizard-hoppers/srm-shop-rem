@@ -35,14 +35,18 @@ from aiogram.types import (
     WebAppInfo,
 )
 
-from bot.config import MINIAPP_URL
+from bot.miniapp_links import crm_link
 from core import auth as core_auth
 from core import buyback as core_buyback
+from core import cash as core_cash
 from core import clients as core_clients
+from core import inventory as core_inventory
 from core import repairs as core_repairs
+from core import sales as core_sales
 from core import store_access
 from core.storage import get_conn
 from core.stores import StoreConfig, get_store
+from core.timefmt import kyiv_date_range_utc, kyiv_today
 
 router = Router()
 
@@ -68,6 +72,7 @@ BTN_REPAIR = "🔧 Ремонт"
 BTN_CONTACT = "👤 Контакт"
 BTN_BUYBACK = "💰 Скупка"
 BTN_PURCHASE = "📦 Приход"
+BTN_SUMMARY = "📊 Сводка"
 BTN_CANCEL = "❌ Отмена"
 
 # Один словарь на оба места, где способ оплаты показывается сотруднику
@@ -89,6 +94,7 @@ QUICK_ACTIONS_KEYBOARD = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text=BTN_REPAIR), KeyboardButton(text=BTN_CONTACT, style="primary")],
         [KeyboardButton(text=BTN_BUYBACK, style="success"), KeyboardButton(text=BTN_PURCHASE)],
+        [KeyboardButton(text=BTN_SUMMARY)],
         [KeyboardButton(text=BTN_CANCEL, style="danger")],
     ],
     resize_keyboard=True,
@@ -438,6 +444,45 @@ async def purchase_start(message: Message, state: FSMContext) -> None:
     await message.answer("📦 Пришлите фото накладной — распознаю позиции и предложу оприходовать.")
 
 
+@router.message(F.text == BTN_SUMMARY, F.chat.type == "private")
+async def summary_view(message: Message) -> None:
+    """Read-only snapshot of the current store — the same numbers
+    webapp/routers/dashboard.py and cash.py already compute for the Mini
+    App, just reachable without opening it. Any staff role can see this
+    (mirrors webapp.deps.require_staff, not require_role — it's totals
+    only, no per-transaction detail, so it's not the privilege boundary
+    the cash/reports pages themselves are)."""
+    resolved = _resolve_staff_for_dm(message.from_user.id)
+    if not resolved:
+        return
+    store, _staff = resolved
+
+    today = kyiv_today()
+    utc_start, utc_end = kyiv_date_range_utc(today, today)
+    with get_conn(store.db_path) as conn:
+        open_repairs = len([
+            r for r in core_repairs.list_repairs(conn) if r["status"] not in ("issued", "cancelled")
+        ])
+        sales_today = [
+            s for s in core_sales.list_sales(conn, limit=1000) if utc_start <= s["created_at"] < utc_end
+        ]
+        sales_today_sum = sum(s["total"] for s in sales_today)
+        cash_today = core_cash.period_summary(conn, utc_start, utc_end)
+        cash_balance = core_cash.cash_balance(conn)
+        low_stock = len(core_inventory.low_stock_report(conn))
+
+    lines = [
+        f"📊 <b>Сводка — {html.escape(store.name)}</b>",
+        "",
+        f"🔧 Ремонтов в работе: {open_repairs}",
+        f"🛒 Продаж сегодня: {len(sales_today)} шт · {sales_today_sum} грн",
+        f"💵 Касса сегодня: +{cash_today['income_total']} / −{cash_today['expense_total']} грн",
+        f"💰 Баланс в кассе: {cash_balance} грн",
+        f"📉 Товаров с низким остатком: {low_stock}",
+    ]
+    await message.answer("\n".join(lines))
+
+
 @router.message(F.text == BTN_CANCEL, StateFilter(RepairIntake, QuickContact, BuybackIntake))
 async def cancel_flow(message: Message, state: FSMContext) -> None:
     """Deletes EVERYTHING from this flow attempt — the bot's own tracked
@@ -588,7 +633,8 @@ async def repair_confirm(callback: CallbackQuery, state: FSMContext) -> None:
     await _safe_delete_many(callback.bot, callback.message.chat.id, user_message_ids)
     open_keyboard = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(
-            text="Открыть в CRM", web_app=WebAppInfo(url=f"{MINIAPP_URL.rstrip('/')}/repairs/{order_id}"),
+            text="Открыть в CRM",
+            web_app=WebAppInfo(url=crm_link(f"/repairs/{order_id}", staff["id"], store.id)),
         ),
     ]])
     await callback.message.edit_text(
@@ -771,7 +817,8 @@ async def buyback_confirm(callback: CallbackQuery, state: FSMContext) -> None:
     await _safe_delete_many(callback.bot, callback.message.chat.id, user_message_ids)
     open_keyboard = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(
-            text="Открыть в CRM", web_app=WebAppInfo(url=f"{MINIAPP_URL.rstrip('/')}/buyback/{order_id}"),
+            text="Открыть в CRM",
+            web_app=WebAppInfo(url=crm_link(f"/buyback/{order_id}", staff["id"], store.id)),
         ),
     ]])
     await callback.message.edit_text(
@@ -830,7 +877,13 @@ async def contact_confirm(callback: CallbackQuery, state: FSMContext) -> None:
     user_message_ids = data.get("user_message_ids", [])
     await state.clear()
     await _safe_delete_many(callback.bot, callback.message.chat.id, user_message_ids)
-    await callback.message.edit_text(f"✅ Клиент добавлен (№{client_id}).")
+    open_keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(
+            text="Открыть в CRM",
+            web_app=WebAppInfo(url=crm_link(f"/clients/{client_id}", staff["id"], store.id)),
+        ),
+    ]])
+    await callback.message.edit_text(f"✅ Клиент добавлен (№{client_id}).", reply_markup=open_keyboard)
     await callback.answer("Готово")
 
 

@@ -20,7 +20,7 @@ import html
 from aiogram import F, Router
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, WebAppInfo
 
-from bot.config import MINIAPP_URL
+from bot.miniapp_links import crm_link
 from core import auth as core_auth
 from core import inventory as core_inventory
 from core import purchase_import as core_purchase_import
@@ -48,7 +48,7 @@ def _resolve_store_for_dm(telegram_id: int):
     return store_access.pick_default_store(telegram_id, accessible)
 
 
-def _draft_keyboard(store_id: str, draft_id: int) -> InlineKeyboardMarkup:
+def _draft_keyboard(store_id: str, draft_id: int, staff_id: int) -> InlineKeyboardMarkup:
     # store_id travels in callback_data rather than being re-resolved when
     # "✅ Оприходовать как есть" is pressed — draft_id alone isn't globally
     # unique (each store's purchase_drafts has its own sequence), and
@@ -58,7 +58,7 @@ def _draft_keyboard(store_id: str, draft_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="✅ Оприходовать как есть", callback_data=f"draft_apply:{store_id}:{draft_id}")],
         [InlineKeyboardButton(
             text="✏️ Открыть и поправить",
-            web_app=WebAppInfo(url=f"{MINIAPP_URL.rstrip('/')}/purchases/draft/{draft_id}"),
+            web_app=WebAppInfo(url=crm_link(f"/purchases/draft/{draft_id}", staff_id, store_id)),
         )],
     ])
 
@@ -125,7 +125,9 @@ async def photo_invoice(message: Message) -> None:
         matched_items = core_purchase_import.match_items(conn, raw_items)
         draft_id = core_purchases.create_draft(conn, staff["id"], matched_items)
 
-    await status_msg.edit_text(_draft_preview_text(matched_items), reply_markup=_draft_keyboard(store.id, draft_id))
+    await status_msg.edit_text(
+        _draft_preview_text(matched_items), reply_markup=_draft_keyboard(store.id, draft_id, staff["id"])
+    )
 
 
 @router.callback_query(F.data.startswith("draft_apply:"))
@@ -169,8 +171,14 @@ async def apply_draft(callback: CallbackQuery) -> None:
             )
             return
 
-        core_purchases.create_receipt(conn, None, None, staff["id"], receipt_items)
+        receipt_id = core_purchases.create_receipt(conn, None, None, staff["id"], receipt_items)
         core_purchases.mark_draft_applied(conn, draft_id)
 
-    await callback.message.edit_text("✅ Оприходовано.")
+    open_keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(
+            text="Открыть в CRM",
+            web_app=WebAppInfo(url=crm_link(f"/purchases/{receipt_id}", staff["id"], store.id)),
+        ),
+    ]])
+    await callback.message.edit_text(f"✅ Оприходовано (приход №{receipt_id}).", reply_markup=open_keyboard)
     await callback.answer("Готово")

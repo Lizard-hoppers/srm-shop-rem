@@ -427,17 +427,27 @@ def render_card_text(repair: sqlite3.Row) -> str:
     return "\n".join(lines)
 
 
-def render_keyboard(order_id: int, status: str) -> dict | None:
+def render_keyboard(order_id: int, status: str) -> dict:
     """Inline keyboard matching a repair's current status, as a plain dict
-    in the Telegram Bot API's InlineKeyboardMarkup shape — None once the
-    job reaches a final state (nothing left to press)."""
+    in the Telegram Bot API's InlineKeyboardMarkup shape. Status-action
+    rows disappear once the job reaches a final state (nothing left to
+    press there), but the "Открыть в CRM" row stays forever — a card in
+    the group is the group's whole history of that repair, so it should
+    always be able to jump into the full record, done or not.
+
+    That last row is a callback (bot.repair_actions.open_crm_repair), not
+    a plain link: this card is posted once into a shared GROUP chat and
+    stays there indefinitely, so a URL baked in at render time would
+    forever open the CRM as whoever it was minted for — the callback
+    mints a fresh, tapper-scoped link at tap time instead (see
+    bot/miniapp_links.py's module docstring)."""
+    rows = []
     if status == "new":
-        return {"inline_keyboard": [[{"text": "🔧 Взять в работу", "callback_data": f"repair_take:{order_id}"}]]}
-    if status == "in_progress":
-        return {
-            "inline_keyboard": [[
-                {"text": "✅ Готов к выдаче", "callback_data": f"repair_done:{order_id}"},
-                {"text": "❌ Не удалось починить", "callback_data": f"repair_release:{order_id}"},
-            ]]
-        }
-    return None
+        rows.append([{"text": "🔧 Взять в работу", "callback_data": f"repair_take:{order_id}"}])
+    elif status == "in_progress":
+        rows.append([
+            {"text": "✅ Готов к выдаче", "callback_data": f"repair_done:{order_id}"},
+            {"text": "❌ Не удалось починить", "callback_data": f"repair_release:{order_id}"},
+        ])
+    rows.append([{"text": "🔗 Открыть в CRM", "callback_data": f"open_crm:repair:{order_id}"}])
+    return {"inline_keyboard": rows}

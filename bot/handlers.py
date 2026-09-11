@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramForbiddenError
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     BufferedInputFile,
@@ -13,8 +14,10 @@ from aiogram.types import (
     Message,
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
+    WebAppInfo,
 )
 
+from bot.miniapp_links import crm_link
 from bot.quick_actions import QUICK_ACTIONS_KEYBOARD
 from core import auth as core_auth
 from core import clients as core_clients
@@ -184,7 +187,27 @@ async def confirm_add_client(callback: CallbackQuery) -> None:
     with get_conn(store.db_path) as conn:
         client_id = core_clients.get_or_create_by_phone(conn, name, contact.phone_number, source="offline")
 
-    await callback.message.edit_text(f"✅ Добавлен клиент: {html.escape(name)} (№{client_id})")
+    open_keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(
+            text="Открыть в CRM",
+            web_app=WebAppInfo(url=crm_link(f"/clients/{client_id}", staff["id"], store.id)),
+        ),
+    ]])
+    confirm_text = f"✅ Добавлен клиент: {html.escape(name)} (№{client_id})"
+    if chat and chat.type != "private":
+        # This confirmation edits a message that stays in the shared
+        # staff group — a link button on it would forever open the CRM as
+        # whoever happens to tap it, not as the actual presser (same risk
+        # bot/repair_actions.py's open_crm_repair avoids). DM the presser
+        # their own freshly-minted link instead; the group message itself
+        # stays plain.
+        await callback.message.edit_text(confirm_text)
+        try:
+            await callback.bot.send_message(callback.from_user.id, "Открываю карточку клиента:", reply_markup=open_keyboard)
+        except TelegramForbiddenError:
+            pass  # haven't started the bot in DM — the group confirmation above still stands
+    else:
+        await callback.message.edit_text(confirm_text, reply_markup=open_keyboard)
     await callback.answer("Готово")
 
 

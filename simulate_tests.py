@@ -740,11 +740,15 @@ def scenario_repair_card_notify(db_path: str) -> None:
     kb_new = repairs.render_keyboard(order_id, "new")
     check("keyboard for 'new' offers to take the job",
           kb_new["inline_keyboard"][0][0]["callback_data"] == f"repair_take:{order_id}")
+    check("keyboard for 'new' also offers Открыть в CRM",
+          kb_new["inline_keyboard"][-1][0]["callback_data"] == f"open_crm:repair:{order_id}")
     kb_in_progress = repairs.render_keyboard(order_id, "in_progress")
     check("keyboard for 'in_progress' offers done + release",
           {b["callback_data"] for b in kb_in_progress["inline_keyboard"][0]}
           == {f"repair_done:{order_id}", f"repair_release:{order_id}"})
-    check("keyboard for 'ready' has nothing left to press", repairs.render_keyboard(order_id, "ready") is None)
+    kb_ready = repairs.render_keyboard(order_id, "ready")
+    check("keyboard for 'ready' has nothing left to press but Открыть в CRM",
+          kb_ready["inline_keyboard"] == [[{"text": "🔗 Открыть в CRM", "callback_data": f"open_crm:repair:{order_id}"}]])
 
     # No CRM_STAFF_GROUP_CHAT_ID in the test env — must no-op, never raise.
     raised = False
