@@ -71,12 +71,11 @@ _CASH_ROLES = ("owner", "admin", "storekeeper")
 # off entirely for a plain/unstyled button — Приход stays plain, Павел's
 # call.
 BTN_REPAIR = "🔧 Ремонт"
-BTN_CONTACT = "👤 Контакт"
+BTN_CLIENT = "👤 Клиент"
 BTN_BUYBACK = "💰 Скупка"
 BTN_PURCHASE = "📦 Приход"
 BTN_SUMMARY = "📊 Сводка"
 BTN_CASH = "💵 Касса"
-BTN_CLIENT_SEARCH = "🔍 Клиент"
 BTN_CANCEL = "❌ Отмена"
 
 # Один словарь на оба места, где способ оплаты показывается сотруднику
@@ -96,10 +95,9 @@ _PAYMENT_LABELS = {"cash": "Наличные", "card": "Карта/перево�
 # what other messages/edits happen, so there's no need to re-attach it.
 QUICK_ACTIONS_KEYBOARD = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text=BTN_REPAIR), KeyboardButton(text=BTN_CONTACT, style="primary")],
+        [KeyboardButton(text=BTN_REPAIR), KeyboardButton(text=BTN_CLIENT, style="primary")],
         [KeyboardButton(text=BTN_BUYBACK, style="success"), KeyboardButton(text=BTN_PURCHASE)],
         [KeyboardButton(text=BTN_SUMMARY), KeyboardButton(text=BTN_CASH)],
-        [KeyboardButton(text=BTN_CLIENT_SEARCH)],
         [KeyboardButton(text=BTN_CANCEL, style="danger")],
     ],
     resize_keyboard=True,
@@ -446,17 +444,66 @@ async def repair_start(message: Message, state: FSMContext) -> None:
     await _send_prompt(message, state, "Имя клиента:")
 
 
-@router.message(F.text == BTN_CONTACT, F.chat.type == "private")
-async def contact_start(message: Message, state: FSMContext) -> None:
+@router.message(F.text == BTN_CLIENT, F.chat.type == "private")
+async def client_start(message: Message, state: FSMContext) -> None:
+    """Not itself an FSM flow — a small menu (Найти / Добавить) whose
+    buttons start ClientSearch/QuickContact. Same reason as cash_start:
+    uses _repost (not a bare message.answer) so prompt_message_id is
+    already tracked before either sub-flow's real first step (a tap on
+    THIS menu, a callback — not a typed reply) needs it."""
     resolved = _resolve_staff_for_dm(message.from_user.id)
     if not resolved:
         return
     store, _staff = resolved
 
     await _reset(message, state)
-    await state.set_state(QuickContact.name)
     await state.update_data(store_id=store.id)
-    await _send_prompt(message, state, "Имя клиента:")
+    await _consume(state, message)
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="🔍 Найти", callback_data="client_menu_search"),
+        InlineKeyboardButton(text="➕ Добавить", callback_data="client_menu_add", style="success"),
+    ]])
+    await _repost(message, state, "👤 <b>Клиент</b>", keyboard)
+
+
+async def _resolve_client_actor(callback: CallbackQuery, state: FSMContext):
+    """Staff row for whoever tapped Найти/Добавить on the Клиент menu, or
+    None (having already answered the callback) if the check fails. Any
+    role passes — adding/searching clients isn't role-gated the way cash
+    operations are (mirrors webapp.deps.require_staff, not
+    _resolve_cash_actor's require_role-style check)."""
+    data = await state.get_data()
+    try:
+        store = get_store(data["store_id"])
+    except KeyError:
+        await callback.answer("Магазин больше не настроен.", show_alert=True)
+        return None
+    with get_conn(store.db_path) as conn:
+        staff = core_auth.get_staff_by_telegram_id(conn, callback.from_user.id)
+    if not staff:
+        await callback.answer("Недостаточно прав.", show_alert=True)
+        return None
+    return staff
+
+
+@router.callback_query(F.data == "client_menu_add")
+async def client_menu_add(callback: CallbackQuery, state: FSMContext) -> None:
+    if not await _resolve_client_actor(callback, state):
+        return
+    await state.set_state(QuickContact.name)
+    await _advance_callback(callback, state, "Имя клиента:")
+    await callback.answer()
+
+
+@router.callback_query(F.data == "client_menu_search")
+async def client_menu_search(callback: CallbackQuery, state: FSMContext) -> None:
+    staff = await _resolve_client_actor(callback, state)
+    if not staff:
+        return
+    await state.set_state(ClientSearch.query)
+    await state.update_data(staff_id=staff["id"])
+    await _advance_callback(callback, state, "Телефон или имя клиента:")
+    await callback.answer()
 
 
 @router.message(F.text == BTN_BUYBACK, F.chat.type == "private")
@@ -825,19 +872,6 @@ async def _client_card(store: StoreConfig, client_id: int, staff_id: int) -> tup
         ),
     ]])
     return "\n".join(lines), keyboard
-
-
-@router.message(F.text == BTN_CLIENT_SEARCH, F.chat.type == "private")
-async def client_search_start(message: Message, state: FSMContext) -> None:
-    resolved = _resolve_staff_for_dm(message.from_user.id)
-    if not resolved:
-        return
-    store, staff = resolved
-
-    await _reset(message, state)
-    await state.set_state(ClientSearch.query)
-    await state.update_data(store_id=store.id, staff_id=staff["id"])
-    await _send_prompt(message, state, "Телефон или имя клиента:")
 
 
 @router.message(ClientSearch.query, F.text)

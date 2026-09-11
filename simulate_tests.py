@@ -1277,7 +1277,8 @@ def scenario_quick_client_search_chat(db_path: str) -> None:
             return chat.bot_messages[-1]
 
         # --- Точное совпадение по телефону, в местном формате ---
-        await qa.client_search_start(say(qa.BTN_CLIENT_SEARCH), state)
+        await qa.client_start(say(qa.BTN_CLIENT), state)
+        await qa.client_menu_search(tap("client_menu_search"), state)
         check("search prompt asks for phone or name", "Телефон или имя" in screen()["text"])
 
         await qa.client_search_got_query(say("0561111111"), state)
@@ -1288,12 +1289,14 @@ def scenario_quick_client_search_chat(db_path: str) -> None:
         check("a single-match search clears the FSM state", (await state.get_state()) is None)
 
         # --- Точное совпадение по фамилии ---
-        await qa.client_search_start(say(qa.BTN_CLIENT_SEARCH), state)
+        await qa.client_start(say(qa.BTN_CLIENT), state)
+        await qa.client_menu_search(tap("client_menu_search"), state)
         await qa.client_search_got_query(say("ЖЖЖТЕСТКЛИЕНТ Иван Сидоров"), state)
         check("a unique name substring finds the exact client", "ЖЖЖТЕСТКЛИЕНТ Иван Сидоров" in screen()["text"])
 
         # --- Несколько совпадений -> список кнопок -> выбор ---
-        await qa.client_search_start(say(qa.BTN_CLIENT_SEARCH), state)
+        await qa.client_start(say(qa.BTN_CLIENT), state)
+        await qa.client_menu_search(tap("client_menu_search"), state)
         await qa.client_search_got_query(say("ЖЖЖТЕСТКЛИЕНТ Иван"), state)
         picker = screen()
         check("a substring matching several clients shows a picker, not a card",
@@ -1312,7 +1315,8 @@ def scenario_quick_client_search_chat(db_path: str) -> None:
         check("picking from the list clears the FSM state", (await state.get_state()) is None)
 
         # --- Ничего не найдено ---
-        await qa.client_search_start(say(qa.BTN_CLIENT_SEARCH), state)
+        await qa.client_start(say(qa.BTN_CLIENT), state)
+        await qa.client_menu_search(tap("client_menu_search"), state)
         await qa.client_search_got_query(say("ЖЖЖНЕТКЛИЕНТАТАКОГО"), state)
         check("no matches warns and keeps the search open for another attempt",
               "Ничего не найдено" in screen()["text"] and (await state.get_state()) is not None)
@@ -1321,7 +1325,8 @@ def scenario_quick_client_search_chat(db_path: str) -> None:
 
         # --- Отмена посреди поиска ---
         messages_before = len(chat.bot_messages)
-        await qa.client_search_start(say(qa.BTN_CLIENT_SEARCH), state)
+        await qa.client_start(say(qa.BTN_CLIENT), state)
+        await qa.client_menu_search(tap("client_menu_search"), state)
         await qa.cancel_flow(say(qa.BTN_CANCEL), state)
         check("❌ Отмена mid-search wipes its own screen, leaving earlier results untouched",
               len(chat.bot_messages) == messages_before)
@@ -1527,13 +1532,41 @@ def scenario_quick_intake_chat() -> None:
         async def answer(self, text, reply_markup=None):
             return SimpleNamespace(message_id=self._chat_log.add("bot", text, reply_markup))
 
+    class _CbMessage:
+        def __init__(self, chat: _Chat, message_id: int) -> None:
+            self.chat = SimpleNamespace(id=CHAT_ID, type="private")
+            self.message_id = message_id
+            self._chat_log = chat
+
+        async def edit_text(self, text, reply_markup=None):
+            self._chat_log.edit(self.message_id, text, reply_markup)
+
+    class _Cb:
+        def __init__(self, chat: _Chat, bot: _Bot, data: str, message_id: int) -> None:
+            self.data = data
+            self.from_user = SimpleNamespace(id=STAFF_TG_ID)
+            self.message = _CbMessage(chat, message_id)
+            self.bot = bot
+            self.answered: list[tuple] = []
+
+        async def answer(self, text=None, show_alert=False):
+            self.answered.append((text, show_alert))
+
     original_resolve = qa._resolve_staff_for_dm
     # The entry handlers resolve a real store + staff row out of the DB;
     # everything under test starts after that, so stub it and drive the
     # genuine handlers from the tap onward.
-    qa._resolve_staff_for_dm = lambda telegram_id: (
-        SimpleNamespace(id="test-store", db_path=":memory:"), {"role": "master"},
-    )
+    _fake_store = SimpleNamespace(id="test-store", db_path=":memory:")
+    qa._resolve_staff_for_dm = lambda telegram_id: (_fake_store, {"role": "master"})
+    # client_menu_add re-resolves the store/staff itself (get_store by id,
+    # then a real DB lookup by telegram_id) rather than reusing
+    # _resolve_staff_for_dm — ":memory:" has no schema/rows and "test-store"
+    # isn't a real configured store, so patch both rather than stand up a
+    # real db just for the one "start another flow" check below.
+    original_get_store = qa.get_store
+    original_get_staff = auth.get_staff_by_telegram_id
+    qa.get_store = lambda store_id: _fake_store
+    auth.get_staff_by_telegram_id = lambda conn, telegram_id: {"id": 1, "role": "master"}
 
     async def run() -> None:
         chat = _Chat()
@@ -1545,6 +1578,9 @@ def scenario_quick_intake_chat() -> None:
 
         def say(text=None, photo=None) -> _Msg:
             return _Msg(chat, bot, text=text, photo=photo)
+
+        def tap(data: str) -> _Cb:
+            return _Cb(chat, bot, data, chat.last()["id"])
 
         def screen() -> dict:
             return chat.bot_messages[-1]
@@ -1612,7 +1648,8 @@ def scenario_quick_intake_chat() -> None:
 
         # Бросить диалог на середине и начать другой: экран брошенного не
         # должен остаться висеть в чате (голый state.clear() забывал его).
-        await qa.contact_start(say(qa.BTN_CONTACT), state)
+        await qa.client_start(say(qa.BTN_CLIENT), state)
+        await qa.client_menu_add(tap("client_menu_add"), state)
         check("starting another flow wipes the abandoned one's screen", len(chat.bot_messages) == 1)
         check("the new flow starts at its own step 1 of 2", "шаг 1 из 2" in screen()["text"])
 
@@ -1620,6 +1657,8 @@ def scenario_quick_intake_chat() -> None:
         asyncio.run(run())
     finally:
         qa._resolve_staff_for_dm = original_resolve
+        qa.get_store = original_get_store
+        auth.get_staff_by_telegram_id = original_get_staff
 
     # Скупка ветвится: «на запчасти» вообще не спрашивает цену продажи,
     # поэтому этот шаг не должен попадать в знаменатель.
