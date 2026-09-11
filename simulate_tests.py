@@ -955,6 +955,205 @@ def scenario_repair_actions(db_path: str) -> None:
               repairs.complete_repair(conn, order_id_4, 1, override=True))
 
 
+def scenario_quick_cash_chat(db_path: str) -> None:
+    """bot/quick_actions.py's «💵 Касса» — расход / внести / снять, driven
+    through a fake private chat, same technique as
+    scenario_quick_intake_chat. Unlike that one, this drives all the way
+    through to the DB-writing confirm callbacks (cash_expense_confirm /
+    cash_adjustment_confirm) against the real shared test db — what's
+    actually worth checking here is that a chat-driven expense/внесение/
+    снятие lands the exact same core.cash rows the direct-call scenario
+    above already trusts, not just that the screens look right."""
+    print("scenario: quick Касса dialog (расход / внести / снять) via chat")
+    import asyncio
+    from types import SimpleNamespace
+
+    os.environ.setdefault("CRM_MINIAPP_URL", "https://example.invalid/miniapp")
+
+    from aiogram.fsm.context import FSMContext
+    from aiogram.fsm.storage.base import StorageKey
+    from aiogram.fsm.storage.memory import MemoryStorage
+
+    from bot import quick_actions as qa
+    from core.stores import StoreConfig
+
+    CHAT_ID = 777002
+    STAFF_TG_ID = 1417059281
+    fake_store = StoreConfig(id="test-cash-store", name="Тестовый магазин", db_path=db_path)
+
+    with get_conn(db_path) as conn:
+        auth.create_staff(conn, "cash_bot_tester", "pass", "Кассир Тест", "storekeeper")
+        auth.link_staff_telegram(conn, "cash_bot_tester", STAFF_TG_ID)
+        balance_before = cash.cash_balance(conn)
+
+    class _Chat:
+        def __init__(self) -> None:
+            self.log: list[dict] = []
+            self._next_id = 9000
+
+        def add(self, author: str, text: str, markup=None) -> int:
+            self._next_id += 1
+            self.log.append({"id": self._next_id, "author": author, "text": text, "markup": markup})
+            return self._next_id
+
+        def delete(self, message_id: int) -> None:
+            self.log = [m for m in self.log if m["id"] != message_id]
+
+        def edit(self, message_id: int, text: str, markup) -> None:
+            for m in self.log:
+                if m["id"] == message_id:
+                    m["text"], m["markup"] = text, markup
+
+        @property
+        def bot_messages(self) -> list[dict]:
+            return [m for m in self.log if m["author"] == "bot"]
+
+        def last(self) -> dict | None:
+            return self.log[-1] if self.log else None
+
+    class _Bot:
+        def __init__(self, chat: "_Chat") -> None:
+            self.chat = chat
+
+        async def delete_message(self, chat_id, message_id):
+            self.chat.delete(message_id)
+
+        async def delete_messages(self, chat_id, message_ids):
+            for mid in message_ids:
+                self.chat.delete(mid)
+
+        async def edit_message_text(self, chat_id, message_id, text, reply_markup=None):
+            self.chat.edit(message_id, text, reply_markup)
+
+    class _Msg:
+        def __init__(self, chat: "_Chat", bot: "_Bot", text: str) -> None:
+            self._chat_log = chat
+            self.bot = bot
+            self.chat = SimpleNamespace(id=CHAT_ID, type="private")
+            self.from_user = SimpleNamespace(id=STAFF_TG_ID, full_name="Кассир")
+            self.text = text
+            self.message_id = chat.add("staff", text)
+
+        async def answer(self, text, reply_markup=None):
+            return SimpleNamespace(message_id=self._chat_log.add("bot", text, reply_markup))
+
+    class _CbMessage:
+        def __init__(self, chat: "_Chat", message_id: int) -> None:
+            self.chat = SimpleNamespace(id=CHAT_ID, type="private")
+            self.message_id = message_id
+            self._chat_log = chat
+
+        async def edit_text(self, text, reply_markup=None):
+            self._chat_log.edit(self.message_id, text, reply_markup)
+
+    class _Cb:
+        def __init__(self, chat: "_Chat", bot: "_Bot", data: str, message_id: int) -> None:
+            self.data = data
+            self.from_user = SimpleNamespace(id=STAFF_TG_ID)
+            self.message = _CbMessage(chat, message_id)
+            self.bot = bot
+            self.answered: list[tuple] = []
+
+        async def answer(self, text=None, show_alert=False):
+            self.answered.append((text, show_alert))
+
+    original_resolve = qa._resolve_staff_for_dm
+    original_get_store = qa.get_store
+    qa._resolve_staff_for_dm = lambda telegram_id: (fake_store, {"role": "storekeeper"})
+    qa.get_store = lambda store_id: fake_store
+
+    async def run() -> None:
+        chat = _Chat()
+        bot = _Bot(chat)
+        state = FSMContext(storage=MemoryStorage(), key=StorageKey(bot_id=1, chat_id=CHAT_ID, user_id=STAFF_TG_ID))
+
+        def say(text: str) -> _Msg:
+            return _Msg(chat, bot, text)
+
+        def tap(data: str) -> _Cb:
+            return _Cb(chat, bot, data, chat.last()["id"])
+
+        def screen() -> dict:
+            return chat.bot_messages[-1]
+
+        # --- Расход ---
+        await qa.cash_start(say(qa.BTN_CASH), state)
+        check("cash menu shows the current balance", "Баланс:" in screen()["text"])
+
+        await qa.cash_menu_expense(tap("cash_menu_expense"), state)
+        check("expense flow asks for the amount", "Сумма расхода" in screen()["text"])
+
+        await qa.cash_expense_got_amount(say("250"), state)
+        check("expense flow then asks for a category", "Категория расхода" in screen()["text"])
+
+        await qa.cash_expense_got_category(tap("cash_cat_supplies"), state)
+        check("expense flow then asks for a comment", "Комментарий" in screen()["text"])
+
+        await qa.cash_expense_got_comment(say("Тест"), state)
+        card = screen()
+        check("expense confirm card recaps amount + category + comment",
+              "250 грн" in card["text"] and "Закупка" in card["text"] and "Тест" in card["text"])
+        check("expense confirm card carries confirm/cancel buttons", card["markup"] is not None)
+
+        await qa.cash_expense_confirm(tap("cash_expense_confirm"), state)
+        check("expense confirm clears the FSM state", (await state.get_state()) is None)
+        with get_conn(db_path) as conn:
+            after_expense = cash.cash_balance(conn)
+        check("a cash expense actually reduces the drawer balance by exactly its amount",
+              after_expense == balance_before - 250)
+
+        # --- Внести ---
+        await qa.cash_start(say(qa.BTN_CASH), state)
+        await qa.cash_menu_in(tap("cash_menu_in"), state)
+        check("«Внести» flow asks for the amount to bring in", "внесения" in screen()["text"])
+        await qa.cash_adjustment_got_amount(say("500"), state)
+        check("«Внести» flow then asks for an optional comment", "Комментарий" in screen()["text"])
+        await qa.cash_adjustment_skip_comment(tap("cash_comment_skip"), state)
+        check("«Внести» confirm card recaps the amount without a comment line",
+              "500 грн" in screen()["text"] and "Комментарий:" not in screen()["text"])
+        await qa.cash_adjustment_confirm(tap("cash_adjustment_confirm"), state)
+        with get_conn(db_path) as conn:
+            after_in = cash.cash_balance(conn)
+        check("«Внести» actually increases the drawer balance by exactly its amount",
+              after_in == after_expense + 500)
+
+        # --- Снять ---
+        await qa.cash_start(say(qa.BTN_CASH), state)
+        await qa.cash_menu_out(tap("cash_menu_out"), state)
+        check("«Снять» flow asks for the amount to take out", "снятия" in screen()["text"])
+        await qa.cash_adjustment_got_amount(say("100"), state)
+        await qa.cash_adjustment_got_comment(say("В сейф"), state)
+        check("«Снять» confirm card recaps a typed comment too", "В сейф" in screen()["text"])
+        await qa.cash_adjustment_confirm(tap("cash_adjustment_confirm"), state)
+        with get_conn(db_path) as conn:
+            after_out = cash.cash_balance(conn)
+        check("«Снять» actually decreases the drawer balance by exactly its amount",
+              after_out == after_in - 100)
+
+        # --- Отмена посреди диалога ---
+        # Three finished confirmations (Расход/Внести/Снять above) are
+        # legitimately still sitting in the chat at this point — a
+        # confirmed card is a lasting record, never auto-deleted (same as
+        # repair_confirm/buyback_confirm). Cancel must remove only the
+        # screen ITS OWN abandoned attempt put up, not those.
+        messages_before = len(chat.bot_messages)
+        await qa.cash_start(say(qa.BTN_CASH), state)
+        await qa.cash_menu_expense(tap("cash_menu_expense"), state)
+        await qa.cash_expense_got_amount(say("999"), state)
+        await qa.cancel_flow(say(qa.BTN_CANCEL), state)
+        check("❌ Отмена mid-flow wipes its own screen, leaving earlier confirmations untouched",
+              len(chat.bot_messages) == messages_before)
+        with get_conn(db_path) as conn:
+            after_cancel = cash.cash_balance(conn)
+        check("a cancelled expense never touches the balance", after_cancel == after_out)
+
+    try:
+        asyncio.run(run())
+    finally:
+        qa._resolve_staff_for_dm = original_resolve
+        qa.get_store = original_get_store
+
+
 def scenario_repair_attachments(db_path: str) -> None:
     print("scenario: photo replies attach to a repair via its posted card")
     with get_conn(db_path) as conn:
@@ -2845,6 +3044,7 @@ def main() -> None:
         scenario_masters(db_path)
         scenario_repair_card_notify(db_path)
         scenario_repair_actions(db_path)
+        scenario_quick_cash_chat(db_path)
         scenario_repair_attachments(db_path)
         scenario_phone_normalization(db_path)
         scenario_store_settings(db_path)

@@ -59,6 +59,8 @@ _REPAIR_ROLES = ("owner", "admin", "master")
 _BUYBACK_ROLES = ("owner", "admin", "storekeeper")
 # Mirrors bot.purchase_photo._DRAFT_ROLES.
 _PURCHASE_ROLES = ("owner", "admin", "storekeeper")
+# Mirrors webapp.routers.cash._CASH_ROLES.
+_CASH_ROLES = ("owner", "admin", "storekeeper")
 
 # Real button colors: `style` isn't a typed aiogram field (not in
 # KeyboardButton.model_fields), but the Pydantic model has extra="allow"
@@ -73,6 +75,7 @@ BTN_CONTACT = "👤 Контакт"
 BTN_BUYBACK = "💰 Скупка"
 BTN_PURCHASE = "📦 Приход"
 BTN_SUMMARY = "📊 Сводка"
+BTN_CASH = "💵 Касса"
 BTN_CANCEL = "❌ Отмена"
 
 # Один словарь на оба места, где способ оплаты показывается сотруднику
@@ -94,7 +97,7 @@ QUICK_ACTIONS_KEYBOARD = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text=BTN_REPAIR), KeyboardButton(text=BTN_CONTACT, style="primary")],
         [KeyboardButton(text=BTN_BUYBACK, style="success"), KeyboardButton(text=BTN_PURCHASE)],
-        [KeyboardButton(text=BTN_SUMMARY)],
+        [KeyboardButton(text=BTN_SUMMARY), KeyboardButton(text=BTN_CASH)],
         [KeyboardButton(text=BTN_CANCEL, style="danger")],
     ],
     resize_keyboard=True,
@@ -128,6 +131,23 @@ class BuybackIntake(StatesGroup):
     purpose = State()
     resale_price = State()
     photo = State()
+    confirm = State()
+
+
+class CashExpense(StatesGroup):
+    amount = State()
+    category = State()
+    comment = State()
+    confirm = State()
+
+
+class CashAdjustment(StatesGroup):
+    """Shared by both «➕ Внести» and «➖ Снять» — a `direction` field in
+    the FSM data ("in"/"out", set at entry by cash_menu_in/cash_menu_out)
+    tells the two apart, same as BuybackIntake.purpose branches a single
+    flow rather than being two separate StatesGroups."""
+    amount = State()
+    comment = State()
     confirm = State()
 
 
@@ -228,12 +248,38 @@ def _summary_contact(data: dict) -> list[str]:
     return [f"Имя: {html.escape(data['name'])}"] if data.get("name") else []
 
 
+def _steps_cash_expense(_data: dict) -> list[str]:
+    return ["amount", "category", "comment"]
+
+
+def _summary_cash_expense(data: dict) -> list[str]:
+    lines = []
+    if data.get("amount"):
+        lines.append(f"Сумма: {data['amount']} грн")
+    if data.get("category"):
+        lines.append(f"Категория: {core_cash.EXPENSE_CATEGORIES[data['category']]}")
+    return lines
+
+
+def _steps_cash_adjustment(_data: dict) -> list[str]:
+    return ["amount", "comment"]
+
+
+def _summary_cash_adjustment(data: dict) -> list[str]:
+    if not data.get("amount"):
+        return []
+    verb = "Внести" if data.get("direction") == "in" else "Снять"
+    return [f"{verb}: {data['amount']} грн"]
+
+
 # Ключ — имя StatesGroup ровно так, как aiogram отдаёт его в
 # state.get_state() ("RepairIntake:model").
 _FLOWS = {
     "RepairIntake": ("🔧 Приём ремонта", _steps_repair, _summary_repair),
     "BuybackIntake": ("💰 Скупка техники", _steps_buyback, _summary_buyback),
     "QuickContact": ("👤 Новый клиент", _steps_contact, _summary_contact),
+    "CashExpense": ("💵 Расход", _steps_cash_expense, _summary_cash_expense),
+    "CashAdjustment": ("💵 Касса", _steps_cash_adjustment, _summary_cash_adjustment),
 }
 
 
@@ -483,7 +529,265 @@ async def summary_view(message: Message) -> None:
     await message.answer("\n".join(lines))
 
 
-@router.message(F.text == BTN_CANCEL, StateFilter(RepairIntake, QuickContact, BuybackIntake))
+# --- Касса: расход / внести / снять, прямо из чата ---
+
+@router.message(F.text == BTN_CASH, F.chat.type == "private")
+async def cash_start(message: Message, state: FSMContext) -> None:
+    """Not itself an FSM flow — a small menu (баланс + 3 действия) whose
+    buttons start CashExpense/CashAdjustment. Uses _repost (not a bare
+    message.answer) so prompt_message_id is already tracked from this
+    very first screen: CashExpense/CashAdjustment's real first step is a
+    button tap on THIS menu (a callback), not a typed reply — unlike
+    every other flow above, there's no earlier message-triggered _advance
+    to have set prompt_message_id first."""
+    resolved = _resolve_staff_for_dm(message.from_user.id)
+    if not resolved:
+        return
+    store, staff = resolved
+    if staff["role"] not in _CASH_ROLES:
+        await message.answer("Недостаточно прав для операций с кассой.")
+        return
+
+    await _reset(message, state)
+    await state.update_data(store_id=store.id)
+    await _consume(state, message)
+    with get_conn(store.db_path) as conn:
+        balance = core_cash.cash_balance(conn)
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➖ Расход", callback_data="cash_menu_expense")],
+        [
+            InlineKeyboardButton(text="➕ Внести", callback_data="cash_menu_in", style="success"),
+            InlineKeyboardButton(text="➖ Снять", callback_data="cash_menu_out"),
+        ],
+    ])
+    await _repost(message, state, f"💵 <b>Касса</b>\nБаланс: {balance} грн", keyboard)
+
+
+async def _resolve_cash_actor(callback: CallbackQuery, state: FSMContext):
+    """Staff row for whoever tapped a cash-menu button, re-checked here
+    (not just once back at cash_start) — same reason repair/buyback/
+    contact flows re-check role again at their own final confirm: a real,
+    if rare, gap between "menu shown" and "button tapped" (role changed,
+    store reconfigured). None (having already answered the callback) if
+    the check fails."""
+    data = await state.get_data()
+    try:
+        store = get_store(data["store_id"])
+    except KeyError:
+        await callback.answer("Магазин больше не настроен.", show_alert=True)
+        return None
+    with get_conn(store.db_path) as conn:
+        staff = core_auth.get_staff_by_telegram_id(conn, callback.from_user.id)
+    if not staff or staff["role"] not in _CASH_ROLES:
+        await callback.answer("Недостаточно прав.", show_alert=True)
+        return None
+    return staff
+
+
+@router.callback_query(F.data == "cash_menu_expense")
+async def cash_menu_expense(callback: CallbackQuery, state: FSMContext) -> None:
+    if not await _resolve_cash_actor(callback, state):
+        return
+    await state.set_state(CashExpense.amount)
+    await _advance_callback(callback, state, "Сумма расхода (грн):")
+    await callback.answer()
+
+
+@router.callback_query(F.data == "cash_menu_in")
+async def cash_menu_in(callback: CallbackQuery, state: FSMContext) -> None:
+    if not await _resolve_cash_actor(callback, state):
+        return
+    await state.set_state(CashAdjustment.amount)
+    await state.update_data(direction="in")
+    await _advance_callback(callback, state, "Сумма для внесения (грн):")
+    await callback.answer()
+
+
+@router.callback_query(F.data == "cash_menu_out")
+async def cash_menu_out(callback: CallbackQuery, state: FSMContext) -> None:
+    if not await _resolve_cash_actor(callback, state):
+        return
+    await state.set_state(CashAdjustment.amount)
+    await state.update_data(direction="out")
+    await _advance_callback(callback, state, "Сумма для снятия (грн):")
+    await callback.answer()
+
+
+@router.message(CashExpense.amount, F.text)
+async def cash_expense_got_amount(message: Message, state: FSMContext) -> None:
+    amount = _parse_positive_int(message.text)
+    if not amount:
+        await _nudge(message, state, "Введите сумму числом, например: 250.")
+        return
+    await state.update_data(amount=amount)
+    await state.set_state(CashExpense.category)
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=label, callback_data=f"cash_cat_{key}")]
+        for key, label in core_cash.EXPENSE_CATEGORIES.items()
+    ])
+    await _advance(message, state, "Категория расхода:", reply_markup=keyboard)
+
+
+@router.callback_query(F.data.startswith("cash_cat_"), CashExpense.category)
+async def cash_expense_got_category(callback: CallbackQuery, state: FSMContext) -> None:
+    category = callback.data.removeprefix("cash_cat_")
+    if category not in core_cash.EXPENSE_CATEGORIES:
+        await callback.answer()
+        return
+    await state.update_data(category=category)
+    await state.set_state(CashExpense.comment)
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="Без комментария ➡️", callback_data="cash_comment_skip"),
+    ]])
+    await _advance_callback(callback, state, "Комментарий (необязательно):", keyboard)
+    await callback.answer()
+
+
+def _cash_expense_confirm_text(data: dict) -> str:
+    lines = [
+        "📋 Расход:",
+        f"Сумма: {data['amount']} грн",
+        f"Категория: {core_cash.EXPENSE_CATEGORIES[data['category']]}",
+    ]
+    if data.get("comment"):
+        lines.append(f"Комментарий: {html.escape(data['comment'])}")
+    return "\n".join(lines)
+
+
+def _cash_expense_confirm_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Подтвердить", callback_data="cash_expense_confirm", style="success"),
+        InlineKeyboardButton(text="❌ Отмена", callback_data="cash_cancel", style="danger"),
+    ]])
+
+
+@router.message(CashExpense.comment, F.text)
+async def cash_expense_got_comment(message: Message, state: FSMContext) -> None:
+    data = await state.update_data(comment=message.text.strip() or None)
+    await state.set_state(CashExpense.confirm)
+    await _advance(message, state, _cash_expense_confirm_text(data), reply_markup=_cash_expense_confirm_keyboard())
+
+
+@router.callback_query(F.data == "cash_comment_skip", CashExpense.comment)
+async def cash_expense_skip_comment(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.update_data(comment=None)
+    await state.set_state(CashExpense.confirm)
+    await _advance_callback(callback, state, _cash_expense_confirm_text(data), _cash_expense_confirm_keyboard())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "cash_expense_confirm", CashExpense.confirm)
+async def cash_expense_confirm(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    try:
+        store = get_store(data["store_id"])
+    except KeyError:
+        await state.clear()
+        await callback.answer("Магазин больше не настроен.", show_alert=True)
+        return
+
+    with get_conn(store.db_path) as conn:
+        staff = core_auth.get_staff_by_telegram_id(conn, callback.from_user.id)
+        if not staff or staff["role"] not in _CASH_ROLES:
+            await state.clear()
+            await callback.answer("Недостаточно прав.", show_alert=True)
+            return
+        core_cash.record_expense(conn, "cash", data["amount"], data["category"], data.get("comment"), staff["id"])
+
+    user_message_ids = data.get("user_message_ids", [])
+    await state.clear()
+    await _safe_delete_many(callback.bot, callback.message.chat.id, user_message_ids)
+    open_keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="Открыть в CRM", web_app=WebAppInfo(url=crm_link("/cash", staff["id"], store.id))),
+    ]])
+    await callback.message.edit_text(
+        f"✅ Расход записан: {data['amount']} грн ({core_cash.EXPENSE_CATEGORIES[data['category']]}).",
+        reply_markup=open_keyboard,
+    )
+    await callback.answer("Готово")
+
+
+@router.message(CashAdjustment.amount, F.text)
+async def cash_adjustment_got_amount(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    amount = _parse_positive_int(message.text)
+    if not amount:
+        hint = "Введите сумму числом, например: 500." if data.get("direction") == "in" else "Введите сумму числом, например: 300."
+        await _nudge(message, state, hint)
+        return
+    await state.update_data(amount=amount)
+    await state.set_state(CashAdjustment.comment)
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="Без комментария ➡️", callback_data="cash_comment_skip"),
+    ]])
+    await _advance(message, state, "Комментарий (необязательно):", reply_markup=keyboard)
+
+
+def _cash_adjustment_confirm_text(data: dict) -> str:
+    verb = "Внести" if data.get("direction") == "in" else "Снять"
+    lines = [f"📋 {verb} наличные:", f"Сумма: {data['amount']} грн"]
+    if data.get("comment"):
+        lines.append(f"Комментарий: {html.escape(data['comment'])}")
+    return "\n".join(lines)
+
+
+def _cash_adjustment_confirm_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Подтвердить", callback_data="cash_adjustment_confirm", style="success"),
+        InlineKeyboardButton(text="❌ Отмена", callback_data="cash_cancel", style="danger"),
+    ]])
+
+
+@router.message(CashAdjustment.comment, F.text)
+async def cash_adjustment_got_comment(message: Message, state: FSMContext) -> None:
+    data = await state.update_data(comment=message.text.strip() or None)
+    await state.set_state(CashAdjustment.confirm)
+    await _advance(
+        message, state, _cash_adjustment_confirm_text(data), reply_markup=_cash_adjustment_confirm_keyboard()
+    )
+
+
+@router.callback_query(F.data == "cash_comment_skip", CashAdjustment.comment)
+async def cash_adjustment_skip_comment(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.update_data(comment=None)
+    await state.set_state(CashAdjustment.confirm)
+    await _advance_callback(
+        callback, state, _cash_adjustment_confirm_text(data), _cash_adjustment_confirm_keyboard()
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "cash_adjustment_confirm", CashAdjustment.confirm)
+async def cash_adjustment_confirm(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    try:
+        store = get_store(data["store_id"])
+    except KeyError:
+        await state.clear()
+        await callback.answer("Магазин больше не настроен.", show_alert=True)
+        return
+
+    signed_amount = data["amount"] if data.get("direction") == "in" else -data["amount"]
+    with get_conn(store.db_path) as conn:
+        staff = core_auth.get_staff_by_telegram_id(conn, callback.from_user.id)
+        if not staff or staff["role"] not in _CASH_ROLES:
+            await state.clear()
+            await callback.answer("Недостаточно прав.", show_alert=True)
+            return
+        core_cash.record_adjustment(conn, signed_amount, data.get("comment"), staff["id"])
+
+    user_message_ids = data.get("user_message_ids", [])
+    await state.clear()
+    await _safe_delete_many(callback.bot, callback.message.chat.id, user_message_ids)
+    verb = "Внесено" if signed_amount > 0 else "Снято"
+    open_keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="Открыть в CRM", web_app=WebAppInfo(url=crm_link("/cash", staff["id"], store.id))),
+    ]])
+    await callback.message.edit_text(f"✅ {verb}: {data['amount']} грн.", reply_markup=open_keyboard)
+    await callback.answer("Готово")
+
+
+@router.message(F.text == BTN_CANCEL, StateFilter(RepairIntake, QuickContact, BuybackIntake, CashExpense, CashAdjustment))
 async def cancel_flow(message: Message, state: FSMContext) -> None:
     """Deletes EVERYTHING from this flow attempt — the bot's own tracked
     message, every reply the staff member typed along the way (name,
@@ -887,7 +1191,7 @@ async def contact_confirm(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer("Готово")
 
 
-@router.callback_query(F.data.in_({"quick_repair_cancel", "quick_contact_cancel", "quick_buyback_cancel"}))
+@router.callback_query(F.data.in_({"quick_repair_cancel", "quick_contact_cancel", "quick_buyback_cancel", "cash_cancel"}))
 async def quick_cancel_callback(callback: CallbackQuery, state: FSMContext) -> None:
     """Inline ❌ Отмена on the confirm card — same full cleanup as
     cancel_flow, minus the entry-tap-of-cancel (a button tap doesn't
@@ -905,6 +1209,6 @@ async def quick_cancel_callback(callback: CallbackQuery, state: FSMContext) -> N
 # message while waiting on inline-button confirm) gets a nudge instead of
 # silence ---
 
-@router.message(StateFilter(RepairIntake, QuickContact, BuybackIntake))
+@router.message(StateFilter(RepairIntake, QuickContact, BuybackIntake, CashExpense, CashAdjustment))
 async def quick_flow_fallback(message: Message, state: FSMContext) -> None:
     await _nudge(message, state, "Не понял ответ. Следуйте подсказке выше, либо ❌ Отмена.")
