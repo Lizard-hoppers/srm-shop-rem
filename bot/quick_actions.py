@@ -26,6 +26,7 @@ from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
+    BufferedInputFile,
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -106,12 +107,18 @@ QUICK_ACTIONS_KEYBOARD = ReplyKeyboardMarkup(
 
 
 class RepairIntake(StatesGroup):
-    name = State()
-    phone = State()
-    device_type = State()
-    model = State()
-    defect = State()
+    """Order (18.09, Павел): фото сразу, пока устройство ещё в руках у
+    сотрудника — потом неисправность/модель/оценка, и только в конце
+    контакты клиента, которые обычно уже написаны в талоне/на бумажке
+    рядом. Тип устройства (device_type) убран совсем — "модель" одной
+    строкой ("iPhone 12") несёт достаточно, а отдельный вопрос только
+    замедлял приём."""
     photo = State()
+    defect = State()
+    model = State()
+    price = State()
+    phone = State()
+    name = State()
     confirm = State()
 
 
@@ -197,7 +204,7 @@ _SEPARATOR = "──────────────"
 
 
 def _steps_repair(_data: dict) -> list[str]:
-    return ["name", "phone", "device_type", "model", "defect", "photo"]
+    return ["photo", "defect", "model", "price", "phone", "name"]
 
 
 def _steps_contact(_data: dict) -> list[str]:
@@ -221,11 +228,18 @@ def _steps_buyback(data: dict) -> list[str]:
 # без единого следа в логах (манифест §7).
 
 def _client_line(label: str, data: dict) -> str | None:
+    # Neither field required alone: RepairIntake now asks for the phone
+    # BEFORE the name (18.09), so a recap shown between those two steps
+    # has a phone but no name yet — this used to require name and so
+    # dropped an already-collected phone silently until the name step.
     name = data.get("client_name")
-    if not name:
-        return None
     phone = data.get("client_phone")
-    return f"{label}: {html.escape(name)}" + (f" · {html.escape(phone)}" if phone else "")
+    if not name and not phone:
+        return None
+    parts = [html.escape(name)] if name else []
+    if phone:
+        parts.append(html.escape(phone))
+    return f"{label}: " + " · ".join(parts)
 
 
 def _device_line(data: dict) -> str | None:
@@ -234,9 +248,18 @@ def _device_line(data: dict) -> str | None:
 
 
 def _summary_repair(data: dict) -> list[str]:
-    lines = [_client_line("Клиент", data), _device_line(data)]
+    # Order mirrors collection order (photo first, client contacts last) —
+    # a mid-flow recap should read like "what I've told the bot so far",
+    # not a fixed card layout.
+    lines = []
+    if data.get("photo_bytes"):
+        lines.append("Фото: приложено ✅")
+    lines.append(_device_line(data))
     if data.get("defect_description"):
         lines.append(f"Неисправность: {html.escape(data['defect_description'])}")
+    if data.get("price_estimate"):
+        lines.append(f"Оценка: {data['price_estimate']} грн")
+    lines.append(_client_line("Клиент", data))
     return [line for line in lines if line]
 
 
@@ -439,9 +462,9 @@ async def repair_start(message: Message, state: FSMContext) -> None:
         return
 
     await _reset(message, state)
-    await state.set_state(RepairIntake.name)
+    await state.set_state(RepairIntake.photo)
     await state.update_data(store_id=store.id)
-    await _send_prompt(message, state, "Имя клиента:")
+    await _send_prompt(message, state, "📷 Пришлите фото устройства:")
 
 
 @router.message(F.text == BTN_CLIENT, F.chat.type == "private")
@@ -975,37 +998,30 @@ async def cancel_noop(message: Message) -> None:
 
 # --- Ремонт: step by step ---
 
-@router.message(RepairIntake.name, F.text)
-async def repair_got_name(message: Message, state: FSMContext) -> None:
-    name = message.text.strip()
-    if not name:
-        await _nudge(message, state, "Имя не может быть пустым.")
+@router.message(RepairIntake.photo, F.photo)
+async def repair_got_photo(message: Message, state: FSMContext) -> None:
+    photo = message.photo[-1]
+    file = await message.bot.get_file(photo.file_id)
+    buf = await message.bot.download_file(file.file_path)
+    await state.update_data(photo_bytes=buf.read())
+    await state.set_state(RepairIntake.defect)
+    await _advance(message, state, "Неисправность (что случилось с устройством):")
+
+
+@router.message(RepairIntake.photo)
+async def repair_photo_fallback(message: Message, state: FSMContext) -> None:
+    await _nudge(message, state, "Пришлите фото устройства (как фото, не файлом).")
+
+
+@router.message(RepairIntake.defect, F.text)
+async def repair_got_defect(message: Message, state: FSMContext) -> None:
+    defect = message.text.strip()
+    if not defect:
+        await _nudge(message, state, "Опишите неисправность.")
         return
-    await state.update_data(client_name=name)
-    await state.set_state(RepairIntake.phone)
-    await _advance(message, state, "Телефон клиента:")
-
-
-@router.message(RepairIntake.phone, F.text)
-async def repair_got_phone(message: Message, state: FSMContext) -> None:
-    phone = core_clients.normalize_phone(message.text.strip())
-    if not phone:
-        await _nudge(message, state, "Не похоже на номер телефона. Например: 0501234567.")
-        return
-    await state.update_data(client_phone=phone)
-    await state.set_state(RepairIntake.device_type)
-    await _advance(message, state, "Тип устройства (например: Смартфон, Ноутбук, Планшет):")
-
-
-@router.message(RepairIntake.device_type, F.text)
-async def repair_got_device_type(message: Message, state: FSMContext) -> None:
-    device_type = message.text.strip()
-    if not device_type:
-        await _nudge(message, state, "Не может быть пустым.")
-        return
-    await state.update_data(device_type=device_type)
+    await state.update_data(defect_description=defect)
     await state.set_state(RepairIntake.model)
-    await _advance(message, state, "Модель устройства:")
+    await _advance(message, state, "Модель устройства (например: iPhone 12):")
 
 
 @router.message(RepairIntake.model, F.text)
@@ -1015,48 +1031,107 @@ async def repair_got_model(message: Message, state: FSMContext) -> None:
         await _nudge(message, state, "Не может быть пустым.")
         return
     await state.update_data(model=model)
-    await state.set_state(RepairIntake.defect)
-    await _advance(message, state, "Опишите неисправность:")
+    await state.set_state(RepairIntake.price)
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="Пока не знаю ➡️", callback_data="repair_price_skip"),
+    ]])
+    await _advance(message, state, "Оценочная стоимость ремонта (грн):", reply_markup=keyboard)
 
 
-@router.message(RepairIntake.defect, F.text)
-async def repair_got_defect(message: Message, state: FSMContext) -> None:
-    defect = message.text.strip()
-    if not defect:
-        await _nudge(message, state, "Не может быть пустым.")
+@router.message(RepairIntake.price, F.text)
+async def repair_got_price(message: Message, state: FSMContext) -> None:
+    price = _parse_positive_int(message.text)
+    if not price:
+        await _nudge(message, state, "Введите сумму числом, например: 500 — либо «Пока не знаю».")
         return
-    await state.update_data(defect_description=defect)
-    await state.set_state(RepairIntake.photo)
-    await _advance(message, state, "📷 Пришлите фото устройства:")
+    await state.update_data(price_estimate=price)
+    await state.set_state(RepairIntake.phone)
+    await _advance(message, state, "Телефон клиента:")
 
 
-@router.message(RepairIntake.photo, F.photo)
-async def repair_got_photo(message: Message, state: FSMContext) -> None:
-    photo = message.photo[-1]
-    file = await message.bot.get_file(photo.file_id)
-    buf = await message.bot.download_file(file.file_path)
-    await state.update_data(photo_bytes=buf.read())
+@router.callback_query(F.data == "repair_price_skip", RepairIntake.price)
+async def repair_skip_price(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.update_data(price_estimate=None)
+    await state.set_state(RepairIntake.phone)
+    await _advance_callback(callback, state, "Телефон клиента:")
+    await callback.answer()
+
+
+@router.message(RepairIntake.phone, F.text)
+async def repair_got_phone(message: Message, state: FSMContext) -> None:
+    phone = core_clients.normalize_phone(message.text.strip())
+    if not phone:
+        await _nudge(message, state, "Не похоже на номер телефона. Например: 0501234567.")
+        return
+    await state.update_data(client_phone=phone)
+    await state.set_state(RepairIntake.name)
+    await _advance(message, state, "Имя клиента:")
+
+
+def _repair_confirm_caption(data: dict) -> str:
+    """Full recap as a PHOTO caption (Павел, 18.09): the confirm screen
+    must actually show the device photo, not just say "фото приложено" —
+    photo is collected first now, so it's already in hand by this point.
+    Telegram caps a photo caption at 1024 chars (core.notify._as_caption
+    hits the same limit on the group card) — a free-typed defect
+    description has no length limit on its own end, so this stays a
+    safety net, not the expected case."""
+    price_line = f"Оценка: {data['price_estimate']} грн" if data.get("price_estimate") else "Оценка: пока не известна"
+    lines = [
+        "📋 Проверьте данные:",
+        "",
+        f"Модель: {html.escape(data['model'])}",
+        f"Неисправность: {html.escape(data['defect_description'])}",
+        price_line,
+        f"Телефон: {html.escape(data['client_phone'])}",
+        f"Имя: {html.escape(data['client_name'])}",
+    ]
+    text = "\n".join(lines)
+    return text if len(text) <= 1024 else text[:1023] + "…"
+
+
+@router.message(RepairIntake.name, F.text)
+async def repair_got_name(message: Message, state: FSMContext) -> None:
+    name = message.text.strip()
+    if not name:
+        await _nudge(message, state, "Имя не может быть пустым.")
+        return
+    data = await state.update_data(client_name=name)
     await state.set_state(RepairIntake.confirm)
 
-    data = await state.get_data()
-    text = (
-        "📋 Проверьте данные:\n\n"
-        f"Клиент: {html.escape(data['client_name'])}\n"
-        f"Телефон: {html.escape(data['client_phone'])}\n"
-        f"Устройство: {html.escape(data['device_type'])} {html.escape(data['model'])}\n"
-        f"Неисправность: {html.escape(data['defect_description'])}\n"
-        "Фото: приложено ✅"
-    )
+    # Not _advance: the confirm screen is a PHOTO message (Павел wants the
+    # actual device photo on the card, not a text line saying it exists),
+    # and _repost/_advance only ever send plain text. Same Clean-Chat
+    # shape by hand instead — consume the reply, send the new screen,
+    # delete the previous one.
     keyboard = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="✅ Принять", callback_data="quick_repair_confirm", style="success"),
         InlineKeyboardButton(text="❌ Отмена", callback_data="quick_repair_cancel", style="danger"),
     ]])
-    await _advance(message, state, text, reply_markup=keyboard)
+    caption = _repair_confirm_caption(data)
+    await _consume(state, message)
+    previous_id = data.get("prompt_message_id")
+    photo = BufferedInputFile(data["photo_bytes"], filename="device.jpg")
+    sent = await message.answer_photo(photo, caption=caption, reply_markup=keyboard)
+    await state.update_data(prompt_message_id=sent.message_id, prompt_text=caption, prompt_markup=keyboard)
+    if previous_id:
+        await _safe_delete_many(message.bot, message.chat.id, [previous_id])
 
 
-@router.message(RepairIntake.photo)
-async def repair_photo_fallback(message: Message, state: FSMContext) -> None:
-    await _nudge(message, state, "Пришлите фото устройства (как фото, не файлом).")
+@router.message(RepairIntake.confirm)
+async def repair_confirm_fallback(message: Message, state: FSMContext) -> None:
+    """Stray message while the photo confirm card is showing. Unlike
+    _nudge (which _reposts as plain text — quick_flow_fallback's normal
+    path for every other flow's confirm step), this card carries the
+    device photo, so a text-only repost would silently lose it. Just
+    delete the stray reply and point back at the card instead — tracked
+    in user_message_ids (not prompt_message_id: the card itself stays
+    "current") so this reminder gets swept on confirm/cancel/abandon same
+    as any other clutter, instead of lingering as a second permanent
+    message once the flow actually finishes."""
+    await _consume(state, message)
+    sent = await message.answer("Нажмите «✅ Принять» или «❌ Отмена» на карточке выше.")
+    await _track(state, sent)
 
 
 @router.callback_query(F.data == "quick_repair_confirm", RepairIntake.confirm)
@@ -1079,9 +1154,9 @@ async def repair_confirm(callback: CallbackQuery, state: FSMContext) -> None:
         order_id, card_text, keyboard, photo_for_notify = core_repairs.create_repair_intake(
             conn,
             client_name=data["client_name"], client_phone=data["client_phone"],
-            device_type=data["device_type"], brand=None, model=data["model"],
+            device_type="", brand=None, model=data["model"],
             serial_number=None, defect_description=data["defect_description"],
-            channel="offline", master_id=None, price_estimate=None,
+            channel="offline", master_id=None, price_estimate=data.get("price_estimate"),
             staff_id=staff["id"], photo=(data["photo_bytes"], ".jpg"),
         )
 
@@ -1092,16 +1167,23 @@ async def repair_confirm(callback: CallbackQuery, state: FSMContext) -> None:
 
     user_message_ids = data.get("user_message_ids", [])
     await state.clear()
-    # Clean Chat: wipe the whole Q&A trail (name/phone/... replies), leave
-    # only the final confirmation card as this flow's one lasting trace.
+    # Clean Chat everywhere else means "delete the trail, keep only the
+    # final screen" — but this card (photo + full details) stays exactly
+    # as approved (Павел, 18.09: "карточка должна остаться, а не
+    # удалиться"), not collapse into a short "принято" line. Trail still
+    # goes; just strip the buttons (edit_reply_markup — works on a photo
+    # message, unlike edit_text/edit_caption's own separate methods) so a
+    # second tap can't double-submit, and post the CRM link separately.
     await _safe_delete_many(callback.bot, callback.message.chat.id, user_message_ids)
+    await callback.message.edit_reply_markup(reply_markup=None)
+
     open_keyboard = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(
             text="Открыть в CRM",
             web_app=WebAppInfo(url=crm_link(f"/repairs/{order_id}", staff["id"], store.id)),
         ),
     ]])
-    await callback.message.edit_text(
+    await callback.message.answer(
         f"✅ Ремонт №{order_id} принят.\n\nЕсли нужно уточнить цену или назначить мастера — карточка ремонта:",
         reply_markup=open_keyboard,
     )

@@ -1532,6 +1532,12 @@ def scenario_quick_intake_chat() -> None:
         async def answer(self, text, reply_markup=None):
             return SimpleNamespace(message_id=self._chat_log.add("bot", text, reply_markup))
 
+        async def answer_photo(self, photo, caption=None, reply_markup=None):
+            # The fake chat log doesn't distinguish a photo's caption from
+            # a plain message's text — every check below only cares about
+            # that string and the attached keyboard, not the transport.
+            return SimpleNamespace(message_id=self._chat_log.add("bot", caption, reply_markup))
+
     class _CbMessage:
         def __init__(self, chat: _Chat, message_id: int) -> None:
             self.chat = SimpleNamespace(id=CHAT_ID, type="private")
@@ -1540,6 +1546,14 @@ def scenario_quick_intake_chat() -> None:
 
         async def edit_text(self, text, reply_markup=None):
             self._chat_log.edit(self.message_id, text, reply_markup)
+
+        async def edit_reply_markup(self, reply_markup=None):
+            for m in self._chat_log.log:
+                if m["id"] == self.message_id:
+                    m["markup"] = reply_markup
+
+        async def answer(self, text, reply_markup=None):
+            return SimpleNamespace(message_id=self._chat_log.add("bot", text, reply_markup))
 
     class _Cb:
         def __init__(self, chat: _Chat, bot: _Bot, data: str, message_id: int) -> None:
@@ -1588,69 +1602,75 @@ def scenario_quick_intake_chat() -> None:
         await qa.repair_start(say(qa.BTN_REPAIR), state)
         check("tap on 🔧 Ремонт leaves exactly one bot message", len(chat.bot_messages) == 1)
         check("the tap itself is deleted right away", chat.staff_messages == [])
-        check("first screen is step 1 of 6 and asks for the name",
-              "шаг 1 из 6" in screen()["text"] and "Имя клиента:" in screen()["text"])
+        check("first screen is step 1 of 6 and asks for the photo",
+              "шаг 1 из 6" in screen()["text"] and "фото" in screen()["text"].lower())
 
         first_screen_id = screen()["id"]
-        await qa.repair_got_name(say("Вася <дома>"), state)
+        await qa.repair_got_photo(say(photo=[SimpleNamespace(file_id="photo-1")]), state)
         check("answering REPOSTS a new message instead of editing the old one in place",
               screen()["id"] != first_screen_id)
         check("still exactly one bot message after the repost", len(chat.bot_messages) == 1)
         check("the screen is the last message in the chat", chat.last()["author"] == "bot")
-        check("the answer itself is gone from the chat", chat.staff_messages == [])
-        check("step 2 asks for the phone", "шаг 2 из 6" in screen()["text"] and "Телефон клиента:" in screen()["text"])
-        check("what was already entered is recapped on the screen", "Клиент: Вася" in screen()["text"])
+        check("the sent photo is not left lying in the chat", chat.staff_messages == [])
+        check("step 2 asks for the defect", "шаг 2 из 6" in screen()["text"] and "неисправность" in screen()["text"].lower())
+        check("the photo is already acknowledged in the recap", "Фото: приложено ✅" in screen()["text"])
+
+        await qa.repair_got_defect(say("Не включается <после падения>"), state)
+        check("step 3 asks for the model", "шаг 3 из 6" in screen()["text"] and "Модель устройства" in screen()["text"])
         check("staff-typed text is HTML-escaped in the recap (parse_mode=HTML)",
-              "&lt;дома&gt;" in screen()["text"] and "<дома>" not in screen()["text"])
+              "&lt;после падения&gt;" in screen()["text"] and "<после падения>" not in screen()["text"])
+
+        await qa.repair_got_model(say("iPhone 12"), state)
+        check("device type is gone — the model alone is the device line", "Устройство: iPhone 12" in screen()["text"])
+        check("step 4 asks for the price estimate, with a skip button",
+              "шаг 4 из 6" in screen()["text"] and "Оценочная стоимость" in screen()["text"]
+              and screen()["markup"] is not None)
+
+        await qa.repair_got_price(say("не число"), state)
+        check("a bad price answer warns WITHOUT losing the question",
+              screen()["text"].startswith("⚠️") and "Оценочная стоимость" in screen()["text"])
+
+        skip_button = screen()["markup"].inline_keyboard[0][0]
+        await qa.repair_skip_price(tap(skip_button.callback_data), state)
+        check("skipping the price moves straight to the phone",
+              "шаг 5 из 6" in screen()["text"] and "Телефон клиента:" in screen()["text"])
+        check("a skipped price recaps as 'пока не известна', not a stale warning",
+              "Оценка:" not in screen()["text"])
 
         # "+380" — ровно то, что остаётся, если отправить телефон, не
         # дописав его после кода страны; normalize_phone трактует это как
         # «ничего не ввели» (см. её docstring).
         await qa.repair_got_phone(say("+380"), state)
-        check("a bad answer warns WITHOUT losing the question",
+        check("a bad phone answer warns WITHOUT losing the question",
               screen()["text"].startswith("⚠️") and "Телефон клиента:" in screen()["text"])
-        check("a warning still leaves one bot message, still last",
-              len(chat.bot_messages) == 1 and chat.last()["author"] == "bot")
-        check("the warning screen still carries the recap", "Клиент: Вася" in screen()["text"])
-
-        # До 04.09 normalize_phone возвращала свободный текст как есть, и
-        # «не помню» уходило в БД как телефон клиента — подсказка ниже была
-        # недостижима для всего, кроме пустой строки и «+380».
-        await qa.repair_got_phone(say("не помню"), state)
-        check("free text is no longer accepted as a phone number",
-              "Не похоже на номер телефона" in screen()["text"])
 
         await qa.repair_got_phone(say("0501234567"), state)
-        check("the phone is normalized into the recap", "+380501234567" in screen()["text"])
-        check("a warning never sticks to the next screen", not screen()["text"].startswith("⚠️"))
+        check("the phone is normalized and step 6 asks for the name",
+              "+380501234567" in screen()["text"] and "шаг 6 из 6" in screen()["text"] and "Имя клиента:" in screen()["text"])
 
-        await qa.repair_got_device_type(say("Смартфон"), state)
-        await qa.repair_got_model(say("iPhone 12"), state)
-        check("device and model are recapped as one line", "Устройство: Смартфон iPhone 12" in screen()["text"])
-        check("step 5 asks for the defect", "шаг 5 из 6" in screen()["text"] and "неисправность" in screen()["text"].lower())
-
-        await qa.repair_got_defect(say("не включается"), state)
-        check("step 6 asks for the photo", "шаг 6 из 6" in screen()["text"] and "фото" in screen()["text"].lower())
-
-        await qa.repair_got_photo(say(photo=[SimpleNamespace(file_id="photo-1")]), state)
+        await qa.repair_got_name(say("Вася <дома>"), state)
         card = screen()
         check("the confirm card carries its accept/cancel buttons", card["markup"] is not None)
-        check("the confirm card lists everything collected",
-              all(part in card["text"] for part in ("Вася", "+380501234567", "Смартфон iPhone 12", "не включается")))
+        check("the confirm card is a PHOTO message (Павел: должна быть с фото) with the full recap",
+              all(part in card["text"] for part in ("iPhone 12", "Не включается", "+380501234567"))
+              and "пока не известна" in card["text"])
         check("the confirm card escapes the staff-typed name too", "&lt;дома&gt;" in card["text"])
-        check("the sent photo is not left lying in the chat", chat.staff_messages == [])
+        check("the reply that produced the card is gone from the chat", chat.staff_messages == [])
         check("the confirm card is the last message in the chat", chat.last()["id"] == card["id"])
 
-        await qa.quick_flow_fallback(say("а что дальше?"), state)
-        check("a stray message on the confirm card KEEPS its buttons — the flow stays finishable",
-              screen()["markup"] is not None)
-        check("...and still shows the collected data under the warning", "не включается" in screen()["text"])
+        await qa.repair_confirm_fallback(say("а что дальше?"), state)
+        check("a stray message on the confirm card does NOT replace it — the card is untouched",
+              any(m["id"] == card["id"] and m["markup"] is not None for m in chat.log))
+        check("...a separate reminder is posted instead, pointing back at the card",
+              chat.last()["id"] != card["id"] and "Нажмите" in chat.last()["text"])
 
-        # Бросить диалог на середине и начать другой: экран брошенного не
-        # должен остаться висеть в чате (голый state.clear() забывал его).
+        # Бросить диалог на середине и начать другой: и брошенный экран, И
+        # тот самый reminder (потому и трекается через user_message_ids,
+        # не остаётся сиротой) не должны остаться висеть в чате.
         await qa.client_start(say(qa.BTN_CLIENT), state)
         await qa.client_menu_add(tap("client_menu_add"), state)
-        check("starting another flow wipes the abandoned one's screen", len(chat.bot_messages) == 1)
+        check("starting another flow wipes both the abandoned card and its reminder",
+              len(chat.bot_messages) == 1)
         check("the new flow starts at its own step 1 of 2", "шаг 1 из 2" in screen()["text"])
 
     try:
