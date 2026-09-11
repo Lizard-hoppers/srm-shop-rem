@@ -76,6 +76,7 @@ BTN_BUYBACK = "💰 Скупка"
 BTN_PURCHASE = "📦 Приход"
 BTN_SUMMARY = "📊 Сводка"
 BTN_CASH = "💵 Касса"
+BTN_CLIENT_SEARCH = "🔍 Клиент"
 BTN_CANCEL = "❌ Отмена"
 
 # Один словарь на оба места, где способ оплаты показывается сотруднику
@@ -98,6 +99,7 @@ QUICK_ACTIONS_KEYBOARD = ReplyKeyboardMarkup(
         [KeyboardButton(text=BTN_REPAIR), KeyboardButton(text=BTN_CONTACT, style="primary")],
         [KeyboardButton(text=BTN_BUYBACK, style="success"), KeyboardButton(text=BTN_PURCHASE)],
         [KeyboardButton(text=BTN_SUMMARY), KeyboardButton(text=BTN_CASH)],
+        [KeyboardButton(text=BTN_CLIENT_SEARCH)],
         [KeyboardButton(text=BTN_CANCEL, style="danger")],
     ],
     resize_keyboard=True,
@@ -149,6 +151,14 @@ class CashAdjustment(StatesGroup):
     amount = State()
     comment = State()
     confirm = State()
+
+
+class ClientSearch(StatesGroup):
+    """One text step (phone or name), then either the match is shown
+    directly (exactly one hit) or a picker of callback buttons (several
+    hits) — no separate "pick" state needed, since a pick is a
+    self-contained callback (client_pick:{id}), not more text to collect."""
+    query = State()
 
 
 def _resolve_staff_for_dm(telegram_id: int) -> tuple[StoreConfig, object] | None:
@@ -787,7 +797,123 @@ async def cash_adjustment_confirm(callback: CallbackQuery, state: FSMContext) ->
     await callback.answer("Готово")
 
 
-@router.message(F.text == BTN_CANCEL, StateFilter(RepairIntake, QuickContact, BuybackIntake, CashExpense, CashAdjustment))
+# --- Клиент: поиск по телефону/имени прямо из чата ---
+
+_CLIENT_SEARCH_LIMIT = 8
+
+
+async def _client_card(store: StoreConfig, client_id: int, staff_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    """Same shape as webapp/routers/clients.py's detail_view, condensed to
+    what fits a chat message — counts instead of the full history list."""
+    with get_conn(store.db_path) as conn:
+        client = core_clients.get_client(conn, client_id)
+        repairs_count = len(core_repairs.list_repairs_by_client(conn, client_id))
+        sales_count = len(core_sales.list_sales_by_client(conn, client_id))
+
+    lines = [f"👤 <b>{html.escape(client['name'])}</b>"]
+    if client["phone"]:
+        lines.append(f"📞 {html.escape(client['phone'])}")
+    lines.append(f"🔧 Ремонтов: {repairs_count}")
+    lines.append(f"🛒 Продаж: {sales_count}")
+    if client["notes"]:
+        lines.append(f"📝 {html.escape(client['notes'])}")
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(
+            text="Открыть в CRM",
+            web_app=WebAppInfo(url=crm_link(f"/clients/{client_id}", staff_id, store.id)),
+        ),
+    ]])
+    return "\n".join(lines), keyboard
+
+
+@router.message(F.text == BTN_CLIENT_SEARCH, F.chat.type == "private")
+async def client_search_start(message: Message, state: FSMContext) -> None:
+    resolved = _resolve_staff_for_dm(message.from_user.id)
+    if not resolved:
+        return
+    store, staff = resolved
+
+    await _reset(message, state)
+    await state.set_state(ClientSearch.query)
+    await state.update_data(store_id=store.id, staff_id=staff["id"])
+    await _send_prompt(message, state, "Телефон или имя клиента:")
+
+
+@router.message(ClientSearch.query, F.text)
+async def client_search_got_query(message: Message, state: FSMContext) -> None:
+    query = message.text.strip()
+    if not query:
+        await _nudge(message, state, "Введите телефон или имя.")
+        return
+
+    data = await state.get_data()
+    try:
+        store = get_store(data["store_id"])
+    except KeyError:
+        await _consume(state, message)
+        await state.clear()
+        await message.answer("Магазин больше не настроен.")
+        return
+
+    # Ищем и по номеру, и по имени одним запросом (core.clients.list_clients
+    # LIKE'ит оба поля) — но телефон, введённый в местном/без-плюса формате
+    # ("0501234567"), не совпал бы по LIKE с сохранённым каноничным
+    # "+380501234567" без предварительной нормализации; чистый текст (или
+    # обрывок цифр короче полного номера) normalize_phone честно вернёт ""
+    # для, и тогда ищем как есть — тем же путём находятся и куски номера.
+    term = core_clients.normalize_phone(query) or query
+    with get_conn(store.db_path) as conn:
+        rows = core_clients.list_clients(conn, search=term)
+
+    if not rows:
+        await _nudge(message, state, f"Ничего не найдено по «{html.escape(query)}». Попробуйте ещё раз.")
+        return
+
+    if len(rows) == 1:
+        # _repost BEFORE state.clear(): it reads prompt_message_id out of
+        # the FSM data to delete the previous screen — clearing first
+        # would leave that screen (the question, or a "не найдено" nudge)
+        # orphaned in the chat instead of replaced.
+        text, keyboard = await _client_card(store, rows[0]["id"], data["staff_id"])
+        await _consume(state, message)
+        await _repost(message, state, text, keyboard)
+        await state.clear()
+        return
+
+    shown = rows[:_CLIENT_SEARCH_LIMIT]
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=c["name"] + (f" · {c['phone']}" if c["phone"] else ""),
+            callback_data=f"client_pick:{c['id']}",
+        )]
+        for c in shown
+    ])
+    suffix = (
+        f"\n\nПоказаны первые {len(shown)} из {len(rows)} — уточните запрос для точного результата."
+        if len(rows) > len(shown) else ""
+    )
+    await _advance(message, state, f"Нашлось {len(rows)} — выберите:{suffix}", reply_markup=keyboard)
+
+
+@router.callback_query(F.data.startswith("client_pick:"), ClientSearch.query)
+async def client_search_pick(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    try:
+        store = get_store(data["store_id"])
+    except KeyError:
+        await state.clear()
+        await callback.answer("Магазин больше не настроен.", show_alert=True)
+        return
+
+    client_id = int(callback.data.split(":", 1)[1])
+    text, keyboard = await _client_card(store, client_id, data["staff_id"])
+    await state.clear()
+    await _safe_edit(callback.bot, callback.message.chat.id, callback.message.message_id, text, keyboard)
+    await callback.answer()
+
+
+@router.message(F.text == BTN_CANCEL, StateFilter(RepairIntake, QuickContact, BuybackIntake, CashExpense, CashAdjustment, ClientSearch))
 async def cancel_flow(message: Message, state: FSMContext) -> None:
     """Deletes EVERYTHING from this flow attempt — the bot's own tracked
     message, every reply the staff member typed along the way (name,
@@ -1209,6 +1335,6 @@ async def quick_cancel_callback(callback: CallbackQuery, state: FSMContext) -> N
 # message while waiting on inline-button confirm) gets a nudge instead of
 # silence ---
 
-@router.message(StateFilter(RepairIntake, QuickContact, BuybackIntake, CashExpense, CashAdjustment))
+@router.message(StateFilter(RepairIntake, QuickContact, BuybackIntake, CashExpense, CashAdjustment, ClientSearch))
 async def quick_flow_fallback(message: Message, state: FSMContext) -> None:
     await _nudge(message, state, "Не понял ответ. Следуйте подсказке выше, либо ❌ Отмена.")

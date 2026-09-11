@@ -1154,6 +1154,185 @@ def scenario_quick_cash_chat(db_path: str) -> None:
         qa.get_store = original_get_store
 
 
+def scenario_quick_client_search_chat(db_path: str) -> None:
+    """bot/quick_actions.py's «🔍 Клиент» — search by phone or name, driven
+    through a fake private chat, same technique as scenario_quick_cash_chat
+    (real shared test db, monkeypatched _resolve_staff_for_dm/get_store)."""
+    print("scenario: quick Клиент search dialog (телефон / имя) via chat")
+    import asyncio
+    from types import SimpleNamespace
+
+    os.environ.setdefault("CRM_MINIAPP_URL", "https://example.invalid/miniapp")
+
+    from aiogram.fsm.context import FSMContext
+    from aiogram.fsm.storage.base import StorageKey
+    from aiogram.fsm.storage.memory import MemoryStorage
+
+    from bot import quick_actions as qa
+    from core.stores import StoreConfig
+
+    CHAT_ID = 777003
+    STAFF_TG_ID = 1417059282
+    fake_store = StoreConfig(id="test-client-search-store", name="Тестовый магазин", db_path=db_path)
+
+    with get_conn(db_path) as conn:
+        auth.create_staff(conn, "client_search_bot_tester", "pass", "Продавец Тест", "admin")
+        auth.link_staff_telegram(conn, "client_search_bot_tester", STAFF_TG_ID)
+        # ЖЖЖТЕСТКЛИЕНТ prefix: the shared test db already carries clients
+        # from every scenario that ran before this one — a plain "Иван
+        # Петров" could collide with something another scenario seeded,
+        # throwing off the exact match-count checks below.
+        petrov_id = clients.get_or_create_by_phone(conn, "ЖЖЖТЕСТКЛИЕНТ Иван Петров", "0561111111", source="offline")
+        clients.get_or_create_by_phone(conn, "ЖЖЖТЕСТКЛИЕНТ Иван Сидоров", "0562222222", source="offline")
+        clients.get_or_create_by_phone(conn, "ЖЖЖТЕСТКЛИЕНТ Мария Иванова", "0563333333", source="offline")
+
+    class _Chat:
+        def __init__(self) -> None:
+            self.log: list[dict] = []
+            self._next_id = 12000
+
+        def add(self, author: str, text: str, markup=None) -> int:
+            self._next_id += 1
+            self.log.append({"id": self._next_id, "author": author, "text": text, "markup": markup})
+            return self._next_id
+
+        def delete(self, message_id: int) -> None:
+            self.log = [m for m in self.log if m["id"] != message_id]
+
+        def edit(self, message_id: int, text: str, markup) -> None:
+            for m in self.log:
+                if m["id"] == message_id:
+                    m["text"], m["markup"] = text, markup
+
+        @property
+        def bot_messages(self) -> list[dict]:
+            return [m for m in self.log if m["author"] == "bot"]
+
+        def last(self) -> dict | None:
+            return self.log[-1] if self.log else None
+
+    class _Bot:
+        def __init__(self, chat: "_Chat") -> None:
+            self.chat = chat
+
+        async def delete_message(self, chat_id, message_id):
+            self.chat.delete(message_id)
+
+        async def delete_messages(self, chat_id, message_ids):
+            for mid in message_ids:
+                self.chat.delete(mid)
+
+        async def edit_message_text(self, chat_id, message_id, text, reply_markup=None):
+            self.chat.edit(message_id, text, reply_markup)
+
+    class _Msg:
+        def __init__(self, chat: "_Chat", bot: "_Bot", text: str) -> None:
+            self._chat_log = chat
+            self.bot = bot
+            self.chat = SimpleNamespace(id=CHAT_ID, type="private")
+            self.from_user = SimpleNamespace(id=STAFF_TG_ID, full_name="Продавец")
+            self.text = text
+            self.message_id = chat.add("staff", text)
+
+        async def answer(self, text, reply_markup=None):
+            return SimpleNamespace(message_id=self._chat_log.add("bot", text, reply_markup))
+
+    class _CbMessage:
+        def __init__(self, chat: "_Chat", message_id: int) -> None:
+            self.chat = SimpleNamespace(id=CHAT_ID, type="private")
+            self.message_id = message_id
+            self._chat_log = chat
+
+        async def edit_text(self, text, reply_markup=None):
+            self._chat_log.edit(self.message_id, text, reply_markup)
+
+    class _Cb:
+        def __init__(self, chat: "_Chat", bot: "_Bot", data: str, message_id: int) -> None:
+            self.data = data
+            self.from_user = SimpleNamespace(id=STAFF_TG_ID)
+            self.message = _CbMessage(chat, message_id)
+            self.bot = bot
+            self.answered: list[tuple] = []
+
+        async def answer(self, text=None, show_alert=False):
+            self.answered.append((text, show_alert))
+
+    original_resolve = qa._resolve_staff_for_dm
+    original_get_store = qa.get_store
+    qa._resolve_staff_for_dm = lambda telegram_id: (fake_store, {"role": "admin", "id": 999})
+    qa.get_store = lambda store_id: fake_store
+
+    async def run() -> None:
+        chat = _Chat()
+        bot = _Bot(chat)
+        state = FSMContext(storage=MemoryStorage(), key=StorageKey(bot_id=1, chat_id=CHAT_ID, user_id=STAFF_TG_ID))
+
+        def say(text: str) -> _Msg:
+            return _Msg(chat, bot, text)
+
+        def tap(data: str) -> _Cb:
+            return _Cb(chat, bot, data, chat.last()["id"])
+
+        def screen() -> dict:
+            return chat.bot_messages[-1]
+
+        # --- Точное совпадение по телефону, в местном формате ---
+        await qa.client_search_start(say(qa.BTN_CLIENT_SEARCH), state)
+        check("search prompt asks for phone or name", "Телефон или имя" in screen()["text"])
+
+        await qa.client_search_got_query(say("0561111111"), state)
+        check("a local-format phone finds the exact client by its canonical +380 phone",
+              "ЖЖЖТЕСТКЛИЕНТ Иван Петров" in screen()["text"])
+        check("the client card shows the phone in canonical form", "+380561111111" in screen()["text"])
+        check("the client card carries an Открыть в CRM button", screen()["markup"] is not None)
+        check("a single-match search clears the FSM state", (await state.get_state()) is None)
+
+        # --- Точное совпадение по фамилии ---
+        await qa.client_search_start(say(qa.BTN_CLIENT_SEARCH), state)
+        await qa.client_search_got_query(say("ЖЖЖТЕСТКЛИЕНТ Иван Сидоров"), state)
+        check("a unique name substring finds the exact client", "ЖЖЖТЕСТКЛИЕНТ Иван Сидоров" in screen()["text"])
+
+        # --- Несколько совпадений -> список кнопок -> выбор ---
+        await qa.client_search_start(say(qa.BTN_CLIENT_SEARCH), state)
+        await qa.client_search_got_query(say("ЖЖЖТЕСТКЛИЕНТ Иван"), state)
+        picker = screen()
+        check("a substring matching several clients shows a picker, not a card",
+              "Нашлось 2" in picker["text"])
+        check("the picker lists both matches as buttons",
+              len(picker["markup"].inline_keyboard) == 2)
+        check("picker buttons carry the right callback_data",
+              any(row[0].callback_data == f"client_pick:{petrov_id}" for row in picker["markup"].inline_keyboard))
+
+        pick_button = next(
+            row[0] for row in picker["markup"].inline_keyboard if row[0].callback_data == f"client_pick:{petrov_id}"
+        )
+        await qa.client_search_pick(tap(pick_button.callback_data), state)
+        check("picking from the list shows that exact client's card",
+              "ЖЖЖТЕСТКЛИЕНТ Иван Петров" in screen()["text"])
+        check("picking from the list clears the FSM state", (await state.get_state()) is None)
+
+        # --- Ничего не найдено ---
+        await qa.client_search_start(say(qa.BTN_CLIENT_SEARCH), state)
+        await qa.client_search_got_query(say("ЖЖЖНЕТКЛИЕНТАТАКОГО"), state)
+        check("no matches warns and keeps the search open for another attempt",
+              "Ничего не найдено" in screen()["text"] and (await state.get_state()) is not None)
+        await qa.client_search_got_query(say("ЖЖЖТЕСТКЛИЕНТ Иван Петров"), state)
+        check("a retry after a miss still finds the client", "ЖЖЖТЕСТКЛИЕНТ Иван Петров" in screen()["text"])
+
+        # --- Отмена посреди поиска ---
+        messages_before = len(chat.bot_messages)
+        await qa.client_search_start(say(qa.BTN_CLIENT_SEARCH), state)
+        await qa.cancel_flow(say(qa.BTN_CANCEL), state)
+        check("❌ Отмена mid-search wipes its own screen, leaving earlier results untouched",
+              len(chat.bot_messages) == messages_before)
+
+    try:
+        asyncio.run(run())
+    finally:
+        qa._resolve_staff_for_dm = original_resolve
+        qa.get_store = original_get_store
+
+
 def scenario_repair_attachments(db_path: str) -> None:
     print("scenario: photo replies attach to a repair via its posted card")
     with get_conn(db_path) as conn:
@@ -3045,6 +3224,7 @@ def main() -> None:
         scenario_repair_card_notify(db_path)
         scenario_repair_actions(db_path)
         scenario_quick_cash_chat(db_path)
+        scenario_quick_client_search_chat(db_path)
         scenario_repair_attachments(db_path)
         scenario_phone_normalization(db_path)
         scenario_store_settings(db_path)
