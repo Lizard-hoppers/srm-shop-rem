@@ -34,6 +34,9 @@ class StoreConfig:
     # Forum topic of the staff group for «Купить» leads from the sales
     # channel (bot/channel_orders.py); None -> the group's General feed.
     sales_topic_id: int | None = None
+    # Forum topic of the staff group where a покупка's card is posted
+    # (core.buyback.card_text); None -> not posted to the group at all.
+    buyback_topic_id: int | None = None
 
     @property
     def location_id(self) -> int:
@@ -74,6 +77,7 @@ def load_stores() -> list[StoreConfig]:
             repair_topic_id=row["repair_topic_id"],
             masters_group_chat_id=row["masters_group_chat_id"],
             sales_topic_id=row["sales_topic_id"],
+            buyback_topic_id=row["buyback_topic_id"] if "buyback_topic_id" in row.keys() else None,
         )
         for row in rows
     ]

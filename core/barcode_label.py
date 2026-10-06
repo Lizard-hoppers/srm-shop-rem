@@ -55,7 +55,9 @@ def _wrap_text(text: str, font: ImageFont.ImageFont, max_width: int, draw: Image
     return lines
 
 
-def generate_label_png(sku: str, name: str, price: int | None, *, compact: bool = False) -> bytes:
+def generate_label_png(
+    sku: str, name: str, price: int | None, *, compact: bool = False, footer: str | None = None,
+) -> bytes:
     """A printable label: product name, a Code128 barcode of `sku` (with
     the digits/text printed under the bars), and the current sale price.
 
@@ -86,7 +88,9 @@ def generate_label_png(sku: str, name: str, price: int | None, *, compact: bool 
     name_line_height = name_font.size + 4
     name_block_height = name_line_height * len(name_lines)
 
-    price_text = f"{price} грн" if price is not None else "Цена не указана"
+    # `footer` replaces the price line — a just-bought phone's label
+    # carries its document number (ПК-001), it has no sale price yet.
+    price_text = footer if footer is not None else (f"{price} грн" if price is not None else "Цена не указана")
     price_block_height = price_font.size + 12
 
     canvas_height = padding + name_block_height + barcode_img.height + price_block_height + padding

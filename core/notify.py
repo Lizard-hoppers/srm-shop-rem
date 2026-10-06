@@ -201,6 +201,42 @@ def send_card(
     return _send(chat_id, text, reply_markup=reply_markup)
 
 
+def send_album(
+    chat_id: str | int | None,
+    photos: list[tuple[bytes, str]],
+    caption: str,
+    message_thread_id: str | int | None = None,
+) -> int | None:
+    """Post up to ten photos as ONE album with the card text as the first
+    photo's caption (sendMediaGroup) — a покупка's six photos + its card.
+    An album can't carry buttons. Returns the first message's id, None on
+    any failure; never raises, same contract as _send()."""
+    if not chat_id or not _BOT_TOKEN or not photos:
+        return None
+    media, files = [], {}
+    for index, (photo_bytes, filename) in enumerate(photos[:10]):
+        item = {"type": "photo", "media": f"attach://photo{index}"}
+        if index == 0:
+            item["caption"] = _as_caption(caption)
+            item["parse_mode"] = "HTML"
+        media.append(item)
+        files[f"photo{index}"] = (filename, photo_bytes, "image/jpeg")
+    data = {"chat_id": chat_id, "media": json.dumps(media)}
+    if message_thread_id:
+        data["message_thread_id"] = message_thread_id
+    try:
+        resp = httpx.post(
+            f"https://api.telegram.org/bot{_BOT_TOKEN}/sendMediaGroup", data=data, files=files, timeout=30,
+        )
+        if resp.status_code != 200:
+            logger.warning("album notify failed: %s %s", resp.status_code, resp.text)
+            return None
+        return resp.json()["result"][0]["message_id"]
+    except (httpx.HTTPError, KeyError, IndexError, ValueError):
+        logger.warning("album notify failed", exc_info=True)
+        return None
+
+
 def delete_message(chat_id: str | int, message_id: int) -> bool:
     """Never raises; returns whether Telegram actually deleted it. A bot
     can only delete a message for ~48h after sending, so a False here is

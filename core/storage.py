@@ -420,6 +420,18 @@ CREATE INDEX IF NOT EXISTS idx_documents_created ON documents(created_at);
 CREATE INDEX IF NOT EXISTS idx_documents_ref ON documents(doc_type, ref_id);
 CREATE INDEX IF NOT EXISTS idx_documents_client ON documents(client_id);
 
+-- Фото купленного устройства (Заход 4): up to six per покупка, one per
+-- side (core.buyback.PHOTO_SLOTS). buyback_orders.photo_path keeps the
+-- first one for the list thumbnail.
+CREATE TABLE IF NOT EXISTS buyback_photos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id INTEGER NOT NULL REFERENCES buyback_orders(id),
+    position INTEGER NOT NULL,
+    label TEXT,
+    path TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_buyback_photos_order ON buyback_photos(order_id);
+
 -- Партии (Заход 3, 06.10): «один SKU — много партий». A партия is one
 -- arrival of a product: which supplier, which приход document, what it
 -- cost (in what currency, at what rate). Stock keeps its origin all the
@@ -759,6 +771,14 @@ def init_db(db_path: str = DB_PATH) -> None:
         _ensure_column(conn, "goods_receipts", "rate", "rate REAL NOT NULL DEFAULT 1")
         _ensure_column(conn, "sales_order_items", "batch_id", "batch_id INTEGER REFERENCES batches(id)")
         _ensure_column(conn, "sales_order_items", "unit_cost", "unit_cost REAL")
+        # Заход 4: покупка телефона — the price as agreed (its currency and
+        # rate), its гривня value, the IMEI and the партия the phone became.
+        _ensure_column(conn, "buyback_orders", "imei", "imei TEXT")
+        _ensure_column(conn, "buyback_orders", "currency", "currency TEXT NOT NULL DEFAULT 'UAH'")
+        _ensure_column(conn, "buyback_orders", "rate", "rate REAL NOT NULL DEFAULT 1")
+        _ensure_column(conn, "buyback_orders", "purchase_price_uah", "purchase_price_uah REAL")
+        _ensure_column(conn, "buyback_orders", "batch_id", "batch_id INTEGER REFERENCES batches(id)")
+        _ensure_column(conn, "locations", "buyback_topic_id", "buyback_topic_id INTEGER")
         try:
             # One phone = one контрагент. Partial: a walk-in with no phone
             # on record is fine, any number of them.

@@ -15,8 +15,8 @@ order is marked cancelled), the two manual cash documents (расход из к�
 (Заход 3) — приход, the manual stock documents (оприходование, списание,
 перемещение между ячейками) and a перемещение между складами that is still
 «в пути». A stock document can only be undone while everything it brought
-in is still where it put it. Покупка gets its cancel with its rebuild
-(Заход 4).
+in is still where it put it. Покупка (Заход 4): the phone leaves stock
+again and the payout returns to every account it was paid from.
 """
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ from core.documents import DocumentError
 
 CANCELLABLE_TYPES = (
     "sale", "cash_out", "cash_adjust", "exchange", "money_transfer",
-    "receipt", "stock_in", "writeoff", "transfer",
+    "receipt", "stock_in", "writeoff", "transfer", "buyback",
 )
 
 
@@ -140,7 +140,20 @@ def _cancel_manual_stock(conn: sqlite3.Connection, doc: sqlite3.Row, staff_id: i
     _reverse_movements(conn, movements, staff_id, "stock_doc_cancel", doc["ref_id"], f"Отмена {_documents.doc_label(doc)}")
 
 
+def _cancel_buyback(conn: sqlite3.Connection, doc: sqlite3.Row, staff_id: int) -> None:
+    """Undo a покупка: the phone leaves our stock again (only while it is
+    still in the cell it was bought into — not sold, not sent to a master)
+    and the money paid for it comes back onto every account it left."""
+    movements = conn.execute(
+        "SELECT * FROM stock_movements WHERE ref_type = 'buyback_order' AND ref_id = ? AND reason = 'receipt'",
+        (doc["ref_id"],),
+    ).fetchall()
+    _reverse_movements(conn, movements, staff_id, "buyback_cancel", doc["ref_id"], f"Отмена {_documents.doc_label(doc)}")
+    _cancel_money_rows(conn, "buyback_order", doc["ref_id"])
+
+
 _REVERSERS = {
+    "buyback": _cancel_buyback,
     "receipt": _cancel_receipt, "stock_in": _cancel_manual_stock, "writeoff": _cancel_manual_stock,
     "transfer": _cancel_manual_stock,
     "sale": _cancel_sale, "cash_out": _cancel_cash, "cash_adjust": _cancel_cash,

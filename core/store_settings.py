@@ -60,3 +60,14 @@ def set_sales_channel(conn: sqlite3.Connection, sales_channel: str | None, locat
         "UPDATE locations SET sales_channel = ?, updated_at = datetime('now') WHERE id = ?",
         (normalize_sales_channel(sales_channel), _locations.resolve(conn, location_id)),
     )
+
+
+def set_buyback_topic(conn: sqlite3.Connection, topic_id: str | int | None, location_id: int | None = None) -> None:
+    """The forum topic of the точка's staff group that покупки are posted
+    to (the number from a t.me/c/<group>/<topic> link). Blank or anything
+    that isn't a number switches the posting off."""
+    value = str(topic_id or "").strip()
+    conn.execute(
+        "UPDATE locations SET buyback_topic_id = ?, updated_at = datetime('now') WHERE id = ?",
+        (int(value) if value.isdigit() else None, _locations.resolve(conn, location_id)),
+    )

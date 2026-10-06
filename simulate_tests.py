@@ -1731,12 +1731,13 @@ def scenario_quick_intake_chat() -> None:
         qa.get_store = original_get_store
         auth.get_staff_by_telegram_id = original_get_staff
 
-    # Скупка ветвится: «на запчасти» вообще не спрашивает цену продажи,
-    # поэтому этот шаг не должен попадать в знаменатель.
-    parts = qa._flow_screen("BuybackIntake:photo", {"purpose": "parts"}, "📷 Пришлите фото устройства:")
-    check("buyback 'на запчасти' doesn't count the resale-price step it will never ask", "шаг 8 из 8" in parts)
-    resale = qa._flow_screen("BuybackIntake:photo", {"purpose": "resale"}, "📷 Пришлите фото устройства:")
-    check("buyback 'на продажу' counts all nine steps", "шаг 9 из 9" in resale)
+    # Покупка телефона: шесть нумерованных шагов; курс, оплата и карточка
+    # подтверждения идут без шапки «шаг N из M».
+    buy_step = qa._flow_screen("PhoneBuy:imei", {"seller_phone": "+380501112233", "photo_count": 6, "model": "iPhone 13"}, "IMEI:")
+    check("the purchase flow numbers its six data steps and recaps what is already entered",
+          "шаг 4 из 6" in buy_step and "Продавец: +380501112233" in buy_step and "Фото: 6" in buy_step and "Модель: iPhone 13" in buy_step)
+    check("its payment screens carry no step header",
+          qa._flow_screen("PhoneBuy:pay_review", {}, "Распределите оплату") == "Распределите оплату")
     confirm = qa._flow_screen("RepairIntake:confirm", {"client_name": "Вася"}, "📋 Проверьте данные:")
     check("a confirm card gets no step header prepended — it renders its own recap",
           confirm == "📋 Проверьте данные:")
@@ -2858,110 +2859,439 @@ def scenario_webapp_forms(db_path: str) -> None:
 
 
 def scenario_buyback_http(db_path: str) -> None:
-    """Скупка техники у клиентов (24.08) — real HTTP requests, same
-    TestClient/token shape as scenario_webapp_forms. purpose='parts' is
-    just a log entry + cash expense; purpose='resale' also auto-creates a
-    products row (qty=1) so the item is immediately sellable through the
-    ordinary Продажи/Инвентарь flow, unchanged — that's the actual
-    regression risk here, not the buyback_orders row itself."""
-    print("scenario: Скупка (buyback) over real HTTP requests")
-    if os.path.exists(db_path):
-        os.remove(db_path)
-    init_db(db_path)
-    with get_conn(db_path) as conn:
-        staff_id = auth.create_staff(conn, "buybacktest", "pass", "Скупка Тест", "owner")
-    token = make_token(staff_id)
+    """Покупка телефона (Заход 4): core.buyback.create_purchase, the Mini
+    App form and card page, cancel — «один телефон, одна покупка»."""
+    print("scenario: покупка телефона — core, форма, карточка, этикетка, отмена")
+    with tempfile.TemporaryDirectory() as tmp, _separate_base(tmp, "purchase.sqlite3", ("Мастерская", "Магазин")) as base:
+        with get_conn(base) as conn:
+            owner = auth.create_staff(conn, "bb-owner", "pass", "Виталий", "owner")
+            master = auth.create_staff(conn, "bb-master", "pass", "Мастер", "master")
+            acc = {(a["location_id"], a["kind"], a["currency"]): a["id"] for a in accounts.list_accounts(conn)}
+            cash_uah, fop, card, usdt = (acc[(1, k, c)] for k, c in (("cash", "UAH"), ("fop", "UAH"), ("card", "UAH"), ("crypto", "USDT")))
+            cash.record_adjustment(conn, 20000, "старт", owner, location_id=1)
+            known = clients.get_or_create_by_phone(conn, "Андрей", "+380970073090", source="offline")
 
-    import webapp.main  # noqa: F401 -- import after CRM_DB_PATH is set for this test
+            # ---- core: макет «Распределить оплату» — нал 2000 + ФОП 1500 + карта 1000 + 12.5 USDT × 40
+            photo = io.BytesIO()
+            Image.new("RGB", (60, 60), "white").save(photo, format="JPEG")
+            six = [(photo.getvalue(), ".jpg", label) for label in buyback.PHOTO_SLOTS]
+            order_id = buyback.create_purchase(
+                conn, seller_phone="097 007 30 90", model="iPhone 13 ·  128 GB · Black", imei="356 000 000 000 001",
+                comment="Разбит дисплей", price="5000", staff_id=owner, location_id=1, photos=six, key="bb-1",
+                payments=[(cash_uah, "2000", None), (fop, "1500", None), (card, "1000", None), (usdt, "12,5", "40")],
+            )
+            order = buyback.get_buyback_order(conn, order_id)
+            check("the seller is found by phone number — the existing контрагент, not a new card",
+                  order["client_id"] == known and order["client_name"] == "Андрей")
+            check("the order keeps model (spaces tidied), IMEI (normalized), поломки, price and its гривня value",
+                  order["model"] == "iPhone 13 · 128 GB · Black" and order["imei"] == "356000000000001"
+                  and order["condition_note"] == "Разбит дисплей" and order["purchase_price"] == 5000 and order["purchase_price_uah"] == 5000)
+            unit = inventory.find_unit_by_imei(conn, "356000000000001")
+            product = inventory.get_product(conn, order["product_id"])
+            check("the phone is a serial unit on the buying точка's склад: its IMEI, the price as its cost",
+                  unit is not None and unit["id"] == order["batch_id"] and unit["unit_cost_uah"] == 5000 and unit["source"] == "buyback"
+                  and product["is_serial"] == 1 and product["name"] == "iPhone 13 · 128 GB · Black"
+                  and inventory.product_total_qty(conn, product["id"], 1) == 1 and inventory.stock_value(conn, 1) == 5000)
+            check("the payout left each source: 18 000 cash, −1 500 ФОП, −1 000 карта, −12.5 USDT",
+                  accounts.balance(conn, cash_uah) == 18000 and accounts.balance(conn, fop) == -1500
+                  and accounts.balance(conn, card) == -1000 and accounts.balance(conn, usdt) == -12.5)
+            check("all six photos are stored with their sides, the first is the thumbnail",
+                  [p["label"] for p in buyback.get_photos(conn, order_id)] == list(buyback.PHOTO_SLOTS)
+                  and order["photo_path"] == buyback.get_photos(conn, order_id)[0]["path"] and len(buyback.read_photos(conn, order_id)) == 6)
+            doc = documents.get_for(conn, "buyback", order_id)
+            check("one document (ПК) for the whole thing — amount, контрагент, model",
+                  documents.doc_label(doc) == f"ПК-{order_id:03d}" and doc["amount"] == 5000 and doc["client_id"] == known
+                  and doc["title"] == "iPhone 13 · 128 GB · Black"
+                  and conn.execute("SELECT COUNT(*) AS n FROM documents WHERE doc_type IN ('cash_out','stock_in')").fetchone()["n"] == 0)
+            text = buyback.card_text(conn, order_id)
+            check("the card reads like the макет: number · model, контрагент, IMEI, поломки, «Куплен … · точка», оплата",
+                  f"ПК-{order_id:03d} · iPhone 13 · 128 GB · Black" in text and "+380970073090" in text and "356000000000001" in text
+                  and "Поломки: Разбит дисплей" in text and "Куплен: 5000 грн · Мастерская" in text and "Криптокошелёк USDT — 12.5 USDT" in text)
 
-    fake_jpeg = b"\xff\xd8\xff-fake-jpeg-bytes"
+            second = buyback.create_purchase(
+                conn, seller_phone="0501230000", seller_name="Новый Продавец", model="iphone 13 · 128 gb · black",
+                imei="356000000000002", comment=None, price="120", currency="USD", rate="41,5", staff_id=owner, location_id=1,
+            )
+            order_2 = buyback.get_buyback_order(conn, second)
+            check("a second phone of the same model is another unit of the SAME product card (name matched case-insensitively)",
+                  order_2["product_id"] == order["product_id"] and inventory.product_total_qty(conn, product["id"], 1) == 2)
+            check("a price in USD keeps the currency and rate; cost and payout are its гривня value (120 × 41.5 = 4980, from наличные)",
+                  order_2["currency"] == "USD" and order_2["purchase_price_uah"] == 4980
+                  and inventory.find_unit_by_imei(conn, "356000000000002")["unit_cost_uah"] == 4980
+                  and accounts.balance(conn, cash_uah) == 13020)
+            check("a new seller becomes a контрагент with the given name", order_2["client_name"] == "Новый Продавец")
+            check("the model step can now suggest what was bought before", buyback.recent_models(conn) == ["iPhone 13 · 128 GB · Black"])
 
-    with TestClient(webapp.main.app) as client:
-        form_resp = client.get(f"/buyback?t={token}")
-        check("GET /buyback renders the intake form", 'id="buybackIntakeForm"' in form_resp.text)
+            before = len(buyback.list_buyback_orders(conn))
+            for kwargs, needle, label in (
+                ({"seller_phone": "не помню"}, "номер телефона продавца", "a покупка without the seller's phone number is refused"),
+                ({"imei": "356000000000001"}, "уже числится", "an IMEI already in stock is refused"),
+                ({"imei": "12"}, "Проверьте IMEI", "a too-short IMEI is refused"),
+                ({"model": "  "}, "модель", "a missing model is refused"),
+                ({"price": "0"}, "цену", "a zero price is refused"),
+                ({"currency": "USD"}, "Укажите курс", "a foreign-currency price without a rate is refused"),
+            ):
+                args = {"seller_phone": "0501239999", "model": "Samsung A54", "imei": "356000000000099", "comment": None, "price": "3000"}
+                args.update(kwargs)
+                try:
+                    buyback.create_purchase(conn, staff_id=owner, location_id=1, **args)
+                    check(label, False)
+                except buyback.PurchaseError as exc:
+                    check(label, needle in str(exc))
+            try:
+                buyback.create_purchase(conn, seller_phone="0501239999", model="Samsung A54", imei="356000000000099", comment=None,
+                                        price="3000", staff_id=owner, location_id=1, payments=[(cash_uah, "1000", None)])
+                check("an underpaid split is refused", False)
+            except cash.PaymentError as exc:
+                check("an underpaid split is refused", "не хватает 2000" in str(exc))
+            check("none of the refused покупки wrote anything (no order, no контрагент, no product)",
+                  len(buyback.list_buyback_orders(conn)) == before and clients.get_by_phone(conn, "0501239999") is None
+                  and not [p for p in inventory.list_products(conn) if p["name"] == "Samsung A54"])
 
-        hub_resp = client.get(f"/warehouse?t={token}")
-        check("Склад hub links to /buyback", '/buyback' in hub_resp.text)
+            doc_cancel.cancel_document(conn, doc["id"], owner, "клиент передумал")
+            check("cancelling a покупка takes the phone off stock and returns the money to every source",
+                  inventory.find_unit_by_imei(conn, "356000000000001") is None and accounts.balance(conn, cash_uah) == 15020
+                  and accounts.balance(conn, fop) == 0 and accounts.balance(conn, usdt) == 0)
+            sales.create_sale(conn, None, "offline", owner, [(product["id"], 1, 9000, order_2["batch_id"])], location_id=1)
+            try:
+                doc_cancel.cancel_document(conn, documents.get_for(conn, "buyback", second)["id"], owner, "поздно")
+                check("a покупка whose phone is already sold can't be cancelled", False)
+            except documents.DocumentError:
+                check("a покупка whose phone is already sold can't be cancelled", True)
 
-        missing_phone_resp = client.post(f"/buyback?t={token}", data={
-            "client_name": "Тест", "device_type": "Смартфон", "model": "X",
-            "purchase_price": "500", "payment_method": "cash", "purpose": "parts",
-        }, files={"photo": ("d.jpg", fake_jpeg, "image/jpeg")})
-        check("missing client_phone: friendly error, no raw 422",
-              missing_phone_resp.status_code != 422 and "Заполните имя и телефон" in missing_phone_resp.text)
+        # ---- форма и карточка
+        token, master_token = make_token(owner, "1"), make_token(master, "1")
+        import webapp.main
 
-        no_photo_resp = client.post(f"/buyback?t={token}", data={
-            "client_name": "Тест", "client_phone": "+380501110001", "device_type": "Смартфон",
-            "model": "X", "purchase_price": "500", "payment_method": "cash", "purpose": "parts",
-        })
-        check("missing photo: friendly error, no repair created",
-              "Загрузите фото устройства" in no_photo_resp.text)
+        def _jpeg():
+            buf = io.BytesIO()
+            Image.new("RGB", (80, 80), "white").save(buf, format="JPEG")
+            return ("phone.jpg", buf.getvalue(), "image/jpeg")
 
-        missing_resale_price_resp = client.post(f"/buyback?t={token}", data={
-            "client_name": "Без Цены", "client_phone": "+380501110002", "device_type": "Смартфон",
-            "model": "X", "purchase_price": "500", "payment_method": "cash", "purpose": "resale",
-        }, files={"photo": ("d.jpg", fake_jpeg, "image/jpeg")})
-        check("purpose=resale without resale_price: friendly error",
-              "Укажите цену продажи" in missing_resale_price_resp.text)
+        with TestClient(webapp.main.app) as client:
+            page = client.get(f"/buyback?t={token}").text
+            check("the form has the макет's fields: seller phone, model with suggestions, IMEI, поломки, six photo slots, price + currency, sources",
+                  all(x in page for x in ('name="seller_phone"', 'name="model"', 'name="imei"', 'name="comment"', 'name="photo_5"',
+                                          'name="currency"', f'name="pay_{cash_uah}"', "iPhone 13 · 128 GB · Black", "Передняя", "Левая")))
+            form = {"seller_phone": "0671112233", "model": "Samsung A25", "imei": "357000000000011", "comment": "Не работает зарядка",
+                    "price": "4000", "currency": "UAH", f"pay_{cash_uah}": "2500", f"pay_{fop}": "1500"}
+            check("a master can't buy (403)", client.post(f"/buyback?t={master_token}", data=form, files={"photo_0": _jpeg()}).status_code == 403)
+            no_photo = client.post(f"/buyback?t={token}", data=form)
+            check("no photo at all is a friendly error", no_photo.status_code == 200 and "хотя бы одно фото" in no_photo.text)
+            bad_type = client.post(f"/buyback?t={token}", data=form, files={"photo_0": ("x.txt", b"hello", "text/plain")})
+            check("a non-image upload is a friendly error", "JPEG, PNG или WebP" in bad_type.text)
+            dup = client.post(f"/buyback?t={token}", data=dict(form, imei="356000000000002"), files={"photo_0": _jpeg()})
+            check("an IMEI that isn't new... is fine if that phone is no longer in stock (it was sold) — the same phone can come back",
+                  dup.status_code == 200 and "/buyback/" in str(dup.url))
+            short = client.post(f"/buyback?t={token}", data=dict(form, **{f"pay_{fop}": "1000"}), files={"photo_0": _jpeg()})
+            check("sources that don't add up to the price are a friendly error", "не сходится" in short.text)
+            no_phone = client.post(f"/buyback?t={token}", data=dict(form, seller_phone="+380"), files={"photo_0": _jpeg()})
+            check("the untouched «+380» template is not a phone number", "номер телефона продавца" in no_phone.text)
+            done = client.post(f"/buyback?t={token}", data=form, files={"photo_0": _jpeg(), "photo_1": _jpeg(), "photo_3": _jpeg()},
+                               follow_redirects=False)
+            check("a valid покупка goes through and opens its card", done.status_code == 303 and "/buyback/" in done.headers["location"])
+            order_id = int(done.headers["location"].split("/buyback/")[1].split("?")[0])
+            with get_conn(base) as conn:
+                check("three photos given — three stored, each under the side it was uploaded as",
+                      [p["label"] for p in buyback.get_photos(conn, order_id)] == ["Передняя", "Задняя", "Низ"])
+                check("paid 2500 from наличные and 1500 from ФОП (on top of the re-bought phone's 1500 above)",
+                      accounts.balance(conn, fop) == -3000)
+            card = client.get(f"/buyback/{order_id}?t={token}").text
+            check("the card shows number · model, контрагент, IMEI, поломки, price, where the phone is, how it was paid",
+                  all(x in card for x in (f"ПК-{order_id:03d}", "Samsung A25", "+380671112233", "357000000000011", "Не работает зарядка",
+                                          "4000", "СКУПКА", "Счёт ФОП")))
+            check("…with the IMEI barcode label and a print button", f"/buyback/{order_id}/barcode.png" in card and "printBuybackLabelBtn" in card)
+            label = client.get(f"/buyback/{order_id}/barcode.png?t={token}")
+            compact = client.get(f"/buyback/{order_id}/barcode.png?compact=1&t={token}")
+            check("the label endpoint returns a real PNG in both sizes",
+                  label.status_code == 200 and label.content[:8] == b"\x89PNG\r\n\x1a\n" and compact.content[:8] == b"\x89PNG\r\n\x1a\n")
+            found = client.get(f"/warehouse/find?t={token}&code=357000000000011", follow_redirects=False)
+            check("scanning that label on «Склад» finds the phone", found.status_code == 303 and "/inventory/products/" in found.headers["location"])
+            check("the list shows the покупка as a card with its model and price",
+                  "Samsung A25" in client.get(f"/buyback?t={token}").text and "4000" in client.get(f"/buyback?t={token}").text)
+            check("точка 2's list doesn't show точка 1's покупки", "Samsung A25" not in client.get(f"/buyback?t={make_token(owner, '2')}").text.split('<div class="cards">')[1])
+            check("an unknown id goes back to the list", client.get(f"/buyback/999999?t={token}", follow_redirects=False).status_code == 303)
 
-        parts_resp = client.post(f"/buyback?t={token}", data={
-            "client_name": "Продавец Запчасти", "client_phone": "+380501110003", "device_type": "Смартфон",
-            "model": "iPhone X", "purchase_price": "1000", "payment_method": "cash", "purpose": "parts",
-        }, files={"photo": ("d.jpg", fake_jpeg, "image/jpeg")}, follow_redirects=False)
-        check("purpose=parts intake redirects (303)", parts_resp.status_code == 303)
-        parts_order_id = int(parts_resp.headers["location"].split("/buyback/")[1].split("?")[0])
+            # ---- дубль карточки в тему «Скупка» рабочей группы
+            from core import notify
+            sent_calls = []
 
+            class _Resp:
+                status_code, text = 200, "ok"
+
+                def json(self):
+                    return {"result": [{"message_id": 4242}]}
+
+            def _fake_post(url, **kwargs):
+                sent_calls.append({"method": url.rsplit("/", 1)[1], "data": kwargs.get("data") or kwargs.get("json"), "files": kwargs.get("files")})
+                return _Resp()
+
+            orig_post, orig_token = httpx.post, notify._BOT_TOKEN
+            httpx.post, notify._BOT_TOKEN = _fake_post, "test-token"
+            try:
+                client.post(f"/buyback?t={token}", data=dict(form, imei="357000000000012"), files={"photo_0": _jpeg()})
+                check("with no «Скупка» topic configured nothing is posted to the group", not sent_calls)
+                client.post(f"/store/settings?t={token}", data={"name": "Мастерская", "buyback_topic_id": "77"})
+                with get_conn(base) as conn:
+                    conn.execute("UPDATE locations SET staff_group_chat_id = -100123 WHERE id = 1")
+                    check("Кабинет магазина saves the topic number", store_settings.get_settings(conn, 1)["buyback_topic_id"] == 77)
+                client.post(f"/buyback?t={token}", data=dict(form, imei="357000000000013"), files={"photo_0": _jpeg(), "photo_1": _jpeg()})
+                check("with the topic set, the покупка's card goes there as ONE album with the card as caption",
+                      [c["method"] for c in sent_calls] == ["sendMediaGroup"] and str(sent_calls[0]["data"]["message_thread_id"]) == "77"
+                      and sent_calls[0]["data"]["chat_id"] == -100123 and len(sent_calls[0]["files"]) == 2
+                      and "357000000000013" in sent_calls[0]["data"]["media"] and "Samsung A25" in json.loads(sent_calls[0]["data"]["media"])[0]["caption"])
+                client.post(f"/store/settings?t={token}", data={"name": "Мастерская", "buyback_topic_id": "нет"})
+                with get_conn(base) as conn:
+                    check("a non-number switches the posting off again", store_settings.get_settings(conn, 1)["buyback_topic_id"] is None)
+            finally:
+                httpx.post, notify._BOT_TOKEN = orig_post, orig_token
+            with get_conn(base) as conn:
+                doc_id = documents.get_for(conn, "buyback", order_id)["id"]
+            client.post(f"/journal/{doc_id}/cancel?t={token}", data={"reason": "ошибка"})
+            check("after cancelling from the journal the card says the phone is no longer on stock",
+                  "не числится" in client.get(f"/buyback/{order_id}?t={token}").text)
+
+
+def scenario_purchase_chat() -> None:
+    """«🛒 Покупка» in the bot — the twelve steps of the макет driven
+    through the real handlers against a real base."""
+    print("scenario: покупка телефона в боте — 12 шагов, сплит-оплата, карточка")
+    import asyncio
+    from types import SimpleNamespace
+
+    from aiogram.fsm.context import FSMContext
+    from aiogram.fsm.storage.base import StorageKey
+    from aiogram.fsm.storage.memory import MemoryStorage
+
+    from bot import buyback_flow as bf
+    from bot import quick_actions as qa
+
+    check("the price step understands гривня by default and named currencies",
+          bf.parse_price("5 000") == (5000, "UAH") and bf.parse_price("120 usd") == (120, "USD")
+          and bf.parse_price("$99,5") == (99.5, "USD") and bf.parse_price("250 USDT") == (250, "USDT")
+          and bf.parse_price("100 евро") == (100, "EUR") and bf.parse_price("дорого") is None)
+
+    TG, CHAT_ID = 882001, 882001
+    with tempfile.TemporaryDirectory() as tmp, _separate_base(tmp, "purchase-chat.sqlite3", ("Мастерская",)) as db_path:
         with get_conn(db_path) as conn:
-            parts_order = buyback.get_buyback_order(conn, parts_order_id)
-            check("parts order has no linked product", parts_order["product_id"] is None)
-            cash_row = conn.execute(
-                "SELECT * FROM cash_transactions WHERE ref_type='buyback_order' AND ref_id=?", (parts_order_id,)
-            ).fetchone()
-            check("parts intake recorded a cash expense for the exact amount paid",
-                  cash_row is not None and cash_row["kind"] == "expense" and cash_row["amount"] == 1000
-                  and cash_row["category"] == "buyback")
+            keeper = auth.create_staff(conn, "pc-keeper", "pass", "Виталий", "storekeeper", location_id=1)
+            auth.link_staff_telegram(conn, "pc-keeper", TG)
+            acc = {(a["kind"], a["currency"]): a["id"] for a in accounts.list_accounts(conn, 1)}
+            cash.record_adjustment(conn, 20000, "старт", keeper, location_id=1)
 
-        resale_resp = client.post(f"/buyback?t={token}", data={
-            "client_name": "Продавец Резейл", "client_phone": "+380501110004", "device_type": "Смартфон",
-            "brand": "Apple", "model": "iPhone 12", "purchase_price": "3000", "payment_method": "card",
-            "purpose": "resale", "resale_price": "5000",
-        }, files={"photo": ("d.jpg", fake_jpeg, "image/jpeg")}, follow_redirects=False)
-        check("purpose=resale intake redirects (303)", resale_resp.status_code == 303)
-        resale_order_id = int(resale_resp.headers["location"].split("/buyback/")[1].split("?")[0])
+        photo_bytes = io.BytesIO()
+        Image.new("RGB", (40, 40), "white").save(photo_bytes, format="JPEG")
+        albums: list[list] = []
 
-        with get_conn(db_path) as conn:
-            resale_order = buyback.get_buyback_order(conn, resale_order_id)
-            check("resale order got a linked product", bool(resale_order["product_id"]))
-            product = inventory.get_product(conn, resale_order["product_id"])
-            check("the auto-created product carries the resale price", product["price"] == 5000)
-            check("the auto-created product's photo is the buyback photo", bool(product["photo_path"]))
-            check("the auto-created product name mentions «Б/У»", "Б/У" in product["name"])
-            check("the auto-created product is sellable", product["is_sellable"] == 1)
-            total_qty = inventory.product_total_qty(conn, resale_order["product_id"])
-            check("the auto-created product has exactly qty=1 in stock", total_qty == 1)
+        class _Chat:
+            def __init__(self):
+                self.log, self._next = [], 500
 
-        product_page_resp = client.get(f"/inventory/products/{resale_order['product_id']}?t={token}")
-        check("the auto-created product's own card renders normally (real Склад flow, untouched)",
-              product_page_resp.status_code == 200 and "iPhone 12" in product_page_resp.text)
+            def add(self, author, text, markup=None, kind="text"):
+                self._next += 1
+                self.log.append({"id": self._next, "author": author, "text": text, "markup": markup, "kind": kind})
+                return self._next
 
-        detail_resp = client.get(f"/buyback/{resale_order_id}?t={token}")
-        check("buyback detail page renders and links to the product",
-              detail_resp.status_code == 200 and f"/inventory/products/{resale_order['product_id']}" in detail_resp.text)
+            def delete(self, message_id):
+                self.log = [m for m in self.log if m["id"] != message_id]
 
-        filtered_resp = client.get(f"/buyback?t={token}&purpose=resale")
-        check("purpose filter shows the resale order but not the parts one",
-              "Продавец Резейл" in filtered_resp.text and "Продавец Запчасти" not in filtered_resp.text)
+            def edit(self, message_id, text, markup):
+                for m in self.log:
+                    if m["id"] == message_id:
+                        m["text"], m["markup"] = text, markup
 
-    # Photos land on real disk (webapp/static/buyback_photos) regardless of
-    # which sqlite file db_path points at — same reason
-    # scenario_webapp_forms cleans up intake_photo_file for repairs.
-    for filename in (parts_order["photo_path"], resale_order["photo_path"]):
-        path = os.path.join(buyback.PHOTO_DIR, filename)
-        if os.path.exists(path):
-            os.remove(path)
+        class _Bot:
+            def __init__(self, chat):
+                self.chat = chat
 
-    if os.path.exists(db_path):
-        os.remove(db_path)
+            async def delete_message(self, chat_id, message_id):
+                self.chat.delete(message_id)
+
+            async def delete_messages(self, chat_id, message_ids):
+                for mid in message_ids:
+                    self.chat.delete(mid)
+
+            async def edit_message_text(self, chat_id, message_id, text, reply_markup=None):
+                self.chat.edit(message_id, text, reply_markup)
+
+            async def get_file(self, file_id):
+                return SimpleNamespace(file_path="x")
+
+            async def download_file(self, file_path):
+                return io.BytesIO(photo_bytes.getvalue())
+
+        class _Msg:
+            def __init__(self, chat, bot, text=None, photo=False):
+                self._log, self.bot, self.text = chat, bot, text
+                self.photo = [SimpleNamespace(file_id="f")] if photo else None
+                self.chat = SimpleNamespace(id=CHAT_ID, type="private")
+                self.from_user = SimpleNamespace(id=TG, full_name="Виталий")
+                self.message_id = chat.add("staff", text or "[фото]")
+
+            async def answer(self, text, reply_markup=None):
+                return SimpleNamespace(message_id=self._log.add("bot", text, reply_markup))
+
+        class _CbMessage:
+            def __init__(self, chat, message_id):
+                self._log, self.message_id = chat, message_id
+                self.chat = SimpleNamespace(id=CHAT_ID, type="private")
+
+            async def answer(self, text, reply_markup=None):
+                return SimpleNamespace(message_id=self._log.add("bot", text, reply_markup))
+
+            async def answer_photo(self, photo, caption=None, reply_markup=None):
+                return SimpleNamespace(message_id=self._log.add("bot", caption, reply_markup, kind="photo"))
+
+            async def answer_media_group(self, media):
+                albums.append(media)
+                self._log.add("bot", media[0].caption, None, kind="album")
+
+        class _Cb:
+            def __init__(self, chat, bot, data, message_id):
+                self.data, self.bot = data, bot
+                self.from_user = SimpleNamespace(id=TG)
+                self.message = _CbMessage(chat, message_id)
+                self.answered = []
+
+            async def answer(self, text=None, show_alert=False):
+                self.answered.append((text, show_alert))
+
+        def _buttons(markup) -> list[str]:
+            return [b.callback_data for row in markup.inline_keyboard for b in row if b.callback_data] if markup else []
+
+        async def run() -> None:
+            chat = _Chat()
+            bot = _Bot(chat)
+            state = FSMContext(storage=MemoryStorage(), key=StorageKey(bot_id=1, chat_id=CHAT_ID, user_id=TG))
+            say = lambda text: _Msg(chat, bot, text)
+            tap = lambda data: _Cb(chat, bot, data, chat.log[-1]["id"])
+            screen = lambda: [m for m in chat.log if m["author"] == "bot"][-1]
+
+            await bf.buy_start(say(qa.BTN_BUYBACK), state)
+            check("with no shift open «Покупка» shows «сверить остатки» first", "Сверьте остатки" in screen()["text"])
+            await qa.shift_open_ok(tap("shift_open_ok"), state)
+            await bf.buy_start(say(qa.BTN_BUYBACK), state)
+            check("step 1 asks for the seller's phone number", "номер телефона продавца" in screen()["text"] and "шаг 1 из 6" in screen()["text"])
+            await bf.buy_got_phone(say("привет"), state)
+            check("something that isn't a number keeps the question up", "Не похоже на номер" in screen()["text"])
+            await bf.buy_got_phone(say("097 007 30 90"), state)
+            check("step 2 asks for six photos, starting with the front", "6 фотографий" in screen()["text"] and "Сейчас: Передняя" in screen()["text"])
+            await bf.buy_photo_fallback(say("вот"), state)
+            check("text instead of a photo is nudged", "Пришлите фото" in screen()["text"])
+            # five one by one…
+            for index in range(5):
+                await bf.buy_got_photo(_Msg(chat, bot, photo=True), state)
+            check("after five it shows the count and names the last side", "Загружено 5 из 6" in screen()["text"] and "Сейчас: Левая" in screen()["text"])
+            await bf.buy_got_photo(_Msg(chat, bot, photo=True), state)
+            check("the sixth moves on to the model", "Укажите модель телефона" in screen()["text"] and "шаг 3 из 6" in screen()["text"])
+            check("an extra photo arriving late is swallowed without breaking the step",
+                  (await bf.buy_got_photo(_Msg(chat, bot, photo=True), state)) is None and "Укажите модель" in screen()["text"])
+            await bf.buy_got_model(say("iPhone 13 · 128 GB · Black"), state)
+            await bf.buy_got_imei(say("12"), state)
+            check("a bad IMEI is refused with a hint", "Проверьте IMEI" in screen()["text"])
+            await bf.buy_got_imei(say("356000000000001"), state)
+            check("step 5 asks for поломки, with a skip button", "поломки" in screen()["text"] and "buy_comment_skip" in _buttons(screen()["markup"]))
+            await bf.buy_got_comment(say("Разбит дисплей. Изношен аккумулятор."), state)
+            check("step 6 asks for the price", "цену покупки" in screen()["text"] and "шаг 6 из 6" in screen()["text"])
+            await bf.buy_got_price(say("много"), state)
+            check("a non-number price is nudged", "Введите цену числом" in screen()["text"])
+            await bf.buy_got_price(say("5000"), state)
+            check("then the sources: every account of the точка with its balance",
+                  "Выберите источник оплаты" in screen()["text"] and f"buy_src:{acc[('cash', 'UAH')]}" in _buttons(screen()["markup"])
+                  and f"buy_src:{acc[('crypto', 'USDT')]}" in _buttons(screen()["markup"])
+                  and any("20000" in b.text for row in screen()["markup"].inline_keyboard for b in row))
+
+            await bf.buy_pick_source(tap(f"buy_src:{acc[('cash', 'UAH')]}"), state)
+            check("picking a source asks how much, offering «всё оставшееся»",
+                  "Сколько платим" in screen()["text"] and "buy_amt_all" in _buttons(screen()["markup"]))
+            await bf.buy_got_amount(say("9000"), state)
+            check("more than is left to pay is refused", "только 5000" in screen()["text"])
+            await bf.buy_got_amount(say("2000"), state)
+            check("the distribution screen lists the part and what is left, with «Добавить оплату»",
+                  "Наличные — 2000 грн" in screen()["text"] and "Осталось: 3000 грн" in screen()["text"]
+                  and "buy_pay_add" in _buttons(screen()["markup"]) and "buy_pay_done" not in _buttons(screen()["markup"]))
+            await bf.buy_pay_more(tap("buy_pay_add"), state)
+            await bf.buy_pick_source(tap(f"buy_src:{acc[('fop', 'UAH')]}"), state)
+            await bf.buy_got_amount(say("1500"), state)
+            await bf.buy_pay_more(tap("buy_pay_add"), state)
+            await bf.buy_pick_source(tap(f"buy_src:{acc[('card', 'UAH')]}"), state)
+            await bf.buy_got_amount(say("1000"), state)
+            await bf.buy_pay_more(tap("buy_pay_add"), state)
+            await bf.buy_pick_source(tap(f"buy_src:{acc[('crypto', 'USDT')]}"), state)
+            check("a foreign-currency source asks for the amount in that currency, no «всё оставшееся»",
+                  "Сколько USDT" in screen()["text"] and not screen()["markup"])
+            await bf.buy_got_amount(say("12,5"), state)
+            check("then for its rate", "сколько гривен за 1 USDT" in screen()["text"])
+            await bf.buy_got_pay_rate(say("50"), state)
+            check("a rate that overshoots what is left is refused", "больше, чем осталось" in screen()["text"])
+            await bf.buy_got_pay_rate(say("40"), state)
+            text = screen()["text"]
+            check("the distribution matches the макет: four sources, total 5000, nothing left, «Далее»",
+                  all(x in text for x in ("Наличные — 2000 грн", "Счёт ФОП — 1500 грн", "Карта — 1000 грн", "Криптокошелёк USDT — 12.5 USDT = 500 грн",
+                                          "Всего: 5000 грн · Осталось: 0 грн"))
+                  and "buy_pay_done" in _buttons(screen()["markup"]))
+            check("a source with less money than is taken from it is flagged, not blocked", "⚠ на счёте сейчас 0" in text)
+
+            await bf.buy_to_confirm(tap("buy_pay_done"), state)
+            card = screen()
+            check("the final card is a PHOTO with model, photo count, IMEI, price, склад, seller and the split",
+                  card["kind"] == "photo" and all(x in card["text"] for x in (
+                      "iPhone 13 · 128 GB · Black", "Фото: 6", "356000000000001", "Цена: 5000 грн", "Склад: Мастерская", "+380970073090"))
+                  and {"buy_confirm", "buy_cancel"} <= set(_buttons(card["markup"])))
+            check("up to here the chat holds only the «смена открыта» line and the current screen — nothing the employee sent",
+                  [m["author"] for m in chat.log] == ["bot", "bot"] and "Смена открыта" in chat.log[0]["text"])
+            await bf.buy_confirm_fallback(say("ок"), state)
+            check("a stray message on the card doesn't replace it — just a pointer back", chat.log[-1]["text"].startswith("Нажмите «✅ Купить»"))
+
+            buy_tap = _Cb(chat, bot, "buy_confirm", card["id"])
+            await bf.buy_confirm(buy_tap, state)
+            with get_conn(db_path) as conn:
+                orders = buyback.list_buyback_orders(conn)
+                check("«Купить» creates exactly one покупка with everything entered",
+                      len(orders) == 1 and orders[0]["imei"] == "356000000000001" and orders[0]["purchase_price"] == 5000
+                      and orders[0]["condition_note"].startswith("Разбит дисплей") and len(buyback.get_photos(conn, orders[0]["id"])) == 6)
+                check("the money left the four sources and the phone is on stock",
+                      accounts.balance(conn, acc[("cash", "UAH")]) == 18000 and accounts.balance(conn, acc[("crypto", "USDT")]) == -12.5
+                      and inventory.find_unit_by_imei(conn, "356000000000001") is not None)
+            check("the chat ends with the card as a six-photo album and a line with the «карточка и этикетка» button",
+                  len(albums) == 1 and len(albums[0]) == 6 and "ПК-001 · iPhone 13" in albums[0][0].caption
+                  and [m["kind"] for m in chat.log][-2:] == ["album", "text"] and len(chat.log) == 3
+                  and "ПК-001 — куплен" in chat.log[-1]["text"])
+            await bf.buy_confirm(_Cb(chat, bot, "buy_confirm", card["id"]), state)
+            with get_conn(db_path) as conn:
+                check("a second tap on «Купить» buys nothing twice", len(buyback.list_buyback_orders(conn)) == 1)
+
+            # ---- второй заход: валюта цены, выбор модели кнопкой, «без поломок», «всё оставшееся», «Изменить»
+            await bf.buy_start(say(qa.BTN_BUYBACK), state)
+            await bf.buy_got_phone(say("0970073090"), state)
+            for _ in range(6):
+                await bf.buy_got_photo(_Msg(chat, bot, photo=True), state)
+            check("the model step now offers what was bought before as a button", "buy_model:0" in _buttons(screen()["markup"]))
+            await bf.buy_pick_model(tap("buy_model:0"), state)
+            await bf.buy_got_imei(say("356000000000001"), state)
+            check("the same IMEI can't be bought while that phone is still on stock", "уже числится" in screen()["text"])
+            await bf.buy_got_imei(say("356000000000002"), state)
+            await bf.buy_skip_comment(tap("buy_comment_skip"), state)
+            await bf.buy_got_price(say("100 usd"), state)
+            check("a USD price asks for the rate", "сколько гривен за 1 USD" in screen()["text"])
+            await bf.buy_got_rate(say("41"), state)
+            check("and shows the гривня value to pay", "100 USD = 4100 грн" in screen()["text"] and "Осталось оплатить: 4100 грн" in screen()["text"])
+            await bf.buy_pick_source(tap(f"buy_src:{acc[('card', 'UAH')]}"), state)
+            await bf.buy_got_amount(say("100"), state)
+            await bf.buy_pay_more(tap("buy_pay_reset"), state)
+            check("«Изменить» clears the split and starts the sources over", "Осталось оплатить: 4100 грн" in screen()["text"] and "Карта —" not in screen()["text"])
+            await bf.buy_pick_source(tap(f"buy_src:{acc[('cash', 'UAH')]}"), state)
+            await bf.buy_amount_all(tap("buy_amt_all"), state)
+            check("«всё оставшееся» fills the whole amount in one tap", "Наличные — 4100 грн" in screen()["text"] and "Осталось: 0 грн" in screen()["text"])
+            await bf.buy_to_confirm(tap("buy_pay_done"), state)
+            await bf.buy_confirm(_Cb(chat, bot, "buy_confirm", screen()["id"]), state)
+            with get_conn(db_path) as conn:
+                orders = buyback.list_buyback_orders(conn)
+                check("the USD покупка is on record at its гривня value, the same product card now has two units",
+                      len(orders) == 2 and orders[0]["currency"] == "USD" and orders[0]["purchase_price_uah"] == 4100
+                      and orders[0]["product_id"] == orders[1]["product_id"] and accounts.balance(conn, acc[("cash", "UAH")]) == 13900)
+
+        asyncio.run(run())
 
 
 def scenario_multi_store_http() -> None:
@@ -4792,6 +5122,7 @@ def main() -> None:
     scenario_stock()
     scenario_stock_http()
     scenario_transfer_chat()
+    scenario_purchase_chat()
     if os.path.exists(_WEBAPP_TEST_DB):
         os.remove(_WEBAPP_TEST_DB)
 

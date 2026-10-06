@@ -1,6 +1,16 @@
-"""Скупка техники у клиентов — покупка устройств у частных лиц, а не у
-поставщиков (см. core.purchases для того случая). Две ветки по
-назначению:
+"""Покупка техники у клиентов — устройств у частных лиц, а не у
+поставщиков (см. core.purchases для того случая).
+
+С Захода 4 (06.10) основной путь — create_purchase() внизу: «один телефон
+— одна покупка». Продавец по номеру телефона, до шести фото со всех
+сторон, модель, IMEI, поломки, цена в любой валюте, оплата с одного или
+нескольких счетов точки. Телефон сразу становится серийной единицей на
+складе купившей точки: партия = IMEI + цена покупки как себестоимость.
+Что с ним дальше (в ремонт, в производство, на витрину) — отдельные
+документы.
+
+create_buyback_intake() ниже — прежняя форма (24.08) с двумя ветками по
+назначению, оставлена для записей, сделанных до Захода 4:
 
 - purpose='parts' — просто запись-факт (для истории/кассы). Разборка на
   компоненты остаётся ручной операцией: мастер физически разбирает
@@ -22,10 +32,13 @@ import os
 import sqlite3
 import uuid
 
+from core import accounts as _accounts
 from core import cash as _cash
 from core import clients as _clients
 from core import documents as _documents
 from core import locations as _locations
+from core import notify as _notify
+from core.storage import get_conn as _get_conn
 from core import inventory as _inventory
 from core import photos as _photos
 
@@ -52,7 +65,7 @@ def list_buyback_orders(
     if location_id is not None:
         query += " AND buyback_orders.location_id = ?"
         params.append(location_id)
-    query += " ORDER BY buyback_orders.created_at DESC"
+    query += " ORDER BY buyback_orders.created_at DESC, buyback_orders.id DESC"
     return conn.execute(query, params).fetchall()
 
 
@@ -179,3 +192,227 @@ def create_buyback_intake(
         ref_table="buyback_orders", ref_id=order_id, title=device_label, amount=purchase_price, key=key,
     )
     return order_id
+
+
+# ---- Покупка телефона (Заход 4) ----
+
+# The six sides, in the order the bot asks for them.
+PHOTO_SLOTS = ("Передняя", "Задняя", "Верх", "Низ", "Правая", "Левая")
+_PHONE_CATEGORY = "Телефоны Б/У"
+_MIN_IMEI_LENGTH = 8
+
+
+class PurchaseError(Exception):
+    """A покупка that can't be проведена as entered — message is shown to staff as-is."""
+
+
+def check_imei(conn: sqlite3.Connection, imei: str | None) -> str:
+    """Normalized IMEI/serial, or PurchaseError: too short to identify
+    anything, or already on our books (the same phone can't be bought
+    while it is still in stock)."""
+    normalized = _inventory.normalize_imei(imei)
+    if not normalized or len(normalized) < _MIN_IMEI_LENGTH or not normalized.isalnum():
+        raise PurchaseError("Проверьте IMEI — обычно это 15 цифр (наберите *#06# на телефоне).")
+    if _inventory.find_unit_by_imei(conn, normalized):
+        raise PurchaseError(f"Устройство с IMEI {normalized} уже числится на складе.")
+    return normalized
+
+
+def recent_models(conn: sqlite3.Connection, limit: int = 6) -> list[str]:
+    """Model names bought most recently — the «выберите из списка» of the
+    model step."""
+    rows = conn.execute(
+        """SELECT products.name, MAX(buyback_orders.id) AS last
+           FROM buyback_orders JOIN products ON products.id = buyback_orders.product_id
+           WHERE products.is_serial = 1 AND products.active = 1
+           GROUP BY products.id ORDER BY last DESC LIMIT ?""",
+        (limit,),
+    ).fetchall()
+    return [row["name"] for row in rows]
+
+
+def _model_product(conn: sqlite3.Connection, model: str) -> int:
+    """The serial SKU for this model — an existing one with the same name
+    (case-insensitively), or a new one. Every phone of that model, bought
+    or received from a supplier, is a unit (партия + IMEI) of this card."""
+    row = conn.execute(
+        "SELECT id FROM products WHERE active = 1 AND is_serial = 1 AND LOWER(name) = LOWER(?) ORDER BY id LIMIT 1",
+        (model,),
+    ).fetchone()
+    if row:
+        return row["id"]
+    return _inventory.create_product(
+        conn, name=model, sku=None, category=_PHONE_CATEGORY, unit="шт",
+        is_repair_part=False, is_sellable=True, min_qty=0, price=None, is_serial=True,
+    )
+
+
+def create_purchase(
+    conn: sqlite3.Connection,
+    *,
+    seller_phone: str,
+    model: str,
+    imei: str,
+    comment: str | None,
+    price,
+    staff_id: int,
+    location_id: int | None = None,
+    currency: str = "UAH",
+    rate: float | None = None,
+    payments: list[tuple[int, object, object]] | None = None,
+    photos: list[tuple[bytes, str, str | None]] | None = None,
+    seller_name: str | None = None,
+    key: str | None = None,
+) -> int:
+    """One phone, one покупка. Everything that can refuse — the seller's
+    number, the IMEI, the price, the payment split — is checked before the
+    first write (PurchaseError / core.cash.PaymentError).
+
+    `price` is in `currency`; `rate` (гривен за единицу) is required for a
+    foreign one. `payments` is [(account_id, amount, rate), …] over the
+    точка's accounts and must add up to the price's гривня value — None
+    means all of it from the точка's наличные. `photos` is
+    [(bytes, ext, label), …], at most len(PHOTO_SLOTS)."""
+    location_id = _locations.resolve(conn, location_id)
+    phone = _clients.normalize_phone(seller_phone or "")
+    if not phone:
+        raise PurchaseError("Укажите номер телефона продавца — например 0501234567.")
+    model = " ".join((model or "").split())
+    if not model:
+        raise PurchaseError("Укажите модель телефона.")
+    imei = check_imei(conn, imei)
+    amount = _accounts.parse_amount(price)
+    if not amount:
+        raise PurchaseError("Укажите цену покупки.")
+    currency = (currency or "UAH").upper()
+    if currency not in _accounts.CURRENCIES:
+        raise PurchaseError("Выберите валюту цены.")
+    if currency == _accounts.BASE_CURRENCY:
+        rate_value = 1.0
+    else:
+        rate_value = _accounts.parse_amount(rate)
+        if not rate_value:
+            raise PurchaseError(f"Укажите курс: сколько гривен за 1 {currency}.")
+    total_uah = _accounts.money(float(amount) * float(rate_value))
+    resolved = _cash.resolve_payments(conn, location_id, total_uah, payments, "cash")
+    photos = list(photos or [])[: len(PHOTO_SLOTS)]
+
+    existing = _clients.get_by_phone(conn, phone)
+    client_id = existing["id"] if existing else _clients.create_client(
+        conn, name=(seller_name or "").strip() or phone, phone=phone, source="offline",
+    )
+    product_id = _model_product(conn, model)
+
+    order_id = conn.execute(
+        """INSERT INTO buyback_orders
+           (client_id, device_type, model, serial_number, imei, condition_note, purchase_price, currency, rate,
+            purchase_price_uah, purpose, product_id, staff_id, location_id)
+           VALUES (?, 'Телефон', ?, ?, ?, ?, ?, ?, ?, ?, 'resale', ?, ?, ?)""",
+        (client_id, model, imei, imei, (comment or "").strip() or None, amount, currency, rate_value,
+         total_uah, product_id, staff_id, location_id),
+    ).lastrowid
+
+    first_photo = None
+    for position, (data, ext, label) in enumerate(photos):
+        filename = write_buyback_photo(order_id, data, ext)
+        first_photo = first_photo or filename
+        conn.execute(
+            "INSERT INTO buyback_photos (order_id, position, label, path) VALUES (?, ?, ?, ?)",
+            (order_id, position, label or (PHOTO_SLOTS[position] if position < len(PHOTO_SLOTS) else None), filename),
+        )
+    if first_photo:
+        conn.execute("UPDATE buyback_orders SET photo_path = ? WHERE id = ?", (first_photo, order_id))
+        if not _inventory.get_product(conn, product_id)["photo_path"]:
+            _inventory.set_product_photo(conn, product_id, first_photo)
+
+    # The phone is ours now: a партия of one unit — its IMEI, what we paid
+    # for it as its cost — in the buying точка's «СКУПКА» cell.
+    batch_id = _inventory.create_batch(
+        conn, product_id, source="buyback", unit_cost=amount, currency=currency, rate=rate_value, imei=imei,
+    )
+    _inventory.record_movement(
+        conn, product_id, 1, "receipt", staff_id, to_cell_id=_get_or_create_buyback_cell(conn, location_id),
+        ref_type="buyback_order", ref_id=order_id, comment=f"Покупка №{order_id}", batch_id=batch_id,
+    )
+    conn.execute("UPDATE buyback_orders SET batch_id = ? WHERE id = ?", (batch_id, order_id))
+
+    _cash.record_payments(
+        conn, "expense", resolved, "buyback_order", order_id, staff_id,
+        category="buyback", comment=f"Покупка №{order_id}: {model}",
+    )
+    _documents.register(
+        conn, "buyback", staff_id=staff_id, location_id=location_id, client_id=client_id,
+        ref_table="buyback_orders", ref_id=order_id, title=model, amount=total_uah, key=key,
+    )
+    return order_id
+
+
+def post_card_to_group(store, order_id: int) -> None:
+    """The покупка's card into the точка's staff group, in its «Скупка»
+    topic — only if that topic is configured (locations.buyback_topic_id).
+    Photos as one album with the card as caption; plain text if there are
+    none. Best effort; blocking httpx, so callers run it off the request /
+    event loop (a FastAPI BackgroundTask, asyncio.to_thread in the bot)."""
+    if not store.staff_group_chat_id or not store.buyback_topic_id:
+        return
+    with _get_conn(store.db_path) as conn:
+        text = card_text(conn, order_id)
+        photos = read_photos(conn, order_id)
+    if photos:
+        _notify.send_album(store.staff_group_chat_id, photos, text, message_thread_id=store.buyback_topic_id)
+    else:
+        _notify.notify_staff_group(
+            text, message_thread_id=store.buyback_topic_id, staff_group_chat_id=store.staff_group_chat_id,
+        )
+
+
+def get_photos(conn: sqlite3.Connection, order_id: int) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM buyback_photos WHERE order_id = ? ORDER BY position", (order_id,)
+    ).fetchall()
+
+
+def read_photos(conn: sqlite3.Connection, order_id: int) -> list[tuple[bytes, str]]:
+    """The покупка's photos off disk, in order — for posting its card."""
+    result = []
+    for photo in get_photos(conn, order_id):
+        path = os.path.join(PHOTO_DIR, photo["path"])
+        if os.path.exists(path):
+            with open(path, "rb") as f:
+                result.append((f.read(), photo["path"]))
+    return result
+
+
+def card_text(conn: sqlite3.Connection, order_id: int) -> str:
+    """The card of a покупка as it appears in Telegram (HTML): «ПК-001 ·
+    iPhone 13 · 128 GB · Black», контрагент, IMEI, поломки, «Куплен: 5 000
+    грн · Мастерская», and how it was paid."""
+    import html
+
+    order = get_buyback_order(conn, order_id)
+    location = _locations.get_location(conn, order["location_id"]) if order["location_id"] else None
+    label = _documents.label("buyback", order_id)
+    device = " ".join(x for x in (order["brand"], order["model"]) if x) or order["device_type"]
+    price = _accounts.money(order["purchase_price"])
+    currency = order["currency"] or "UAH"
+    bought = f"{price} {_accounts.currency_label(currency)}"
+    if currency != "UAH" and order["purchase_price_uah"] is not None:
+        bought += f" = {_accounts.money(order['purchase_price_uah'])} грн"
+    lines = [
+        f"🛒 <b>{label} · {html.escape(device)}</b>",
+        f"Контрагент: {html.escape(order['client_phone'] or order['client_name'])}",
+    ]
+    if order["imei"] or order["serial_number"]:
+        lines.append(f"IMEI: <code>{html.escape(order['imei'] or order['serial_number'])}</code>")
+    if order["condition_note"]:
+        lines.append(f"Поломки: {html.escape(order['condition_note'])}")
+    lines.append(f"Куплен: {bought}" + (f" · {html.escape(location['name'])}" if location else ""))
+    paid = _cash.payments_for(conn, "buyback_order", order_id)
+    if paid:
+        parts = [
+            f"{html.escape(p['account_name'] or '—')} — {_accounts.money(p['amount'])} {_accounts.currency_label(p['currency'] or 'UAH')}"
+            for p in paid if not p["cancelled_at"]
+        ]
+        if parts:
+            lines.append("Оплата: " + "; ".join(parts))
+    return "\n".join(lines)

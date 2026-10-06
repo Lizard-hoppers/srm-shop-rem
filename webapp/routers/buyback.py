@@ -1,21 +1,30 @@
+"""Покупка телефона у клиента (core.buyback.create_purchase, Заход 4) —
+the Mini App side of the same document the bot's «🛒 Покупка» creates:
+seller by phone number, model, IMEI, поломки, price in any currency, the
+payout split across the точка's accounts, up to six photos. The покупка's
+own page is its card: photos, the IMEI as a scannable barcode with a
+printable label, how it was paid, where the phone is now.
+"""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Request
-from fastapi.responses import RedirectResponse
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
+from fastapi.responses import RedirectResponse, Response
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
+from core import accounts as core_accounts
+from core import barcode_label
 from core import buyback as core_buyback
 from core import cash as core_cash
-from core import clients as core_clients
 from core import documents as core_documents
+from core import inventory as core_inventory
 from core.storage import get_conn
-from webapp.deps import idem_key, link, loc, optional_int, require_role, require_staff
+from webapp.deps import idem_key, link, loc, require_role, require_staff
+from webapp.payments import payments_from_form
 from webapp.templating import render
 
 router = APIRouter(prefix="/buyback")
 
-# Mirrors webapp.routers.purchases._STOCK_WRITE_ROLES — buyback touches
-# both cash (money out) and stock (a resale item entering the catalog),
+# Buying touches both cash (money out) and stock (a unit entering it) —
 # same trust boundary as receiving from a supplier.
 _BUYBACK_ROLES = ("owner", "admin", "storekeeper")
 
@@ -23,10 +32,9 @@ _PHOTO_EXT_BY_CONTENT_TYPE = {"image/jpeg": ".jpg", "image/png": ".png", "image/
 _MAX_PHOTO_BYTES = 15 * 1024 * 1024  # comfortably under nginx's client_max_body_size (20M)
 
 
-async def _validate_intake_photo(upload) -> tuple[bytes, str] | None:
-    """Same shape as webapp.routers.repairs._validate_intake_photo — None
-    if the file input was left empty, raises ValueError on a real but
-    invalid upload (wrong type, too big)."""
+async def _read_photo(upload) -> tuple[bytes, str] | None:
+    """None if this file input was left empty; ValueError (user-facing) on
+    a real but invalid upload (wrong type, too big)."""
     if not isinstance(upload, StarletteUploadFile) or not upload.filename:
         return None
     ext = _PHOTO_EXT_BY_CONTENT_TYPE.get(upload.content_type)
@@ -38,80 +46,67 @@ async def _validate_intake_photo(upload) -> tuple[bytes, str] | None:
     return data, ext
 
 
-def _list_context(purpose: str | None, location_id: int | None = None) -> dict:
+def _list_context(location_id: int) -> dict:
     with get_conn() as conn:
         return {
-            "orders": core_buyback.list_buyback_orders(conn, purpose=purpose, location_id=location_id),
-            "purpose": purpose,
-            "purposes": core_buyback.PURPOSES,
-            "payment_methods": core_cash.METHODS,
+            "orders": core_buyback.list_buyback_orders(conn, location_id=location_id),
+            "accounts": core_accounts.list_accounts(conn, location_id),
+            "currencies": core_accounts.CURRENCIES,
+            "photo_slots": list(enumerate(core_buyback.PHOTO_SLOTS)),
+            "model_suggestions": sorted({
+                *core_buyback.recent_models(conn, limit=30),
+                *(p["name"] for p in core_inventory.list_products(conn) if p["is_serial"]),
+            }),
         }
 
 
 @router.get("")
-def list_view(request: Request, purpose: str | None = None, staff=Depends(require_staff)):
-    return render(request, "buyback_list.html", staff=staff, **_list_context(purpose, loc(request)))
+def list_view(request: Request, staff=Depends(require_staff)):
+    return render(request, "buyback_list.html", staff=staff, **_list_context(loc(request)))
 
 
 @router.post("")
-async def create_view(request: Request, staff=Depends(require_role(*_BUYBACK_ROLES))):
-    """Every field arrives as a plain form value (not typed Form(...)) so a
-    submission missing something never hits FastAPI's raw 422 — it
-    re-renders the same page with a plain-Russian error instead (same
-    convention as webapp.routers.repairs.create_view)."""
+async def create_view(
+    request: Request, background_tasks: BackgroundTasks, staff=Depends(require_role(*_BUYBACK_ROLES)),
+):
+    """Every field arrives as a plain form value so a submission missing
+    something re-renders the page with a plain-Russian error instead of a
+    raw 422."""
     form = await request.form()
-    client_name = (form.get("client_name") or "").strip()
-    client_phone = core_clients.normalize_phone((form.get("client_phone") or "").strip())
-    device_type = (form.get("device_type") or "").strip()
-    brand = (form.get("brand") or "").strip()
-    model = (form.get("model") or "").strip()
-    serial_number = (form.get("serial_number") or "").strip()
-    condition_note = (form.get("condition_note") or "").strip()
-    purchase_price = optional_int(form.get("purchase_price") or "")
-    payment_method = form.get("payment_method") or "cash"
-    purpose = form.get("purpose") or "parts"
-    resale_price = optional_int(form.get("resale_price") or "")
 
     def _error(message: str):
-        return render(request, "buyback_list.html", staff=staff, error=message, **_list_context(None, loc(request)))
+        return render(request, "buyback_list.html", staff=staff, error=message, **_list_context(loc(request)))
 
-    if not client_name or not client_phone:
-        return _error("Заполните имя и телефон клиента.")
-    if not device_type:
-        return _error("Укажите тип устройства.")
-    if not model:
-        return _error("Укажите модель устройства.")
-    if not purchase_price or purchase_price <= 0:
-        return _error("Укажите сумму, которую платим клиенту.")
-    if payment_method not in core_cash.METHODS:
-        return _error("Укажите способ оплаты.")
-    if purpose not in core_buyback.PURPOSES:
-        return _error("Укажите назначение — на запчасти или на продажу.")
-    if purpose == "resale" and (not resale_price or resale_price <= 0):
-        return _error("Укажите цену продажи — она нужна, чтобы товар сразу можно было продать.")
-
+    photos = []
     try:
-        photo = await _validate_intake_photo(form.get("photo"))
+        for position, label in enumerate(core_buyback.PHOTO_SLOTS):
+            photo = await _read_photo(form.get(f"photo_{position}"))
+            if photo:
+                photos.append((photo[0], photo[1], label))
     except ValueError as exc:
         return _error(str(exc))
-    if not photo:
-        return _error("Загрузите фото устройства.")
+    if not photos:
+        return _error("Загрузите хотя бы одно фото устройства.")
 
     key = idem_key("buyback", form.get("idem"))
-    with get_conn() as conn:
-        already = core_documents.find_by_key(conn, key)
-        if already:
-            return RedirectResponse(link(request, f"/buyback/{already['ref_id']}"), status_code=303)
-        order_id = core_buyback.create_buyback_intake(
-            conn,
-            client_name=client_name, client_phone=client_phone,
-            device_type=device_type, brand=brand or None, model=model,
-            serial_number=serial_number or None, condition_note=condition_note or None,
-            purchase_price=purchase_price, payment_method=payment_method,
-            purpose=purpose, resale_price=resale_price,
-            staff_id=staff["id"], photo=photo, location_id=loc(request), key=key,
-        )
+    try:
+        with get_conn() as conn:
+            already = core_documents.find_by_key(conn, key)
+            if already:
+                return RedirectResponse(link(request, f"/buyback/{already['ref_id']}"), status_code=303)
+            order_id = core_buyback.create_purchase(
+                conn,
+                seller_phone=form.get("seller_phone") or "", seller_name=form.get("seller_name"),
+                model=form.get("model") or "", imei=form.get("imei") or "", comment=form.get("comment"),
+                price=form.get("price"), currency=form.get("currency") or "UAH", rate=form.get("rate"),
+                payments=payments_from_form(form) or None, photos=photos,
+                staff_id=staff["id"], location_id=loc(request), key=key,
+            )
+    except (core_buyback.PurchaseError, core_cash.PaymentError, core_inventory.DuplicateImeiError) as exc:
+        return _error(str(exc))
 
+    store = request.state.store
+    background_tasks.add_task(core_buyback.post_card_to_group, store, order_id)
     return RedirectResponse(link(request, f"/buyback/{order_id}"), status_code=303)
 
 
@@ -119,6 +114,36 @@ async def create_view(request: Request, staff=Depends(require_role(*_BUYBACK_ROL
 def detail_view(request: Request, order_id: int, staff=Depends(require_staff)):
     with get_conn() as conn:
         order = core_buyback.get_buyback_order(conn, order_id)
-    if not order:
-        return RedirectResponse(link(request, "/buyback"), status_code=303)
-    return render(request, "buyback_detail.html", staff=staff, order=order)
+        if not order:
+            return RedirectResponse(link(request, "/buyback"), status_code=303)
+        document = core_documents.get_for(conn, "buyback", order_id)
+        ctx = {
+            "order": order,
+            "photos": core_buyback.get_photos(conn, order_id),
+            "payments": core_cash.payments_for(conn, "buyback_order", order_id),
+            "document": document,
+            "document_label": core_documents.doc_label(document) if document else None,
+            # Where the phone is right now (None once sold / written off).
+            "unit": core_inventory.find_unit_by_imei(conn, order["imei"]) if order["imei"] else None,
+            "where": next(
+                (b["where_text"] for b in core_inventory.list_batches(conn, order["product_id"])
+                 if b["id"] == order["batch_id"]), None,
+            ) if order["product_id"] and order["batch_id"] else None,
+        }
+    return render(request, "buyback_detail.html", staff=staff, **ctx)
+
+
+@router.get("/{order_id}/barcode.png")
+def barcode_view(order_id: int, compact: bool = False, staff=Depends(require_staff)):
+    """The phone's IMEI as a Code128 label — model on top, the покупка's
+    number underneath. Scanning it anywhere a code is accepted (Склад,
+    Продажа, Перемещение) finds this exact unit."""
+    with get_conn() as conn:
+        order = core_buyback.get_buyback_order(conn, order_id)
+    if not order or not (order["imei"] or order["serial_number"]):
+        raise HTTPException(status_code=404, detail="У этой покупки нет IMEI для штрих-кода.")
+    png = barcode_label.generate_label_png(
+        order["imei"] or order["serial_number"], order["model"] or order["device_type"], None,
+        compact=compact, footer=core_documents.label("buyback", order_id),
+    )
+    return Response(content=png, media_type="image/png")

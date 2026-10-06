@@ -1,27 +1,66 @@
 {% extends "base.html" %}
 {% import "_icons.html" as icons %}
-{% block title %}{{ t('buyback_detail_title') }} №{{ order.id }}{% endblock %}
+{% block title %}{{ document_label or (t('buyback_detail_title') ~ ' №' ~ order.id) }}{% endblock %}
 {% block content %}
 <a class="back-link" href="{{ link('/buyback') }}">{{ icons.icon('back', 16) }} {{ t('warehouse_nav_buyback_title') }}</a>
 
-{% if order.photo_path %}
+{% if photos %}
+<div style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:14px;">
+  {% for p in photos %}
+  <a href="/static/buyback_photos/{{ p.path }}" target="_blank" title="{{ p.label or '' }}">
+    <img src="/static/buyback_photos/{{ p.path }}" alt="{{ p.label or '' }}" style="width:96px; height:96px; border-radius:10px; object-fit:cover;">
+  </a>
+  {% endfor %}
+</div>
+{% elif order.photo_path %}
 <img class="thumb-card-photo" style="width:100%; max-width:320px; margin-bottom:14px;" src="/static/buyback_photos/{{ order.photo_path }}" alt="{{ order.device_type }}">
 {% endif %}
 
-<p class="meta">
-  <span class="pill pill-{{ order.purpose }}">{{ t('buyback_purpose_' ~ order.purpose) }}</span>
-  · {{ order.created_at | kyiv }}
-</p>
+<div class="panel-box">
+  <h3 style="margin:0;">{% if document_label %}{{ document_label }} · {% endif %}{{ order.brand or '' }} {{ order.model or order.device_type }}</h3>
+  <p class="meta" style="margin:6px 0 0;">{{ t('buyback_seller_label') }}: <a href="{{ link('/clients/' ~ order.client_id) }}">{{ order.client_name }}</a>{% if order.client_phone %} · {{ order.client_phone }}{% endif %}</p>
+  {% if order.imei or order.serial_number %}<p class="meta" style="margin:4px 0 0;">IMEI: {{ order.imei or order.serial_number }}</p>{% endif %}
+  {% if order.condition_note %}<p class="meta" style="margin:4px 0 0;">{{ t('purchase_comment_label') }}: {{ order.condition_note }}</p>{% endif %}
+  <p style="margin:8px 0 0;"><b>{{ t('buyback_price_paid_label') }}: {{ order.purchase_price | money }} {{ order.currency or 'UAH' }}</b>{% if order.currency and order.currency != 'UAH' and order.purchase_price_uah is not none %} <span class="meta">= {{ order.purchase_price_uah | money }} грн · {{ t('pay_rate_placeholder') }} {{ order.rate | money }}</span>{% endif %}</p>
+  <p class="meta" style="margin:4px 0 0;">{{ t('buyback_staff_label') }}: {{ order.staff_name or '—' }} · {{ order.created_at | kyiv }}</p>
+  {% if order.batch_id %}<p class="meta" style="margin:4px 0 0;">{{ t('purchase_where_label') }}: {{ where or t('purchase_where_gone') }}</p>{% endif %}
+</div>
 
-<h2>{{ order.device_type }} {{ order.brand or '' }} {{ order.model or '' }}</h2>
-{% if order.serial_number %}<p class="meta">{{ t('device_serial_label') }}: {{ order.serial_number }}</p>{% endif %}
-{% if order.condition_note %}<p class="meta">{{ t('buyback_condition_label') }}: {{ order.condition_note }}</p>{% endif %}
+{% if payments %}
+<h2>{{ t('pay_section_title') }}</h2>
+<div class="table-scroll">
+<table class="table">
+  <tbody>
+    {% for p in payments %}
+    <tr>
+      <td>{{ p.account_name or t('payment_method_' ~ p.method) }}{% if p.cancelled_at %} <span class="pill pill-cancelled">{{ t('doc_cancelled') }}</span>{% endif %}</td>
+      <td>{{ p.amount | money }} {{ p.currency or '' }}{% if p.currency and p.currency != 'UAH' and p.amount_uah is not none %} <span class="meta">= {{ p.amount_uah | money }} грн</span>{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
 
-<p class="meta">{{ t('buyback_seller_label') }}: {{ order.client_name }} · {{ order.client_phone }}</p>
-<p class="meta">{{ t('buyback_price_paid_label') }}: {{ order.purchase_price }} ₴</p>
-<p class="meta">{{ t('buyback_staff_label') }}: {{ order.staff_name or '—' }}</p>
+{% if order.imei or order.serial_number %}
+<div class="panel-box" style="margin-top: 16px; text-align: center;">
+  <h3>{{ t('purchase_label_title') }}</h3>
+  <img src="{{ link('/buyback/' ~ order.id ~ '/barcode.png') }}" alt="IMEI" style="max-width: 100%; width: 320px; border-radius: 10px; background: #fff; padding: 8px;">
+  <p class="meta">{{ t('purchase_label_hint') }}</p>
+  <button type="button" class="secondary" id="printBuybackLabelBtn">{{ t('purchase_label_print_btn') }}</button>
+</div>
+<div id="printLabelArea">
+  <img src="{{ link('/buyback/' ~ order.id ~ '/barcode.png?compact=1') }}" alt="IMEI">
+</div>
+<script>
+document.getElementById("printBuybackLabelBtn").addEventListener("click", function () { window.print(); });
+</script>
+{% endif %}
 
 {% if order.product_id %}
-<p><a href="{{ link('/inventory/products/' ~ order.product_id) }}">📦 {{ t('buyback_product_link') }}</a></p>
+<p style="margin-top: 12px;"><a href="{{ link('/inventory/products/' ~ order.product_id) }}">📦 {{ t('buyback_product_link') }}</a></p>
+{% endif %}
+{% if document and staff.role in ('owner', 'admin') %}
+<p class="meta"><a href="{{ link('/journal/' ~ document.id) }}">{{ t('more_journal') }} →</a></p>
 {% endif %}
 {% endblock %}

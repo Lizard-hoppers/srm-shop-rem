@@ -14,6 +14,7 @@ from aiogram.types import (
 )
 
 from bot.config import BOT_TOKEN, MINIAPP_URL
+from bot.buyback_flow import router as buyback_flow_router
 from bot.channel_orders import router as channel_orders_router
 from bot.handlers import router
 from bot.purchase_photo import router as purchase_photo_router
@@ -46,6 +47,7 @@ async def main() -> None:
     # state (TransferFlow's included), which would otherwise take this
     # flow's text steps first.
     dp.include_router(transfer_flow_router)
+    dp.include_router(buyback_flow_router)
     dp.include_router(quick_actions_router)
     dp.include_router(repair_actions_router)
     dp.include_router(repair_attachments_router)

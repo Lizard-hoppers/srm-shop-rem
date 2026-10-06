@@ -39,7 +39,6 @@ from aiogram.types import (
 from bot.miniapp_links import crm_link
 from core import accounts as core_accounts
 from core import auth as core_auth
-from core import buyback as core_buyback
 from core import cash as core_cash
 from core import clients as core_clients
 from core import documents as core_documents
@@ -79,7 +78,7 @@ _ADJUST_ROLES = ("owner", "admin")
 # call.
 BTN_REPAIR = "🔧 Ремонт"
 BTN_CLIENT = "👤 Клиент"
-BTN_BUYBACK = "💰 Скупка"
+BTN_BUYBACK = "🛒 Покупка"
 BTN_PURCHASE = "📦 Приход"
 BTN_SUMMARY = "📊 Сводка"
 BTN_CASH = "💵 Касса"
@@ -87,10 +86,6 @@ BTN_TRANSFER = "🔁 Перемещение"
 BTN_CANCEL = "❌ Отмена"
 _ENTRY_BUTTONS = {BTN_REPAIR, BTN_CLIENT, BTN_BUYBACK, BTN_PURCHASE, BTN_SUMMARY, BTN_CASH, BTN_TRANSFER, BTN_CANCEL}
 
-# Один словарь на оба места, где способ оплаты показывается сотруднику
-# (шапка экрана и карточка подтверждения) — раньше метки были продублированы
-# инлайновым тернарником в карточке.
-_PAYMENT_LABELS = {"cash": "Наличные", "card": "Карта/перевод"}
 
 # One single keyboard, always — Отмена lives on it permanently instead of
 # swapping to a separate cancel-only keyboard mid-flow. Telegram was
@@ -136,16 +131,24 @@ class QuickContact(StatesGroup):
     confirm = State()
 
 
-class BuybackIntake(StatesGroup):
-    name = State()
+class PhoneBuy(StatesGroup):
+    """«🛒 Покупка» телефона (Заход 4) — handlers live in
+    bot/buyback_flow.py; the states are declared here so the shared
+    cancel/fallback handlers at the bottom of this module cover them like
+    every other flow. The first six are the numbered steps of the header
+    («шаг 3 из 6»); the rest are the price's rate, the payment split and
+    the final card."""
     phone = State()
-    device_type = State()
+    photos = State()
     model = State()
+    imei = State()
+    comment = State()
     price = State()
-    payment_method = State()
-    purpose = State()
-    resale_price = State()
-    photo = State()
+    rate = State()
+    pay_source = State()
+    pay_amount = State()
+    pay_rate = State()
+    pay_review = State()
     confirm = State()
 
 
@@ -159,8 +162,8 @@ class CashExpense(StatesGroup):
 class CashAdjustment(StatesGroup):
     """Shared by both «➕ Внести» and «➖ Снять» — a `direction` field in
     the FSM data ("in"/"out", set at entry by cash_menu_in/cash_menu_out)
-    tells the two apart, same as BuybackIntake.purpose branches a single
-    flow rather than being two separate StatesGroups."""
+    tells the two apart — one flow with a branch rather than two
+    separate StatesGroups."""
     amount = State()
     comment = State()
     confirm = State()
@@ -411,16 +414,6 @@ def _steps_contact(_data: dict) -> list[str]:
     return ["name", "phone"]
 
 
-def _steps_buyback(data: dict) -> list[str]:
-    steps = ["name", "phone", "device_type", "model", "price",
-             "payment_method", "purpose", "resale_price", "photo"]
-    if data.get("purpose") == "parts":
-        # «На запчасти» пропускает вопрос о цене продажи — не считаем шаг,
-        # которого уже точно не будет.
-        steps.remove("resale_price")
-    return steps
-
-
 # HTML везде ниже: бот поднят с parse_mode=HTML (bot/bot.py), а имя клиента
 # и описание неисправности сотрудник вводит руками. Без экранирования имя
 # вида «Вася <дома>» валит editMessageText/sendMessage на разборе HTML —
@@ -463,16 +456,26 @@ def _summary_repair(data: dict) -> list[str]:
     return [line for line in lines if line]
 
 
-def _summary_buyback(data: dict) -> list[str]:
-    lines = [_client_line("Продавец", data), _device_line(data)]
-    if data.get("purchase_price"):
-        method = _PAYMENT_LABELS.get(data.get("payment_method"))
-        lines.append(f"Платим клиенту: {data['purchase_price']} грн" + (f" ({method})" if method else ""))
-    if data.get("purpose"):
-        lines.append(f"Назначение: {core_buyback.PURPOSES[data['purpose']]}")
-    if data.get("resale_price"):
-        lines.append(f"Цена продажи: {data['resale_price']} грн")
-    return [line for line in lines if line]
+def _steps_phone_buy(_data: dict) -> list[str]:
+    return ["phone", "photos", "model", "imei", "comment", "price"]
+
+
+def _summary_phone_buy(data: dict) -> list[str]:
+    lines = []
+    if data.get("seller_phone"):
+        seller = html.escape(data["seller_phone"])
+        if data.get("seller_name"):
+            seller += f" · {html.escape(data['seller_name'])}"
+        lines.append(f"Продавец: {seller}")
+    if data.get("photo_count"):
+        lines.append(f"Фото: {data['photo_count']}")
+    if data.get("model"):
+        lines.append(f"Модель: {html.escape(data['model'])}")
+    if data.get("imei"):
+        lines.append(f"IMEI: {html.escape(data['imei'])}")
+    if data.get("comment"):
+        lines.append(f"Поломки: {html.escape(data['comment'])}")
+    return lines
 
 
 def _summary_contact(data: dict) -> list[str]:
@@ -507,7 +510,7 @@ def _summary_cash_adjustment(data: dict) -> list[str]:
 # state.get_state() ("RepairIntake:model").
 _FLOWS = {
     "RepairIntake": ("🔧 Приём ремонта", _steps_repair, _summary_repair),
-    "BuybackIntake": ("💰 Скупка техники", _steps_buyback, _summary_buyback),
+    "PhoneBuy": ("🛒 Покупка телефона", _steps_phone_buy, _summary_phone_buy),
     "QuickContact": ("👤 Новый клиент", _steps_contact, _summary_contact),
     "CashExpense": ("💵 Расход", _steps_cash_expense, _summary_cash_expense),
     "CashAdjustment": ("💵 Касса", _steps_cash_adjustment, _summary_cash_adjustment),
@@ -729,24 +732,6 @@ async def client_menu_search(callback: CallbackQuery, state: FSMContext) -> None
     await state.update_data(staff_id=staff["id"])
     await _advance_callback(callback, state, "Телефон или имя клиента:")
     await callback.answer()
-
-
-@router.message(F.text == BTN_BUYBACK, F.chat.type == "private")
-async def buyback_start(message: Message, state: FSMContext) -> None:
-    resolved = _resolve_staff_for_dm(message.from_user.id)
-    if not resolved:
-        return
-    store, staff = resolved
-    if staff["role"] not in _BUYBACK_ROLES:
-        await message.answer("Недостаточно прав для скупки.")
-        return
-
-    if not await _shift_gate(message, state, store, staff):
-        return
-    await _reset(message, state)
-    await state.set_state(BuybackIntake.name)
-    await state.update_data(store_id=store.id)
-    await _send_prompt(message, state, "Имя клиента (продавца):")
 
 
 @router.message(F.text == BTN_PURCHASE, F.chat.type == "private")
@@ -1227,7 +1212,7 @@ async def client_search_pick(callback: CallbackQuery, state: FSMContext) -> None
     await callback.answer()
 
 
-@router.message(F.text == BTN_CANCEL, StateFilter(RepairIntake, QuickContact, BuybackIntake, CashExpense, CashAdjustment, ClientSearch, ShiftOpen, TransferFlow))
+@router.message(F.text == BTN_CANCEL, StateFilter(RepairIntake, QuickContact, PhoneBuy, CashExpense, CashAdjustment, ClientSearch, ShiftOpen, TransferFlow))
 async def cancel_flow(message: Message, state: FSMContext) -> None:
     """Deletes EVERYTHING from this flow attempt — the bot's own tracked
     message, every reply the staff member typed along the way (name,
@@ -1450,191 +1435,12 @@ async def repair_confirm(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer("Готово")
 
 
-# --- Скупка: step by step ---
-
-@router.message(BuybackIntake.name, F.text)
-async def buyback_got_name(message: Message, state: FSMContext) -> None:
-    name = message.text.strip()
-    if not name:
-        await _nudge(message, state, "Имя не может быть пустым.")
-        return
-    await state.update_data(client_name=name)
-    await state.set_state(BuybackIntake.phone)
-    await _advance(message, state, "Телефон клиента:")
-
-
-@router.message(BuybackIntake.phone, F.text)
-async def buyback_got_phone(message: Message, state: FSMContext) -> None:
-    phone = core_clients.normalize_phone(message.text.strip())
-    if not phone:
-        await _nudge(message, state, "Не похоже на номер телефона. Например: 0501234567.")
-        return
-    await state.update_data(client_phone=phone)
-    await state.set_state(BuybackIntake.device_type)
-    await _advance(message, state, "Тип устройства (например: Смартфон, Ноутбук, Планшет):")
-
-
-@router.message(BuybackIntake.device_type, F.text)
-async def buyback_got_device_type(message: Message, state: FSMContext) -> None:
-    device_type = message.text.strip()
-    if not device_type:
-        await _nudge(message, state, "Не может быть пустым.")
-        return
-    await state.update_data(device_type=device_type)
-    await state.set_state(BuybackIntake.model)
-    await _advance(message, state, "Модель устройства:")
-
-
-@router.message(BuybackIntake.model, F.text)
-async def buyback_got_model(message: Message, state: FSMContext) -> None:
-    model = message.text.strip()
-    if not model:
-        await _nudge(message, state, "Не может быть пустым.")
-        return
-    await state.update_data(model=model)
-    await state.set_state(BuybackIntake.price)
-    await _advance(message, state, "Сумма, которую платим клиенту (грн):")
-
-
 def _parse_positive_int(text: str) -> int | None:
     text = text.strip()
     if not text.isdigit():
         return None
     value = int(text)
     return value if value > 0 else None
-
-
-@router.message(BuybackIntake.price, F.text)
-async def buyback_got_price(message: Message, state: FSMContext) -> None:
-    price = _parse_positive_int(message.text)
-    if not price:
-        await _nudge(message, state, "Введите сумму числом, например 1500.")
-        return
-    await state.update_data(purchase_price=price)
-    await state.set_state(BuybackIntake.payment_method)
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="💵 Наличные", callback_data="buyback_pm_cash"),
-        InlineKeyboardButton(text="💳 Карта/перевод", callback_data="buyback_pm_card"),
-    ]])
-    await _advance(message, state, "Чем платим клиенту?", reply_markup=keyboard)
-
-
-@router.callback_query(F.data.startswith("buyback_pm_"), BuybackIntake.payment_method)
-async def buyback_got_payment_method(callback: CallbackQuery, state: FSMContext) -> None:
-    method = callback.data.removeprefix("buyback_pm_")
-    await state.update_data(payment_method=method)
-    await state.set_state(BuybackIntake.purpose)
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="🔧 На запчасти", callback_data="buyback_purpose_parts"),
-        InlineKeyboardButton(text="💵 На продажу", callback_data="buyback_purpose_resale"),
-    ]])
-    await _advance_callback(callback, state, "Назначение:", keyboard)
-    await callback.answer()
-
-
-@router.callback_query(F.data.startswith("buyback_purpose_"), BuybackIntake.purpose)
-async def buyback_got_purpose(callback: CallbackQuery, state: FSMContext) -> None:
-    purpose = callback.data.removeprefix("buyback_purpose_")
-    await state.update_data(purpose=purpose)
-
-    if purpose == "resale":
-        await state.set_state(BuybackIntake.resale_price)
-        text = "Цена продажи (грн) — товар сразу появится в Продажах:"
-    else:
-        await state.set_state(BuybackIntake.photo)
-        text = "📷 Пришлите фото устройства:"
-    await _advance_callback(callback, state, text)
-    await callback.answer()
-
-
-@router.message(BuybackIntake.resale_price, F.text)
-async def buyback_got_resale_price(message: Message, state: FSMContext) -> None:
-    price = _parse_positive_int(message.text)
-    if not price:
-        await _nudge(message, state, "Введите цену продажи числом, например 3000.")
-        return
-    await state.update_data(resale_price=price)
-    await state.set_state(BuybackIntake.photo)
-    await _advance(message, state, "📷 Пришлите фото устройства:")
-
-
-@router.message(BuybackIntake.photo, F.photo)
-async def buyback_got_photo(message: Message, state: FSMContext) -> None:
-    photo = message.photo[-1]
-    file = await message.bot.get_file(photo.file_id)
-    buf = await message.bot.download_file(file.file_path)
-    await state.update_data(photo_bytes=buf.read())
-    await state.set_state(BuybackIntake.confirm)
-
-    data = await state.get_data()
-    lines = [
-        "📋 Проверьте данные:", "",
-        f"Продавец: {html.escape(data['client_name'])}",
-        f"Телефон: {html.escape(data['client_phone'])}",
-        f"Устройство: {html.escape(data['device_type'])} {html.escape(data['model'])}",
-        f"Платим клиенту: {data['purchase_price']} грн ({_PAYMENT_LABELS[data['payment_method']]})",
-        f"Назначение: {core_buyback.PURPOSES[data['purpose']]}",
-    ]
-    if data["purpose"] == "resale":
-        lines.append(f"Цена продажи: {data['resale_price']} грн")
-    lines.append("Фото: приложено ✅")
-
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="✅ Принять", callback_data="quick_buyback_confirm", style="success"),
-        InlineKeyboardButton(text="❌ Отмена", callback_data="quick_buyback_cancel", style="danger"),
-    ]])
-    await _advance(message, state, "\n".join(lines), reply_markup=keyboard)
-
-
-@router.message(BuybackIntake.photo)
-async def buyback_photo_fallback(message: Message, state: FSMContext) -> None:
-    await _nudge(message, state, "Пришлите фото устройства (как фото, не файлом).")
-
-
-@router.callback_query(F.data == "quick_buyback_confirm", BuybackIntake.confirm)
-async def buyback_confirm(callback: CallbackQuery, state: FSMContext) -> None:
-    data = await state.get_data()
-    try:
-        store = get_store(data["store_id"])
-    except KeyError:
-        await state.clear()
-        await callback.answer("Магазин больше не настроен.", show_alert=True)
-        return
-    if await _already_done(callback, store.db_path):
-        return
-
-    with get_conn(store.db_path) as conn:
-        staff = core_auth.get_staff_by_telegram_id(conn, callback.from_user.id)
-        if not staff or staff["role"] not in _BUYBACK_ROLES:
-            await state.clear()
-            await callback.answer("Недостаточно прав.", show_alert=True)
-            return
-
-        order_id = core_buyback.create_buyback_intake(
-            conn,
-            client_name=data["client_name"], client_phone=data["client_phone"],
-            device_type=data["device_type"], brand=None, model=data["model"],
-            serial_number=None, condition_note=None,
-            purchase_price=data["purchase_price"], payment_method=data["payment_method"],
-            purpose=data["purpose"], resale_price=data.get("resale_price"),
-            staff_id=staff["id"], photo=(data["photo_bytes"], ".jpg"),
-            location_id=store.location_id, key=_tap_key(callback),
-        )
-
-    user_message_ids = data.get("user_message_ids", [])
-    await state.clear()
-    await _safe_delete_many(callback.bot, callback.message.chat.id, user_message_ids)
-    open_keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(
-            text="Открыть в CRM",
-            web_app=WebAppInfo(url=crm_link(f"/buyback/{order_id}", staff["id"], store.id)),
-        ),
-    ]])
-    await callback.message.edit_text(
-        f"✅ Скупка №{order_id} принята.\n\nЕсли нужно уточнить состояние или способ оплаты — карточка скупки:",
-        reply_markup=open_keyboard,
-    )
-    await callback.answer("Готово")
 
 
 # --- Контакт: step by step ---
@@ -1696,7 +1502,7 @@ async def contact_confirm(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer("Готово")
 
 
-@router.callback_query(F.data.in_({"quick_repair_cancel", "quick_contact_cancel", "quick_buyback_cancel", "cash_cancel", "tr_cancel"}))
+@router.callback_query(F.data.in_({"quick_repair_cancel", "quick_contact_cancel", "buy_cancel", "cash_cancel", "tr_cancel"}))
 async def quick_cancel_callback(callback: CallbackQuery, state: FSMContext) -> None:
     """Inline ❌ Отмена on the confirm card — same full cleanup as
     cancel_flow, minus the entry-tap-of-cancel (a button tap doesn't
@@ -1714,6 +1520,6 @@ async def quick_cancel_callback(callback: CallbackQuery, state: FSMContext) -> N
 # message while waiting on inline-button confirm) gets a nudge instead of
 # silence ---
 
-@router.message(StateFilter(RepairIntake, QuickContact, BuybackIntake, CashExpense, CashAdjustment, ClientSearch, ShiftOpen, TransferFlow))
+@router.message(StateFilter(RepairIntake, QuickContact, PhoneBuy, CashExpense, CashAdjustment, ClientSearch, ShiftOpen, TransferFlow))
 async def quick_flow_fallback(message: Message, state: FSMContext) -> None:
     await _nudge(message, state, "Не понял ответ. Следуйте подсказке выше, либо ❌ Отмена.")
