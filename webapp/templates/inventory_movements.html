@@ -6,6 +6,7 @@
 
 <div class="movement-forms">
   <form method="post" action="{{ link('/inventory/movements/receive') }}" class="edit-form">
+  <input type="hidden" name="idem" value="{{ idem }}">
     <h3>{{ t('receive_manual_title') }}</h3>
     <label>{{ t('col_product') }}
       <select name="product_id" required>
@@ -23,6 +24,7 @@
   </form>
 
   <form method="post" action="{{ link('/inventory/movements/writeoff') }}" class="edit-form">
+  <input type="hidden" name="idem" value="{{ idem }}">
     <h3>{{ t('writeoff_title') }}</h3>
     <label>{{ t('col_product') }}
       <select name="product_id" required>
@@ -40,6 +42,7 @@
   </form>
 
   <form method="post" action="{{ link('/inventory/movements/transfer') }}" class="edit-form">
+  <input type="hidden" name="idem" value="{{ idem }}">
     <h3>{{ t('transfer_title') }}</h3>
     <label>{{ t('col_product') }}
       <select name="product_id" required>
@@ -70,7 +73,7 @@
     <tr>
       <td>{{ m.created_at | kyiv }}</td>
       <td>{{ m.product_name }}</td>
-      <td>{{ t('reason_supplier_return') if m.ref_type == 'supplier_return' else t('reason_' ~ m.reason) }}</td>
+      <td>{{ t('reason_supplier_return') if m.ref_type == 'supplier_return' else (t('reason_sale_cancel') if m.ref_type == 'sale_cancel' else t('reason_' ~ m.reason)) }}</td>
       <td>{{ m.from_cell_code or '—' }}</td>
       <td>{{ m.to_cell_code or '—' }}</td>
       <td>{{ m.qty }}</td>

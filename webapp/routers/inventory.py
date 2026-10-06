@@ -10,15 +10,16 @@ from fastapi.responses import JSONResponse, RedirectResponse, Response
 from core import barcode_label
 from core import barcode_scan
 from core import channel_posts
+from core import documents as core_documents
 from core import inventory as core_inventory
 from core import photos as core_photos
 from core import print_queue
 from core import purchases as core_purchases
 from core import store_settings as core_store_settings
 from core import vision_ocr
-from core.inventory import InsufficientStockError
+from core.inventory import DuplicateCellError, InsufficientStockError
 from core.storage import get_conn
-from webapp.deps import link, optional_int, require_role, require_staff
+from webapp.deps import idem_key, link, loc, optional_int, require_role, require_staff
 from webapp.templating import render
 
 router = APIRouter(prefix="/inventory")
@@ -35,7 +36,9 @@ def products_view(
     request: Request, q: str | None = None, low_stock: bool | None = None, staff=Depends(require_staff)
 ):
     with get_conn() as conn:
-        rows = core_inventory.list_products_with_stock(conn, search=q, low_stock_only=bool(low_stock))
+        rows = core_inventory.list_products_with_stock(
+            conn, search=q, low_stock_only=bool(low_stock), location_id=loc(request)
+        )
     return render(request, "inventory_products.html", staff=staff, products=rows, query=q, low_stock=low_stock)
 
 
@@ -54,7 +57,7 @@ def products_create(
 ):
     if not name.strip():
         with get_conn() as conn:
-            rows = core_inventory.list_products_with_stock(conn)
+            rows = core_inventory.list_products_with_stock(conn, location_id=loc(request))
         return render(request, "inventory_products.html", staff=staff, products=rows, query=None, low_stock=None, error="Введите название товара.")
 
     with get_conn() as conn:
@@ -116,7 +119,7 @@ async def scan_product_label_view(photo: UploadFile = File(...), staff=Depends(r
     return JSONResponse({"ok": True, "name": name, "sku": sku})
 
 
-def _product_detail_context(conn, product_id: int) -> dict | None:
+def _product_detail_context(conn, product_id: int, location_id: int) -> dict | None:
     """Shared by the card's GET view and every form on it that re-renders
     the same page on error (receive/edit/supplier-return) — one place for
     the purchase-history + returns sections so they never go missing from
@@ -126,20 +129,20 @@ def _product_detail_context(conn, product_id: int) -> dict | None:
         return None
     return {
         "product": product,
-        "stock_by_cell": core_inventory.product_stock_by_cell(conn, product_id),
-        "cells": core_inventory.list_cells(conn),
+        "stock_by_cell": core_inventory.product_stock_by_cell(conn, product_id, location_id),
+        "cells": core_inventory.list_cells(conn, location_id),
         "receipt_history": core_purchases.list_receipts_for_product(conn, product_id),
         "suppliers": core_purchases.list_suppliers(conn),
         "returns": core_purchases.list_supplier_returns(conn, product_id=product_id),
-        **_channel_context(conn, product_id),
+        **_channel_context(conn, product_id, location_id),
     }
 
 
-def _channel_context(conn, product_id: int) -> dict:
+def _channel_context(conn, product_id: int, location_id: int) -> dict:
     """The «Канал продаж» block of the product card (core.channel_posts)."""
     post = channel_posts.get_active_post(conn, product_id)
     return {
-        "sales_channel": core_store_settings.get_settings(conn)["sales_channel"],
+        "sales_channel": core_store_settings.get_settings(conn, location_id)["sales_channel"],
         "channel_post": post,
         "channel_post_url": channel_posts.post_url(post) if post else None,
     }
@@ -148,7 +151,7 @@ def _channel_context(conn, product_id: int) -> dict:
 @router.get("/products/{product_id}")
 def product_detail_view(request: Request, product_id: int, staff=Depends(require_staff)):
     with get_conn() as conn:
-        ctx = _product_detail_context(conn, product_id)
+        ctx = _product_detail_context(conn, product_id, loc(request))
         if not ctx:
             return RedirectResponse(link(request, "/inventory/products"), status_code=303)
     return render(request, "inventory_product_detail.html", staff=staff, **ctx)
@@ -200,7 +203,7 @@ def print_job_status_view(job_id: int, staff=Depends(require_staff)):
 
 @router.post("/products/{product_id}/receive")
 def product_receive_view(
-    request: Request, product_id: int, cell_id: str = Form(""), qty: str = Form(""),
+    request: Request, product_id: int, cell_id: str = Form(""), qty: str = Form(""), idem: str = Form(""),
     staff=Depends(require_role(*_STOCK_WRITE_ROLES)),
 ):
     """"Добавить остаток" on the product card — the same
@@ -212,9 +215,11 @@ def product_receive_view(
     with get_conn() as conn:
         cid, q = optional_int(cell_id), optional_int(qty)
         if not cid or not q:
-            ctx = _product_detail_context(conn, product_id)
+            ctx = _product_detail_context(conn, product_id, loc(request))
             return render(request, "inventory_product_detail.html", staff=staff, error="Выберите ячейку и укажите количество.", **ctx)
-        core_inventory.receive_stock(conn, product_id, cid, q, staff["id"])
+        key = idem_key("stock_in", idem)
+        if not core_documents.find_by_key(conn, key):
+            core_inventory.receive_stock(conn, product_id, cid, q, staff["id"], key=key)
     return RedirectResponse(link(request, f"/inventory/products/{product_id}"), status_code=303)
 
 
@@ -222,7 +227,7 @@ def product_receive_view(
 def product_supplier_return_view(
     request: Request, product_id: int,
     supplier_id: str = Form(""), receipt_id: str = Form(""), cell_id: str = Form(""),
-    qty: str = Form(""), reason: str = Form(""),
+    qty: str = Form(""), reason: str = Form(""), idem: str = Form(""),
     staff=Depends(require_role(*_STOCK_WRITE_ROLES)),
 ):
     """"Оформить возврат поставщику" on the product card — write off a
@@ -237,14 +242,16 @@ def product_supplier_return_view(
         elif not cid or not q:
             error = "Выберите ячейку и укажите количество."
         else:
+            key = idem_key("supplier_return", idem)
             try:
-                core_purchases.create_supplier_return(
-                    conn, product_id, sid, rid, cid, q, reason.strip() or None, staff["id"],
-                )
+                if not core_documents.find_by_key(conn, key):
+                    core_purchases.create_supplier_return(
+                        conn, product_id, sid, rid, cid, q, reason.strip() or None, staff["id"], key=key,
+                    )
             except InsufficientStockError as exc:
                 error = str(exc)
         if error:
-            ctx = _product_detail_context(conn, product_id)
+            ctx = _product_detail_context(conn, product_id, loc(request))
             return render(request, "inventory_product_detail.html", staff=staff, error=error, **ctx)
     _sync_channel(request, product_id)
     return RedirectResponse(link(request, f"/inventory/products/{product_id}"), status_code=303)
@@ -266,7 +273,7 @@ def product_edit_view(
 ):
     with get_conn() as conn:
         if not name.strip():
-            ctx = _product_detail_context(conn, product_id)
+            ctx = _product_detail_context(conn, product_id, loc(request))
             return render(request, "inventory_product_detail.html", staff=staff, error="Введите название товара.", **ctx)
         core_inventory.update_product(
             conn, product_id,
@@ -300,7 +307,7 @@ def product_channel_publish_view(
         try:
             channel_posts.publish(conn, product_id, request.state.store.id, staff["id"])
         except channel_posts.ChannelPostError as exc:
-            ctx = _product_detail_context(conn, product_id)
+            ctx = _product_detail_context(conn, product_id, loc(request))
             return render(request, "inventory_product_detail.html", staff=staff, error=str(exc), **ctx)
     return RedirectResponse(link(request, f"/inventory/products/{product_id}"), status_code=303)
 
@@ -325,7 +332,7 @@ def product_channel_unpublish_view(
 ):
     with get_conn() as conn:
         if not channel_posts.unpublish(conn, product_id):
-            ctx = _product_detail_context(conn, product_id)
+            ctx = _product_detail_context(conn, product_id, loc(request))
             return render(
                 request, "inventory_product_detail.html", staff=staff,
                 error="Не удалось снять карточку с канала — проверьте права бота в канале.", **ctx,
@@ -374,7 +381,7 @@ async def product_photo_view(
 @router.get("/cells")
 def cells_view(request: Request, staff=Depends(require_staff)):
     with get_conn() as conn:
-        rows = core_inventory.list_cells(conn)
+        rows = core_inventory.list_cells(conn, loc(request))
     return render(request, "inventory_cells.html", staff=staff, cells=rows)
 
 
@@ -388,26 +395,34 @@ def cells_create(
 ):
     if not code.strip():
         with get_conn() as conn:
-            rows = core_inventory.list_cells(conn)
+            rows = core_inventory.list_cells(conn, loc(request))
         return render(request, "inventory_cells.html", staff=staff, cells=rows, error="Введите код ячейки.")
 
-    with get_conn() as conn:
-        core_inventory.create_cell(conn, code=code.strip(), zone=zone.strip() or None, note=note.strip() or None)
+    try:
+        with get_conn() as conn:
+            core_inventory.create_cell(
+                conn, code=code.strip(), zone=zone.strip() or None, note=note.strip() or None,
+                location_id=loc(request),
+            )
+    except DuplicateCellError as exc:
+        with get_conn() as conn:
+            rows = core_inventory.list_cells(conn, loc(request))
+        return render(request, "inventory_cells.html", staff=staff, cells=rows, error=str(exc))
     return RedirectResponse(link(request, "/inventory/cells"), status_code=303)
 
 
-def _movements_context(conn):
+def _movements_context(conn, location_id: int):
     return {
         "products": core_inventory.list_products(conn),
-        "cells": core_inventory.list_cells(conn),
-        "movements": core_inventory.list_movements(conn),
+        "cells": core_inventory.list_cells(conn, location_id),
+        "movements": core_inventory.list_movements(conn, location_id=location_id),
     }
 
 
 @router.get("/movements")
 def movements_view(request: Request, staff=Depends(require_staff)):
     with get_conn() as conn:
-        ctx = _movements_context(conn)
+        ctx = _movements_context(conn, loc(request))
     return render(request, "inventory_movements.html", staff=staff, **ctx)
 
 
@@ -418,14 +433,17 @@ def movements_receive(
     cell_id: str = Form(""),
     qty: str = Form(""),
     comment: str = Form(""),
+    idem: str = Form(""),
     staff=Depends(require_role(*_STOCK_WRITE_ROLES)),
 ):
     with get_conn() as conn:
         pid, cid, q = optional_int(product_id), optional_int(cell_id), optional_int(qty)
         if not pid or not cid or not q:
-            ctx = _movements_context(conn)
+            ctx = _movements_context(conn, loc(request))
             return render(request, "inventory_movements.html", staff=staff, error="Выберите товар, ячейку и количество.", **ctx)
-        core_inventory.receive_stock(conn, pid, cid, q, staff["id"], comment=comment.strip() or None)
+        key = idem_key("stock_in", idem)
+        if not core_documents.find_by_key(conn, key):
+            core_inventory.receive_stock(conn, pid, cid, q, staff["id"], comment=comment.strip() or None, key=key)
     return RedirectResponse(link(request, "/inventory/movements"), status_code=303)
 
 
@@ -436,17 +454,20 @@ def movements_writeoff(
     cell_id: str = Form(""),
     qty: str = Form(""),
     comment: str = Form(""),
+    idem: str = Form(""),
     staff=Depends(require_role(*_STOCK_WRITE_ROLES)),
 ):
     with get_conn() as conn:
         pid, cid, q = optional_int(product_id), optional_int(cell_id), optional_int(qty)
         if not pid or not cid or not q or not comment.strip():
-            ctx = _movements_context(conn)
+            ctx = _movements_context(conn, loc(request))
             return render(request, "inventory_movements.html", staff=staff, error="Выберите товар, ячейку, количество и укажите комментарий.", **ctx)
+        key = idem_key("writeoff", idem)
         try:
-            core_inventory.write_off_stock(conn, pid, cid, q, staff["id"], comment=comment.strip())
+            if not core_documents.find_by_key(conn, key):
+                core_inventory.write_off_stock(conn, pid, cid, q, staff["id"], comment=comment.strip(), key=key)
         except InsufficientStockError as exc:
-            ctx = _movements_context(conn)
+            ctx = _movements_context(conn, loc(request))
             return render(request, "inventory_movements.html", staff=staff, error=str(exc), **ctx)
     _sync_channel(request, pid)
     return RedirectResponse(link(request, "/inventory/movements"), status_code=303)
@@ -459,16 +480,19 @@ def movements_transfer(
     from_cell_id: str = Form(""),
     to_cell_id: str = Form(""),
     qty: str = Form(""),
+    idem: str = Form(""),
     staff=Depends(require_role(*_STOCK_WRITE_ROLES)),
 ):
     with get_conn() as conn:
         pid, fcid, tcid, q = optional_int(product_id), optional_int(from_cell_id), optional_int(to_cell_id), optional_int(qty)
         if not pid or not fcid or not tcid or not q:
-            ctx = _movements_context(conn)
+            ctx = _movements_context(conn, loc(request))
             return render(request, "inventory_movements.html", staff=staff, error="Выберите товар и обе ячейки, укажите количество.", **ctx)
+        key = idem_key("transfer", idem)
         try:
-            core_inventory.transfer_stock(conn, pid, fcid, tcid, q, staff["id"])
+            if not core_documents.find_by_key(conn, key):
+                core_inventory.transfer_stock(conn, pid, fcid, tcid, q, staff["id"], key=key)
         except InsufficientStockError as exc:
-            ctx = _movements_context(conn)
+            ctx = _movements_context(conn, loc(request))
             return render(request, "inventory_movements.html", staff=staff, error=str(exc), **ctx)
     return RedirectResponse(link(request, "/inventory/movements"), status_code=303)

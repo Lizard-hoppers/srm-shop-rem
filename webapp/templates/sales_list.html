@@ -9,7 +9,7 @@
   <tbody>
     {% for s in sales %}
     <tr onclick="location.href='{{ link('/sales/' ~ s.id) }}'" class="clickable">
-      <td>{{ s.client_name or t('sales_client_none') }}</td>
+      <td>{{ s.client_name or t('sales_client_none') }}{% if s.status == 'cancelled' %} <span class="pill pill-cancelled">{{ t('doc_cancelled') }}</span>{% endif %}</td>
       <td><span class="pill pill-{{ s.channel }}">{{ t('channel_online') if s.channel == 'online' else t('channel_offline') }}</span></td>
       <td>{{ t('payment_method_' ~ s.payment_method) if s.payment_method else '—' }}</td>
       <td>{{ s.total }}</td>
@@ -26,6 +26,7 @@
 
 <h2>{{ t('sales_new_title') }}</h2>
 <form method="post" action="{{ link('/sales') }}" class="edit-form" id="saleForm">
+  <input type="hidden" name="idem" value="{{ idem }}">
   <datalist id="saleProductList"></datalist>
   <input type="hidden" name="row_count" id="saleRowCount" value="{{ item_rows | length }}">
   <div class="sale-layout">

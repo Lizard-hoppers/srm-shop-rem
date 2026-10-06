@@ -154,7 +154,8 @@ def publish(conn: sqlite3.Connection, product_id: int, store_id: str, staff_id: 
     """Post the product's card to this store's sales channel; returns the
     new channel_posts id. Raises ChannelPostError (staff-readable text)
     when it can't."""
-    settings = _store_settings.get_settings(conn)
+    location_id = int(store_id)
+    settings = _store_settings.get_settings(conn, location_id)
     channel = settings["sales_channel"]
     if not channel:
         raise ChannelPostError("Канал продаж не указан — задайте его в «Кабинете магазина».")
@@ -165,7 +166,7 @@ def publish(conn: sqlite3.Connection, product_id: int, store_id: str, staff_id: 
         raise ChannelPostError("Этот товар уже выставлен в канале.")
     if not product["price"]:
         raise ChannelPostError("Укажите цену товара — без неё карточку не выставить.")
-    if _inventory.product_total_qty(conn, product_id) <= 0:
+    if _inventory.product_total_qty(conn, product_id, location_id) <= 0:
         raise ChannelPostError("Товара нет в наличии — сначала добавьте остаток.")
 
     caption = build_caption(product, settings)
@@ -224,13 +225,14 @@ def sync_product(conn: sqlite3.Connection, product_id: int, store_id: str) -> No
     post = get_active_post(conn, product_id)
     if not post:
         return
+    location_id = int(store_id)
     product = _inventory.get_product(conn, product_id)
-    if not product["active"] or _inventory.product_total_qty(conn, product_id) <= 0:
+    if not product["active"] or _inventory.product_total_qty(conn, product_id, location_id) <= 0:
         _take_down(conn, post, product)
         return
     if not product["price"]:
         return  # nothing sensible to show; leave the card as it was
-    caption = build_caption(product, _store_settings.get_settings(conn))
+    caption = build_caption(product, _store_settings.get_settings(conn, location_id))
     if caption == post["caption"]:
         return
     if _edit(post, caption, _buy_keyboard(product_id, store_id)):

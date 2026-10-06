@@ -17,6 +17,9 @@ router = APIRouter(prefix="/clients")
 # без этой развилки опечатка в номере молча сохранила бы клиента вообще без
 # телефона (normalize_phone отдаёт "" в обоих случаях, см. её docstring).
 _BAD_PHONE = "Проверьте номер телефона — например 0501234567."
+# One phone number is one контрагент (core.clients) — a second card with
+# the same number would split that person's history in two.
+_PHONE_TAKEN = "Клиент с таким номером уже есть: {name}. Откройте его карточку вместо создания новой."
 
 
 def _checked_phone(raw: str) -> tuple[str | None, str | None]:
@@ -45,10 +48,13 @@ def create_view(
 ):
     stored_phone, phone_error = _checked_phone(phone)
     error = "Введите имя клиента." if not name.strip() else phone_error
-    if error:
-        with get_conn() as conn:
+    with get_conn() as conn:
+        existing = core_clients.get_by_phone(conn, stored_phone) if stored_phone and not error else None
+        if existing:
+            error = _PHONE_TAKEN.format(name=existing["name"])
+        if error:
             rows = core_clients.list_clients(conn)
-        return render(request, "clients_list.html", staff=staff, clients=rows, query=None, source=None, error=error)
+            return render(request, "clients_list.html", staff=staff, clients=rows, query=None, source=None, error=error)
 
     with get_conn() as conn:
         client_id = core_clients.create_client(
@@ -100,6 +106,9 @@ def edit_view(
     stored_phone, phone_error = _checked_phone(phone)
     error = "Введите имя клиента." if not name.strip() else phone_error
     with get_conn() as conn:
+        existing = core_clients.get_by_phone(conn, stored_phone) if stored_phone and not error else None
+        if existing and existing["id"] != client_id:
+            error = _PHONE_TAKEN.format(name=existing["name"])
         if error:
             client = core_clients.get_client(conn, client_id)
             repair_history = core_repairs.list_repairs_by_client(conn, client_id)

@@ -12,7 +12,7 @@ from core import inventory as core_inventory
 from core import qr as core_qr
 from core import vision_ocr
 from core.storage import get_conn
-from core.store_access import accessible_stores
+from core.store_access import stores_for_staff
 from webapp.deps import link, require_staff
 from webapp.templating import render
 
@@ -89,5 +89,5 @@ async def warehouse_scan_photo(photo: UploadFile = File(...), staff=Depends(requ
 
 @router.get("/more")
 def more_hub(request: Request, staff=Depends(require_staff)):
-    multi_store_access = bool(staff["telegram_id"]) and len(accessible_stores(staff["telegram_id"])) > 1
+    multi_store_access = len(stores_for_staff(staff)) > 1
     return render(request, "more_hub.html", staff=staff, multi_store_access=multi_store_access)

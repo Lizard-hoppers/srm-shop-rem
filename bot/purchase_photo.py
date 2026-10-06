@@ -152,7 +152,7 @@ async def apply_draft(callback: CallbackQuery) -> None:
             return
 
         items = core_purchases.get_draft_items(conn, draft_id)
-        cell_by_product = core_inventory.default_cell_by_product(conn)
+        cell_by_product = core_inventory.default_cell_by_product(conn, store.location_id)
 
         receipt_items = []
         all_resolved = bool(items)
@@ -171,7 +171,9 @@ async def apply_draft(callback: CallbackQuery) -> None:
             )
             return
 
-        receipt_id = core_purchases.create_receipt(conn, None, None, staff["id"], receipt_items)
+        receipt_id = core_purchases.create_receipt(
+            conn, None, None, staff["id"], receipt_items, location_id=store.location_id,
+        )
         core_purchases.mark_draft_applied(conn, draft_id)
 
     open_keyboard = InlineKeyboardMarkup(inline_keyboard=[[

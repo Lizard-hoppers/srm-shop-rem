@@ -60,10 +60,10 @@ def process_buy_request(
         product = core_inventory.get_product(conn, product_id)
         if not product:
             return NOT_FOUND_TEXT, None, store, []
-        qty = core_inventory.product_total_qty(conn, product_id)
+        qty = core_inventory.product_total_qty(conn, product_id, store.location_id)
         if qty <= 0 or not product["active"]:
             return SOLD_OUT_TEXT, None, store, []
-        settings = core_store_settings.get_settings(conn)
+        settings = core_store_settings.get_settings(conn, store.location_id)
         client = core_clients.get_by_telegram_id(conn, telegram_id)
         is_new = channel_posts.record_lead(conn, product_id, telegram_id, full_name, username)
         managers = [

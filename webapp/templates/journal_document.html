@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% import "_icons.html" as icons %}
+{% block title %}{{ doc.label }}{% endblock %}
+{% block content %}
+<a class="back-link" href="{{ link('/journal') }}">{{ icons.icon('back', 16) }} {{ t('more_journal') }}</a>
+
+<div class="panel-box">
+  <h3 style="margin:0;">{{ doc.label }} · {{ t('doc_type_' ~ doc.doc_type) }}</h3>
+  <p class="meta" style="margin:6px 0 0;">
+    <span class="pill {{ 'pill-cancelled' if doc.status == 'cancelled' else 'pill-ready' }}">{{ t('doc_cancelled') if doc.status == 'cancelled' else t('doc_posted') }}</span>
+    · {{ doc.created_at | kyiv }} · {{ doc.location_name or '—' }} · {{ doc.staff_name or '—' }}
+  </p>
+  {% if doc.title %}<p style="margin:8px 0 0;">{{ doc.title }}</p>{% endif %}
+  {% if doc.client_name %}<p class="meta" style="margin:4px 0 0;">{{ t('doc_client_label') }}: <a href="{{ link('/clients/' ~ doc.client_id) }}">{{ doc.client_name }}</a>{% if doc.client_phone %} · {{ doc.client_phone }}{% endif %}</p>{% endif %}
+  {% if doc.amount is not none %}<p style="margin:8px 0 0;"><b>{{ doc.amount }} грн</b></p>{% endif %}
+  {% if doc.status == 'cancelled' %}<p class="meta" style="margin:8px 0 0;">{{ t('doc_cancel_reason_prefix') }} {{ doc.cancel_reason }} · {{ doc.cancelled_by_name or '—' }} · {{ doc.cancelled_at | kyiv }}</p>{% endif %}
+  {% if doc.source_path %}<p style="margin:10px 0 0;"><a href="{{ link(doc.source_path) }}">{{ t('doc_open_source') }} →</a></p>{% endif %}
+</div>
+
+<h2>{{ t('doc_history_title') }}</h2>
+<ul class="timeline">
+  {% for e in events %}
+  <li>
+    <span class="pill {{ 'pill-cancelled' if e.event == 'cancelled' else 'pill-ready' }}">{{ t('doc_event_' ~ e.event) }}</span>
+    {{ e.comment or '' }}
+    <div class="t-when">{{ e.created_at | kyiv }} · {{ e.staff_name or t('system_label') }}</div>
+  </li>
+  {% endfor %}
+</ul>
+
+{% if doc.cancellable %}
+<h2>{{ t('doc_cancel_title') }}</h2>
+<p class="meta">{{ t('doc_cancel_hint') }}</p>
+<form method="post" action="{{ link('/journal/' ~ doc.id ~ '/cancel') }}" class="edit-form">
+  <label>{{ t('doc_cancel_reason_label') }}<span class="required-mark">*</span><input type="text" name="reason" required></label>
+  <button type="submit" class="danger">{{ t('doc_cancel_btn') }}</button>
+</form>
+{% elif doc.status == 'posted' %}
+<p class="meta">{{ t('doc_not_cancellable_hint') }}</p>
+{% endif %}
+{% endblock %}

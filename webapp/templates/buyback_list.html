@@ -7,6 +7,7 @@
 <h2>{{ t('buyback_intake_title') }}</h2>
 
 <form method="post" action="{{ link('/buyback') }}" class="edit-form" enctype="multipart/form-data" id="buybackIntakeForm">
+  <input type="hidden" name="idem" value="{{ idem }}">
   <label>{{ t('client_name_label') }}<span class="required-mark">*</span><input type="text" name="client_name" required></label>
   <label>{{ t('client_phone_label') }}<span class="required-mark">*</span><input type="text" name="client_phone" value="+380" required></label>
 

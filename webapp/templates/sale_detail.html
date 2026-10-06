@@ -3,6 +3,9 @@
 {% block title %}{{ t('sale_detail_title') }} #{{ sale.id }}{% endblock %}
 {% block content %}
 <a class="back-link" href="{{ link('/sales') }}">{{ icons.icon('back', 16) }} {{ t('nav_sales') }}</a>
+{% if sale.status == 'cancelled' %}
+<div style="margin-bottom: 10px;"><span class="pill pill-cancelled">{{ t('doc_cancelled') }}</span>{% if document and document.cancel_reason %} <span class="meta">{{ t('doc_cancel_reason_prefix') }} {{ document.cancel_reason }}</span>{% endif %}</div>
+{% endif %}
 <p class="meta">{{ t('sales_col_client') }}: {{ sale.client_name or t('sales_client_none') }} · {{ t('channel_label') }}: {{ t('channel_online') if sale.channel == 'online' else t('channel_offline') }} · {{ t('sale_meta_payment') }}: {{ t('payment_method_' ~ sale.payment_method) if sale.payment_method else '—' }} · {{ t('sales_col_seller') }}: {{ sale.staff_name or '—' }} · {{ sale.created_at | kyiv }}</p>
 {% if sale.warranty_until %}<p class="badge">{{ t('warranty_until_label') }} {{ sale.warranty_until | rudate }}</p>{% endif %}
 
@@ -21,4 +24,7 @@
   </tbody>
 </table>
 </div>
+{% if document and staff.role in ('owner', 'admin') %}
+<p class="meta" style="margin-top: 12px;"><a href="{{ link('/journal/' ~ document.id) }}">{{ t('more_journal') }} →</a></p>
+{% endif %}
 {% endblock %}

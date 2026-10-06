@@ -53,6 +53,12 @@
   <label>{{ t('name_placeholder') }}<input type="text" name="name" value="{{ master.name }}" required></label>
   <label>{{ t('telegram_id_label') }}<input type="number" name="telegram_id" value="{{ master.telegram_id or '' }}"></label>
   <p class="meta">{{ t('telegram_id_hint') }}</p>
+  <label>{{ t('master_location_label') }}
+    <select name="location_id">
+      <option value="">{{ t('master_location_none') }}</option>
+      {% for l in locations %}<option value="{{ l.id }}" {% if master.location_id == l.id %}selected{% endif %}>{{ l.name }}</option>{% endfor %}
+    </select>
+  </label>
   <label>{{ t('pay_type_label') }}
     <select name="pay_type">
       <option value="" {% if not master.pay_type %}selected{% endif %}>{{ t('pay_type_none_option') }}</option>

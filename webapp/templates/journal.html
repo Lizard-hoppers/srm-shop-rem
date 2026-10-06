@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% import "_icons.html" as icons %}
+{% block title %}{{ t('more_journal') }}{% endblock %}
+{% block content %}
+<a class="back-link" href="{{ link('/more') }}">{{ icons.icon('back', 16) }} {{ t('nav_more') }}</a>
+
+<form method="get" action="/journal" class="edit-form" style="margin-bottom: 20px;">
+  <input type="hidden" name="t" value="{{ token }}">
+  <label>{{ t('from_short_label') }}<input type="date" name="date_from" value="{{ date_from }}"></label>
+  <label>{{ t('to_short_label') }}<input type="date" name="date_to" value="{{ date_to }}"></label>
+  <label>{{ t('journal_col_location') }}
+    <select name="location">
+      <option value="">{{ t('journal_all_locations') }}</option>
+      {% for l in locations %}<option value="{{ l.id }}" {% if f_location == l.id|string %}selected{% endif %}>{{ l.name }}</option>{% endfor %}
+    </select>
+  </label>
+  <label>{{ t('journal_col_employee') }}
+    <select name="employee">
+      <option value="">{{ t('journal_all_employees') }}</option>
+      {% for e in employees %}<option value="{{ e.id }}" {% if f_employee == e.id|string %}selected{% endif %}>{{ e.name }}</option>{% endfor %}
+    </select>
+  </label>
+  <label>{{ t('journal_col_doc') }}
+    <select name="doc_type">
+      <option value="">{{ t('journal_all_types') }}</option>
+      {% for key in doc_types %}<option value="{{ key }}" {% if f_doc_type == key %}selected{% endif %}>{{ t('doc_type_' ~ key) }}</option>{% endfor %}
+    </select>
+  </label>
+  <button type="submit" class="secondary">{{ t('show_btn') }}</button>
+</form>
+
+<div class="table-scroll">
+<table class="table">
+  <thead><tr><th>{{ t('col_when') }}</th><th>{{ t('journal_col_doc') }}</th><th>{{ t('journal_col_location') }}</th><th>{{ t('journal_col_employee') }}</th><th>{{ t('sales_col_amount') }}</th><th>{{ t('col_status') }}</th></tr></thead>
+  <tbody>
+    {% for d in documents %}
+    <tr onclick="location.href='{{ link('/journal/' ~ d.id) }}'" class="clickable">
+      <td>{{ d.created_at | kyiv }}</td>
+      <td><b>{{ d.label }}</b> · {{ t('doc_type_' ~ d.doc_type) }}{% if d.title or d.client_name %}<div class="meta">{{ d.title or '' }}{% if d.title and d.client_name %} · {% endif %}{{ d.client_name or '' }}</div>{% endif %}</td>
+      <td>{{ d.location_name or '—' }}</td>
+      <td>{{ d.staff_name or '—' }}</td>
+      <td>{{ d.amount if d.amount is not none else '—' }}</td>
+      <td><span class="pill {{ 'pill-cancelled' if d.status == 'cancelled' else 'pill-ready' }}">{{ t('doc_cancelled') if d.status == 'cancelled' else t('doc_posted') }}</span></td>
+    </tr>
+    {% else %}
+    <tr><td colspan="6">{{ t('journal_empty') }}</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}

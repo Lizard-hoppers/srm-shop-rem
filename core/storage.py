@@ -1,7 +1,10 @@
 """SQLite storage layer: schema, connection helper, soft migrations.
 
 Single SQLite file shared by webapp and bot (WAL mode for concurrent
-readers + one writer at a time). Schema covers the full data model from
+readers + one writer at a time) — and, since 06.10.2026, by every точка of
+the business too: the earlier one-file-per-store layout (Фаза A, 23.08) was
+merged into this one base, with `locations` as rows instead of files (see
+OPERATIONS.md «Единая база»). Schema covers the full data model from
 the project plan; business logic modules (clients.py, inventory.py, ...)
 are added phase by phase, but the schema is created up front so later
 phases only need to add code, not migrate the DB shape.
@@ -14,6 +17,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 
 from core import device_catalog
+from core import documents as _documents
 
 DB_PATH = os.environ.get("CRM_DB_PATH", os.path.join(os.path.dirname(__file__), "..", "crm.sqlite3"))
 
@@ -340,6 +344,90 @@ CREATE TABLE IF NOT EXISTS channel_leads (
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(product_id, telegram_id)
 );
+
+-- Точки бизнеса (06.10): one row per физическая точка. Replaces both
+-- stores.json (Telegram group ids) and the per-store store_settings
+-- singleton (name/address/phone/hours/sales_channel) — one base for the
+-- whole business now, a точка is a row here and a location_id on whatever
+-- happened there. core.stores still hands these out as StoreConfig so the
+-- rest of the code keeps saying "store".
+CREATE TABLE IF NOT EXISTS locations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL DEFAULT 'Магазин',
+    address TEXT,
+    phone TEXT,
+    working_hours TEXT,
+    sales_channel TEXT,
+    staff_group_chat_id INTEGER,
+    repair_topic_id INTEGER,
+    masters_group_chat_id INTEGER,
+    sales_topic_id INTEGER,
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Склады: where stock physically is and who answers for it. 'point' — a
+-- точка's own stock (one per location, created automatically); 'master' —
+-- a master's материально-ответственный склад (staff_id set, location_id
+-- NULL: a master working from home belongs to no точка); 'transit' — the
+-- single «В пути» склад a transfer sits in between «Передал» and «Принял».
+-- A storage cell belongs to exactly one склад (storage_cells.warehouse_id),
+-- which is how every stock figure gets its точка.
+CREATE TABLE IF NOT EXISTS warehouses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL CHECK(kind IN ('point','master','transit')),
+    location_id INTEGER REFERENCES locations(id),
+    staff_id INTEGER REFERENCES staff(id),
+    name TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Единый журнал документов (06.10) — one row per thing that happened
+-- (ремонт, продажа, приход, покупка, списание, расход из кассы…), across
+-- every точка and every employee: core.documents. The business tables keep
+-- holding the substance (repair_orders, sales_orders, …); this row is the
+-- common envelope — номер, точка, автор, время, контрагент, сумма, статус —
+-- that makes one chronological feed possible. A проведённый document is
+-- never deleted: status flips to 'cancelled' with a reason, by whom and
+-- when (core.doc_cancel reverses its stock/money effects). idempotency_key
+-- is what makes a repeated tap/submit land on the same document instead
+-- of creating a second one.
+CREATE TABLE IF NOT EXISTS documents (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    doc_type TEXT NOT NULL,
+    number INTEGER NOT NULL,
+    location_id INTEGER REFERENCES locations(id),
+    staff_id INTEGER REFERENCES staff(id),
+    client_id INTEGER REFERENCES clients(id),
+    ref_table TEXT,
+    ref_id INTEGER,
+    title TEXT,
+    amount INTEGER,
+    currency TEXT NOT NULL DEFAULT 'UAH',
+    profit INTEGER,
+    status TEXT NOT NULL DEFAULT 'posted' CHECK(status IN ('posted','cancelled')),
+    cancel_reason TEXT,
+    cancelled_by INTEGER REFERENCES staff(id),
+    cancelled_at TEXT,
+    idempotency_key TEXT UNIQUE,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(doc_type, number)
+);
+CREATE INDEX IF NOT EXISTS idx_documents_created ON documents(created_at);
+CREATE INDEX IF NOT EXISTS idx_documents_ref ON documents(doc_type, ref_id);
+CREATE INDEX IF NOT EXISTS idx_documents_client ON documents(client_id);
+
+CREATE TABLE IF NOT EXISTS document_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    document_id INTEGER NOT NULL REFERENCES documents(id),
+    event TEXT NOT NULL,
+    staff_id INTEGER REFERENCES staff(id),
+    comment TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_document_events_doc ON document_events(document_id);
 """
 
 
@@ -350,8 +438,73 @@ def _ensure_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) 
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
 
 
+# Every table that records something happening AT a точка. NULL means "written
+# before точки existed" (or by a caller that passed none) and is folded into
+# the first точка on the next init_db — see _backfill_locations.
+_LOCATION_SCOPED_TABLES = (
+    "repair_orders", "sales_orders", "goods_receipts", "buyback_orders", "cash_transactions",
+)
+
+
+def _optional_int_env(name: str) -> int | None:
+    value = os.environ.get(name)
+    return int(value) if value not in (None, "") else None
+
+
+def _seed_first_location(conn: sqlite3.Connection) -> None:
+    """A base with no точки yet gets its first one out of what it already
+    knew about itself: the old store_settings singleton (name, address,
+    sales channel…) plus the legacy CRM_*_GROUP_CHAT_ID env vars — so a
+    single-store deployment upgrades with nothing to configure by hand."""
+    if conn.execute("SELECT 1 FROM locations LIMIT 1").fetchone():
+        return
+    old = conn.execute("SELECT * FROM store_settings WHERE id = 1").fetchone()
+    conn.execute(
+        """INSERT INTO locations (name, address, phone, working_hours, sales_channel,
+                                  staff_group_chat_id, repair_topic_id, masters_group_chat_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            old["name"] if old else "Магазин",
+            old["address"] if old else None,
+            old["phone"] if old else None,
+            old["working_hours"] if old else None,
+            old["sales_channel"] if old else None,
+            _optional_int_env("CRM_STAFF_GROUP_CHAT_ID"),
+            _optional_int_env("CRM_REPAIR_TOPIC_ID"),
+            _optional_int_env("CRM_MASTERS_GROUP_CHAT_ID"),
+        ),
+    )
+
+
+def ensure_warehouses(conn: sqlite3.Connection) -> None:
+    """Every точка has its own 'point' склад, and there is exactly one
+    «В пути». Idempotent — also called after a new точка is added."""
+    for loc in conn.execute("SELECT id FROM locations").fetchall():
+        exists = conn.execute(
+            "SELECT 1 FROM warehouses WHERE kind = 'point' AND location_id = ?", (loc["id"],)
+        ).fetchone()
+        if not exists:
+            conn.execute(
+                "INSERT INTO warehouses (kind, location_id, name) VALUES ('point', ?, 'Основной склад')",
+                (loc["id"],),
+            )
+    if not conn.execute("SELECT 1 FROM warehouses WHERE kind = 'transit'").fetchone():
+        conn.execute("INSERT INTO warehouses (kind, name) VALUES ('transit', 'В пути')")
+
+
+def _backfill_locations(conn: sqlite3.Connection) -> None:
+    first = conn.execute("SELECT id FROM locations ORDER BY id LIMIT 1").fetchone()["id"]
+    for table in _LOCATION_SCOPED_TABLES:
+        conn.execute(f"UPDATE {table} SET location_id = ? WHERE location_id IS NULL", (first,))
+    first_warehouse = conn.execute(
+        "SELECT id FROM warehouses WHERE kind = 'point' AND location_id = ?", (first,)
+    ).fetchone()["id"]
+    conn.execute("UPDATE storage_cells SET warehouse_id = ? WHERE warehouse_id IS NULL", (first_warehouse,))
+
+
 def init_db(db_path: str = DB_PATH) -> None:
     conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
     try:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript(SCHEMA)
@@ -367,8 +520,34 @@ def init_db(db_path: str = DB_PATH) -> None:
         _ensure_column(conn, "staff", "pay_value", "pay_value INTEGER")
         _ensure_column(conn, "store_settings", "sales_channel", "sales_channel TEXT")
         _ensure_column(conn, "products", "description", "description TEXT")
+        # Единая база (06.10): точка on everything that happens at one, склад
+        # on every cell, and the контрагент links (one person by phone can be
+        # a client, a master/employee and a supplier at once — clients is the
+        # контрагент table, staff/suppliers point into it).
+        for table in _LOCATION_SCOPED_TABLES:
+            _ensure_column(conn, table, "location_id", "location_id INTEGER REFERENCES locations(id)")
+        _ensure_column(conn, "storage_cells", "warehouse_id", "warehouse_id INTEGER REFERENCES warehouses(id)")
+        _ensure_column(conn, "staff", "location_id", "location_id INTEGER REFERENCES locations(id)")
+        _ensure_column(conn, "staff", "phone", "phone TEXT")
+        _ensure_column(conn, "staff", "client_id", "client_id INTEGER REFERENCES clients(id)")
+        _ensure_column(conn, "suppliers", "client_id", "client_id INTEGER REFERENCES clients(id)")
+        _ensure_column(conn, "cash_transactions", "cancelled_at", "cancelled_at TEXT")
+        try:
+            # One phone = one контрагент. Partial: a walk-in with no phone
+            # on record is fine, any number of them.
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_clients_phone_unique ON clients(phone) WHERE phone IS NOT NULL"
+            )
+        except sqlite3.IntegrityError:
+            # Existing duplicates — leave the base usable; they have to be
+            # merged by hand before the rule can be enforced.
+            pass
         device_catalog.seed(conn)
         conn.execute("INSERT OR IGNORE INTO store_settings (id) VALUES (1)")
+        _seed_first_location(conn)
+        ensure_warehouses(conn)
+        _backfill_locations(conn)
+        _documents.backfill(conn)
         conn.commit()
     finally:
         conn.close()

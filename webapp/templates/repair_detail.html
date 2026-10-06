@@ -3,7 +3,7 @@
 {% block title %}{{ t('repair_detail_title') }} #{{ repair.id }}{% endblock %}
 {% block content %}
 <a class="back-link" href="{{ link('/repairs') }}">{{ icons.icon('back', 16) }} {{ t('nav_repairs') }}</a>
-<div style="margin-bottom: 14px;"><span class="pill pill-{{ repair.status }}">{{ t('status_' ~ repair.status) }}</span></div>
+<div style="margin-bottom: 14px;"><span class="pill pill-{{ repair.status }}">{{ t('status_' ~ repair.status) }}</span>{% if document %} <span class="meta">{{ document_label }}</span>{% endif %}</div>
 
 <div class="grid-2">
   <div>

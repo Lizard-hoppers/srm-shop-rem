@@ -1,4 +1,9 @@
-"""Client CRUD."""
+"""Контрагенты. The table is still called `clients`, but a row here is a
+person/company the business deals with in ANY role — client, master,
+employee, supplier (staff.client_id and suppliers.client_id point into it).
+One phone number is one контрагент: phone is unique (a partial index, rows
+without a phone are allowed), and the row's id is the permanent identity
+everything else hangs off."""
 from __future__ import annotations
 
 import sqlite3
@@ -126,6 +131,14 @@ def get_or_create_by_phone(conn: sqlite3.Connection, name: str, phone: str, sour
         if existing:
             return existing["id"]
     return create_client(conn, name=name.strip(), phone=phone or None, source=source)
+
+
+def get_by_phone(conn: sqlite3.Connection, phone: str) -> sqlite3.Row | None:
+    """The one контрагент with this number, in whatever format it was typed."""
+    phone = normalize_phone(phone)
+    if not phone:
+        return None
+    return conn.execute("SELECT * FROM clients WHERE phone = ?", (phone,)).fetchone()
 
 
 def get_by_telegram_id(conn: sqlite3.Connection, telegram_id: int) -> sqlite3.Row | None:

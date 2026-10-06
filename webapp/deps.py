@@ -32,6 +32,25 @@ def resolve_store_for_request(request: Request) -> StoreConfig:
         return get_store(default_store_id())
 
 
+def loc(request: Request) -> int:
+    """The точка this request is working in (from its ?t= token, resolved
+    by webapp.main's middleware) — what every route passes down as
+    location_id."""
+    return request.state.store.location_id
+
+
+def idem_key(scope: str, value: str | None) -> str | None:
+    """Idempotency key for a document-creating form: every such form
+    carries a hidden `idem` token minted when the page was rendered
+    (webapp.templating.render), so a repeated submit of the SAME rendered
+    form — a double tap that beat the JS guard, a retried request —
+    resolves to the document the first one created (core.documents
+    .find_by_key) instead of a duplicate. None when the form sent no token
+    (an old cached page, a hand-made request): no dedup, same as before."""
+    value = (value or "").strip()
+    return f"{scope}:{value}" if value else None
+
+
 def current_staff(request: Request):
     token = request_token(request)
     data = read_token(token)

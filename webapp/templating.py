@@ -1,5 +1,6 @@
 import os
 import time
+import uuid
 
 from fastapi import Request
 from fastapi.templating import Jinja2Templates
@@ -29,6 +30,9 @@ def render(request: Request, name: str, **ctx):
     ctx["link"] = lambda path: link(request, path)
     lang = (ctx["staff"]["language"] if ctx["staff"] else None) or DEFAULT_LANGUAGE
     ctx["t"] = lambda key: translate(key, lang)
+    # One token per rendered page, dropped into every document-creating
+    # form as a hidden field — see webapp.deps.idem_key.
+    ctx["idem"] = uuid.uuid4().hex
 
     # Фаза B (23.08): a small "which store am I in" indicator in the
     # appbar — only worth the extra query when more than one store is
@@ -40,7 +44,7 @@ def render(request: Request, name: str, **ctx):
         ctx["multi_store"] = len(load_stores()) > 1
         if ctx["multi_store"]:
             with get_conn() as conn:
-                row = get_store_settings(conn)
+                row = get_store_settings(conn, request.state.store.location_id)
             ctx["store_name"] = row["name"] if row else None
         else:
             ctx["store_name"] = None

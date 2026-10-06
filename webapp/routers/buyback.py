@@ -7,8 +7,9 @@ from starlette.datastructures import UploadFile as StarletteUploadFile
 from core import buyback as core_buyback
 from core import cash as core_cash
 from core import clients as core_clients
+from core import documents as core_documents
 from core.storage import get_conn
-from webapp.deps import link, optional_int, require_role, require_staff
+from webapp.deps import idem_key, link, loc, optional_int, require_role, require_staff
 from webapp.templating import render
 
 router = APIRouter(prefix="/buyback")
@@ -37,10 +38,10 @@ async def _validate_intake_photo(upload) -> tuple[bytes, str] | None:
     return data, ext
 
 
-def _list_context(purpose: str | None) -> dict:
+def _list_context(purpose: str | None, location_id: int | None = None) -> dict:
     with get_conn() as conn:
         return {
-            "orders": core_buyback.list_buyback_orders(conn, purpose=purpose),
+            "orders": core_buyback.list_buyback_orders(conn, purpose=purpose, location_id=location_id),
             "purpose": purpose,
             "purposes": core_buyback.PURPOSES,
             "payment_methods": core_cash.METHODS,
@@ -49,7 +50,7 @@ def _list_context(purpose: str | None) -> dict:
 
 @router.get("")
 def list_view(request: Request, purpose: str | None = None, staff=Depends(require_staff)):
-    return render(request, "buyback_list.html", staff=staff, **_list_context(purpose))
+    return render(request, "buyback_list.html", staff=staff, **_list_context(purpose, loc(request)))
 
 
 @router.post("")
@@ -72,7 +73,7 @@ async def create_view(request: Request, staff=Depends(require_role(*_BUYBACK_ROL
     resale_price = optional_int(form.get("resale_price") or "")
 
     def _error(message: str):
-        return render(request, "buyback_list.html", staff=staff, error=message, **_list_context(None))
+        return render(request, "buyback_list.html", staff=staff, error=message, **_list_context(None, loc(request)))
 
     if not client_name or not client_phone:
         return _error("Заполните имя и телефон клиента.")
@@ -96,7 +97,11 @@ async def create_view(request: Request, staff=Depends(require_role(*_BUYBACK_ROL
     if not photo:
         return _error("Загрузите фото устройства.")
 
+    key = idem_key("buyback", form.get("idem"))
     with get_conn() as conn:
+        already = core_documents.find_by_key(conn, key)
+        if already:
+            return RedirectResponse(link(request, f"/buyback/{already['ref_id']}"), status_code=303)
         order_id = core_buyback.create_buyback_intake(
             conn,
             client_name=client_name, client_phone=client_phone,
@@ -104,7 +109,7 @@ async def create_view(request: Request, staff=Depends(require_role(*_BUYBACK_ROL
             serial_number=serial_number or None, condition_note=condition_note or None,
             purchase_price=purchase_price, payment_method=payment_method,
             purpose=purpose, resale_price=resale_price,
-            staff_id=staff["id"], photo=photo,
+            staff_id=staff["id"], photo=photo, location_id=loc(request), key=key,
         )
 
     return RedirectResponse(link(request, f"/buyback/{order_id}"), status_code=303)

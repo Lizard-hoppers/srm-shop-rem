@@ -128,6 +128,7 @@
 </div>
 
 <form method="post" action="{{ link('/inventory/products/' ~ product.id ~ '/receive') }}" class="edit-form">
+  <input type="hidden" name="idem" value="{{ idem }}">
   <label>{{ t('add_stock_label') }}
     <div style="display:flex; gap:6px;">
       <select name="cell_id" style="flex:1;">
@@ -197,6 +198,7 @@
 </div>
 
 <form method="post" action="{{ link('/inventory/products/' ~ product.id ~ '/supplier-return') }}" class="edit-form" id="supplierReturnForm">
+  <input type="hidden" name="idem" value="{{ idem }}">
   <label>{{ t('return_form_label') }}
     <select name="supplier_id" id="returnSupplierId" required>
       <option value="">{{ t('supplier_placeholder') }}</option>

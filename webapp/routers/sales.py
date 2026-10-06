@@ -7,11 +7,12 @@ from fastapi.responses import RedirectResponse
 from core import cash as core_cash
 from core import channel_posts
 from core import clients as core_clients
+from core import documents as core_documents
 from core import inventory as core_inventory
 from core import sales as core_sales
 from core.inventory import InsufficientStockError
 from core.storage import get_conn
-from webapp.deps import link, require_staff
+from webapp.deps import idem_key, link, loc, require_staff
 from webapp.templating import render
 
 router = APIRouter(prefix="/sales")
@@ -19,13 +20,13 @@ router = APIRouter(prefix="/sales")
 INITIAL_ROWS = 1
 
 
-def _list_context(conn) -> dict:
+def _list_context(conn, location_id: int | None = None) -> dict:
     """The sale-list/new-sale page context — item_rows is just how many
     empty rows render on first load; "+ Добавить позицию" (sale-rows.js)
     grows the checkout past that with no fixed cap, unlike the old
     hardcoded 3-row form."""
     return {
-        "sales": core_sales.list_sales(conn),
+        "sales": core_sales.list_sales(conn, location_id=location_id),
         "item_rows": range(INITIAL_ROWS),
         **_picker_context(conn),
     }
@@ -50,7 +51,7 @@ def _picker_context(conn) -> dict:
 @router.get("")
 def list_view(request: Request, staff=Depends(require_staff)):
     with get_conn() as conn:
-        ctx = _list_context(conn)
+        ctx = _list_context(conn, loc(request))
     return render(request, "sales_list.html", staff=staff, **ctx)
 
 
@@ -91,16 +92,27 @@ async def create_view(request: Request, staff=Depends(require_staff)):
 
     if error:
         with get_conn() as conn:
-            ctx = _list_context(conn)
+            ctx = _list_context(conn, loc(request))
         return render(request, "sales_list.html", staff=staff, error=error, **ctx)
 
-    with get_conn() as conn:
-        client_id = core_clients.get_or_create_by_phone(conn, client_name, client_phone, source=channel) if client_phone else None
-        try:
-            order_id = core_sales.create_sale(conn, client_id, channel, staff["id"], items, warranty_until, payment_method)
-        except InsufficientStockError as exc:
-            ctx = _list_context(conn)
-            return render(request, "sales_list.html", staff=staff, error=str(exc), **ctx)
+    key = idem_key("sale", form.get("idem"))
+    try:
+        with get_conn() as conn:
+            already = core_documents.find_by_key(conn, key)
+            if already:
+                return RedirectResponse(link(request, f"/sales/{already['ref_id']}"), status_code=303)
+            client_id = core_clients.get_or_create_by_phone(conn, client_name, client_phone, source=channel) if client_phone else None
+            order_id = core_sales.create_sale(
+                conn, client_id, channel, staff["id"], items, warranty_until, payment_method,
+                location_id=loc(request), key=key,
+            )
+    except InsufficientStockError as exc:
+        # Raised out of the `with` on purpose: get_conn() commits on a
+        # normal exit, and a sale that failed on its second line must not
+        # leave its order row and its first line's stock write-off behind.
+        with get_conn() as conn:
+            ctx = _list_context(conn, loc(request))
+        return render(request, "sales_list.html", staff=staff, error=str(exc), **ctx)
     # Sold out -> the bot takes the product's card off the sales channel
     # (core.channel_posts). After the sale's own commit, and threadpooled:
     # it's blocking httpx to Telegram, this is an async route.
@@ -118,4 +130,5 @@ def detail_view(request: Request, order_id: int, staff=Depends(require_staff)):
         if not sale:
             return RedirectResponse(link(request, "/sales"), status_code=303)
         items = core_sales.get_sale_items(conn, order_id)
-    return render(request, "sale_detail.html", staff=staff, sale=sale, items=items)
+        document = core_documents.get_for(conn, "sale", order_id)
+    return render(request, "sale_detail.html", staff=staff, sale=sale, items=items, document=document)

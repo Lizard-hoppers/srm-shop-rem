@@ -41,6 +41,7 @@ from core import auth as core_auth
 from core import buyback as core_buyback
 from core import cash as core_cash
 from core import clients as core_clients
+from core import documents as core_documents
 from core import inventory as core_inventory
 from core import repairs as core_repairs
 from core import sales as core_sales
@@ -164,6 +165,22 @@ class ClientSearch(StatesGroup):
     hits) — no separate "pick" state needed, since a pick is a
     self-contained callback (client_pick:{id}), not more text to collect."""
     query = State()
+
+
+def _tap_key(callback: CallbackQuery) -> str:
+    """Idempotency key for a confirm button: the card it sits on. A second
+    tap on the same card (a double tap, Telegram redelivering the update)
+    finds the document the first one created — core.documents.find_by_key
+    — instead of making another."""
+    return f"tg:{callback.message.chat.id}:{callback.message.message_id}"
+
+
+async def _already_done(callback: CallbackQuery, db_path: str) -> bool:
+    with get_conn(db_path) as conn:
+        done = core_documents.find_by_key(conn, _tap_key(callback))
+    if done:
+        await callback.answer(f"Уже проведено: {core_documents.doc_label(done)}", show_alert=True)
+    return bool(done)
 
 
 def _resolve_staff_for_dm(telegram_id: int) -> tuple[StoreConfig, object] | None:
@@ -586,16 +603,19 @@ async def summary_view(message: Message) -> None:
     today = kyiv_today()
     utc_start, utc_end = kyiv_date_range_utc(today, today)
     with get_conn(store.db_path) as conn:
+        location_id = store.location_id
         open_repairs = len([
-            r for r in core_repairs.list_repairs(conn) if r["status"] not in ("issued", "cancelled")
+            r for r in core_repairs.list_repairs(conn, location_id=location_id)
+            if r["status"] not in ("issued", "cancelled")
         ])
         sales_today = [
-            s for s in core_sales.list_sales(conn, limit=1000) if utc_start <= s["created_at"] < utc_end
+            s for s in core_sales.list_sales(conn, limit=1000, location_id=location_id, include_cancelled=False)
+            if utc_start <= s["created_at"] < utc_end
         ]
         sales_today_sum = sum(s["total"] for s in sales_today)
-        cash_today = core_cash.period_summary(conn, utc_start, utc_end)
-        cash_balance = core_cash.cash_balance(conn)
-        low_stock = len(core_inventory.low_stock_report(conn))
+        cash_today = core_cash.period_summary(conn, utc_start, utc_end, location_id)
+        cash_balance = core_cash.cash_balance(conn, location_id)
+        low_stock = len(core_inventory.low_stock_report(conn, location_id))
 
     lines = [
         f"📊 <b>Сводка — {html.escape(store.name)}</b>",
@@ -632,7 +652,7 @@ async def cash_start(message: Message, state: FSMContext) -> None:
     await state.update_data(store_id=store.id)
     await _consume(state, message)
     with get_conn(store.db_path) as conn:
-        balance = core_cash.cash_balance(conn)
+        balance = core_cash.cash_balance(conn, store.location_id)
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➖ Расход", callback_data="cash_menu_expense")],
         [
@@ -765,6 +785,8 @@ async def cash_expense_confirm(callback: CallbackQuery, state: FSMContext) -> No
         await state.clear()
         await callback.answer("Магазин больше не настроен.", show_alert=True)
         return
+    if await _already_done(callback, store.db_path):
+        return
 
     with get_conn(store.db_path) as conn:
         staff = core_auth.get_staff_by_telegram_id(conn, callback.from_user.id)
@@ -772,7 +794,10 @@ async def cash_expense_confirm(callback: CallbackQuery, state: FSMContext) -> No
             await state.clear()
             await callback.answer("Недостаточно прав.", show_alert=True)
             return
-        core_cash.record_expense(conn, "cash", data["amount"], data["category"], data.get("comment"), staff["id"])
+        core_cash.record_expense(
+            conn, "cash", data["amount"], data["category"], data.get("comment"), staff["id"],
+            location_id=store.location_id, key=_tap_key(callback),
+        )
 
     user_message_ids = data.get("user_message_ids", [])
     await state.clear()
@@ -847,6 +872,8 @@ async def cash_adjustment_confirm(callback: CallbackQuery, state: FSMContext) ->
         await callback.answer("Магазин больше не настроен.", show_alert=True)
         return
 
+    if await _already_done(callback, store.db_path):
+        return
     signed_amount = data["amount"] if data.get("direction") == "in" else -data["amount"]
     with get_conn(store.db_path) as conn:
         staff = core_auth.get_staff_by_telegram_id(conn, callback.from_user.id)
@@ -854,7 +881,10 @@ async def cash_adjustment_confirm(callback: CallbackQuery, state: FSMContext) ->
             await state.clear()
             await callback.answer("Недостаточно прав.", show_alert=True)
             return
-        core_cash.record_adjustment(conn, signed_amount, data.get("comment"), staff["id"])
+        core_cash.record_adjustment(
+            conn, signed_amount, data.get("comment"), staff["id"],
+            location_id=store.location_id, key=_tap_key(callback),
+        )
 
     user_message_ids = data.get("user_message_ids", [])
     await state.clear()
@@ -1143,6 +1173,8 @@ async def repair_confirm(callback: CallbackQuery, state: FSMContext) -> None:
         await state.clear()
         await callback.answer("Магазин больше не настроен.", show_alert=True)
         return
+    if await _already_done(callback, store.db_path):
+        return
 
     with get_conn(store.db_path) as conn:
         staff = core_auth.get_staff_by_telegram_id(conn, callback.from_user.id)
@@ -1158,6 +1190,7 @@ async def repair_confirm(callback: CallbackQuery, state: FSMContext) -> None:
             serial_number=None, defect_description=data["defect_description"],
             channel="offline", master_id=None, price_estimate=data.get("price_estimate"),
             staff_id=staff["id"], photo=(data["photo_bytes"], ".jpg"),
+            location_id=store.location_id, key=_tap_key(callback),
         )
 
     # asyncio.to_thread: core.notify does blocking httpx calls to Telegram
@@ -1340,6 +1373,8 @@ async def buyback_confirm(callback: CallbackQuery, state: FSMContext) -> None:
         await state.clear()
         await callback.answer("Магазин больше не настроен.", show_alert=True)
         return
+    if await _already_done(callback, store.db_path):
+        return
 
     with get_conn(store.db_path) as conn:
         staff = core_auth.get_staff_by_telegram_id(conn, callback.from_user.id)
@@ -1356,6 +1391,7 @@ async def buyback_confirm(callback: CallbackQuery, state: FSMContext) -> None:
             purchase_price=data["purchase_price"], payment_method=data["payment_method"],
             purpose=data["purpose"], resale_price=data.get("resale_price"),
             staff_id=staff["id"], photo=(data["photo_bytes"], ".jpg"),
+            location_id=store.location_id, key=_tap_key(callback),
         )
 
     user_message_ids = data.get("user_message_ids", [])

@@ -26,6 +26,7 @@
   <div class="panel-box">
     <h3>{{ t('new_receipt_title') }}</h3>
     <form method="post" action="{{ link('/purchases') }}" class="edit-form" id="receiptForm">
+  <input type="hidden" name="idem" value="{{ idem }}">
       <label>{{ t('col_supplier') }}
         <select name="supplier_id">
           <option value="">{{ t('no_supplier_option') }}</option>

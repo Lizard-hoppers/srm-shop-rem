@@ -27,12 +27,9 @@ logging.basicConfig(level=logging.INFO)
 
 
 async def main() -> None:
-    # Фаза C (23.08): one process handles every store's chats, so every
-    # store's DB needs its schema ready, not just the default one — mirrors
-    # webapp.main's startup loop. Matters if this process starts before the
-    # web one has ever run against a newly-added store.
-    for store in load_stores():
-        init_db(store.db_path)
+    # Schema ready before the first update arrives — matters if this process
+    # starts before the web one ever has. One base for every точка (06.10).
+    init_db(load_stores()[0].db_path)
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     # MemoryStorage: the quick-intake FSM (bot/quick_actions.py) only needs
     # its state to survive between a staff member's own messages within one

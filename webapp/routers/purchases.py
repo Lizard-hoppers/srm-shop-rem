@@ -4,12 +4,13 @@ from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, RedirectResponse
 
+from core import documents as core_documents
 from core import inventory as core_inventory
 from core import purchase_import as core_purchase_import
 from core import purchases as core_purchases
 from core import vision_ocr
 from core.storage import get_conn
-from webapp.deps import link, require_role
+from webapp.deps import idem_key, link, loc, require_role
 from webapp.templating import render
 
 router = APIRouter(prefix="/purchases")
@@ -19,17 +20,17 @@ _PURCHASE_ROLES = ("owner", "admin", "storekeeper")
 _MAX_PHOTO_BYTES = 15 * 1024 * 1024  # comfortably under nginx's client_max_body_size (20M)
 
 
-def _list_context(conn) -> dict:
+def _list_context(conn, location_id: int) -> dict:
     return {
-        "receipts": core_purchases.list_receipts(conn),
+        "receipts": core_purchases.list_receipts(conn, location_id=location_id),
         "suppliers": core_purchases.list_suppliers(conn),
-        "cells": core_inventory.list_cells(conn),
+        "cells": core_inventory.list_cells(conn, location_id),
         "item_rows": range(ITEM_ROWS),
-        **_picker_context(conn),
+        **_picker_context(conn, location_id),
     }
 
 
-def _picker_context(conn) -> dict:
+def _picker_context(conn, location_id: int) -> dict:
     """The product-search/default-cell data every receipt-editing page
     (intake form, photo-draft review) embeds for purchase-rows.js."""
     products = core_inventory.list_products(conn)
@@ -38,7 +39,7 @@ def _picker_context(conn) -> dict:
             {"id": p["id"], "label": f"{p['name']} ({p['sku']})" if p["sku"] else p["name"]}
             for p in products
         ],
-        "default_cell_by_product": core_inventory.default_cell_by_product(conn),
+        "default_cell_by_product": core_inventory.default_cell_by_product(conn, location_id),
     }
 
 
@@ -73,7 +74,7 @@ def _parse_receipt_form_items(conn, form, row_count: int) -> list[tuple[int, int
 @router.get("")
 def list_view(request: Request, staff=Depends(require_role(*_PURCHASE_ROLES))):
     with get_conn() as conn:
-        ctx = _list_context(conn)
+        ctx = _list_context(conn, loc(request))
     return render(request, "purchases_list.html", staff=staff, **ctx)
 
 
@@ -84,7 +85,7 @@ def create_supplier_view(
 ):
     if not name.strip():
         with get_conn() as conn:
-            ctx = _list_context(conn)
+            ctx = _list_context(conn, loc(request))
         return render(request, "purchases_list.html", staff=staff, error="Введите название поставщика.", **ctx)
 
     with get_conn() as conn:
@@ -99,11 +100,15 @@ async def create_receipt_view(request: Request, staff=Depends(require_role(*_PUR
     invoice_no = form.get("invoice_no", "")
     row_count = int(form.get("row_count") or ITEM_ROWS)
 
+    key = idem_key("receipt", form.get("idem"))
     with get_conn() as conn:
+        if core_documents.find_by_key(conn, key):
+            return RedirectResponse(link(request, "/purchases"), status_code=303)
         items = _parse_receipt_form_items(conn, form, row_count)
         if items:
             core_purchases.create_receipt(
-                conn, int(supplier_id) if supplier_id else None, invoice_no.strip() or None, staff["id"], items
+                conn, int(supplier_id) if supplier_id else None, invoice_no.strip() or None, staff["id"], items,
+                location_id=loc(request), key=key,
             )
     return RedirectResponse(link(request, "/purchases"), status_code=303)
 
@@ -157,8 +162,8 @@ def draft_view(request: Request, draft_id: int, staff=Depends(require_role(*_PUR
             "draft": draft,
             "draft_items": core_purchases.get_draft_items(conn, draft_id),
             "suppliers": core_purchases.list_suppliers(conn),
-            "cells": core_inventory.list_cells(conn),
-            **_picker_context(conn),
+            "cells": core_inventory.list_cells(conn, loc(request)),
+            **_picker_context(conn, loc(request)),
         }
     return render(request, "purchase_draft.html", staff=staff, **ctx)
 
@@ -176,7 +181,8 @@ async def draft_submit_view(request: Request, draft_id: int, staff=Depends(requi
             items = _parse_receipt_form_items(conn, form, row_count)
             if items:
                 core_purchases.create_receipt(
-                    conn, int(supplier_id) if supplier_id else None, invoice_no.strip() or None, staff["id"], items
+                    conn, int(supplier_id) if supplier_id else None, invoice_no.strip() or None, staff["id"], items,
+                    location_id=loc(request),
                 )
                 core_purchases.mark_draft_applied(conn, draft_id)
     return RedirectResponse(link(request, "/purchases"), status_code=303)

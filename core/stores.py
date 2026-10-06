@@ -1,27 +1,26 @@
-"""Store registry for multi-store support (Фаза A, 23.08).
+"""Store registry — «store» in code is a точка of the business.
 
-Each store is a fully isolated SQLite file — see OPERATIONS.md
-"Мультимагазинность". The registry lives in stores.json, a sibling of .env
-(deployed by hand on the server, never committed — stores.json.example is
-the template). When stores.json is absent (dev machines, or before Фаза A
-is rolled out on a given server), a single synthetic store is built from the
-pre-existing CRM_DB_PATH/CRM_STAFF_GROUP_CHAT_ID/CRM_REPAIR_TOPIC_ID/
-CRM_MASTERS_GROUP_CHAT_ID env vars — a single-store deployment keeps working
-exactly as before, with zero config changes required.
+Since 06.10.2026 every точка lives in ONE base (see OPERATIONS.md «Единая
+база»): the registry is the `locations` table, not stores.json, and every
+StoreConfig carries the same db_path. The earlier layout — a separate
+SQLite file per store, listed in stores.json (Фаза A, 23.08) — couldn't
+express what the business actually needs: a transfer between точки, one
+client history by phone number, a reserve held at another точка. StoreConfig
+keeps its old shape (id as a string, db_path, the Telegram group ids) so
+the ~100 call sites that say `store.db_path` / `store.id` didn't have to
+change; `location_id` is the same id as the int the tables store.
 
-The config path is re-read from CRM_STORES_CONFIG on every call (not cached
-at import time) so tests can point different scenarios at different
-stores.json files within the same process.
+Which base to read the registry from is re-resolved from CRM_DB_PATH on
+every call (not cached at import time), so tests can point different
+scenarios at different bases within one process.
 """
 from __future__ import annotations
 
-import json
 import os
+import sqlite3
 from dataclasses import dataclass
 
-from core.storage import DB_PATH as _LEGACY_DB_PATH
-
-REPO_ROOT = os.path.join(os.path.dirname(__file__), "..")
+from core import storage as _storage
 
 
 @dataclass(frozen=True)
@@ -36,55 +35,48 @@ class StoreConfig:
     # channel (bot/channel_orders.py); None -> the group's General feed.
     sales_topic_id: int | None = None
 
-
-def _optional_int(value) -> int | None:
-    if value in (None, ""):
-        return None
-    return int(value)
-
-
-def _stores_config_path() -> str:
-    return os.environ.get("CRM_STORES_CONFIG", os.path.join(REPO_ROOT, "stores.json"))
+    @property
+    def location_id(self) -> int:
+        """The same id as an int — what location_id columns hold."""
+        return int(self.id)
 
 
-def _legacy_single_store() -> list[StoreConfig]:
-    return [
-        StoreConfig(
-            id="1",
-            name="Магазин",
-            db_path=_LEGACY_DB_PATH,
-            staff_group_chat_id=_optional_int(os.environ.get("CRM_STAFF_GROUP_CHAT_ID")),
-            repair_topic_id=_optional_int(os.environ.get("CRM_REPAIR_TOPIC_ID")),
-            masters_group_chat_id=_optional_int(os.environ.get("CRM_MASTERS_GROUP_CHAT_ID")),
-        )
-    ]
+def registry_db_path() -> str:
+    return os.environ.get("CRM_DB_PATH") or _storage.DB_PATH
+
+
+def _fallback_store(db_path: str) -> list[StoreConfig]:
+    """A base that hasn't been through init_db yet (first start, a bare
+    CLI call) — one точка, so default_store_id() always has an answer."""
+    return [StoreConfig(id="1", name="Магазин", db_path=db_path)]
 
 
 def load_stores() -> list[StoreConfig]:
-    path = _stores_config_path()
-    if not os.path.exists(path):
-        return _legacy_single_store()
-    with open(path, encoding="utf-8") as f:
-        raw = json.load(f)
-    stores = []
-    for entry in raw:
-        db_path = entry["db_path"]
-        if not os.path.isabs(db_path):
-            db_path = os.path.join(REPO_ROOT, db_path)
-        stores.append(
-            StoreConfig(
-                id=str(entry["id"]),
-                name=entry["name"],
-                db_path=db_path,
-                staff_group_chat_id=_optional_int(entry.get("staff_group_chat_id")),
-                repair_topic_id=_optional_int(entry.get("repair_topic_id")),
-                masters_group_chat_id=_optional_int(entry.get("masters_group_chat_id")),
-                sales_topic_id=_optional_int(entry.get("sales_topic_id")),
-            )
+    db_path = registry_db_path()
+    if not os.path.exists(db_path):
+        return _fallback_store(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute("SELECT * FROM locations WHERE active = 1 ORDER BY id").fetchall()
+    except sqlite3.OperationalError:
+        return _fallback_store(db_path)
+    finally:
+        conn.close()
+    if not rows:
+        return _fallback_store(db_path)
+    return [
+        StoreConfig(
+            id=str(row["id"]),
+            name=row["name"],
+            db_path=db_path,
+            staff_group_chat_id=row["staff_group_chat_id"],
+            repair_topic_id=row["repair_topic_id"],
+            masters_group_chat_id=row["masters_group_chat_id"],
+            sales_topic_id=row["sales_topic_id"],
         )
-    if not stores:
-        raise RuntimeError(f"{path} defines no stores")
-    return stores
+        for row in rows
+    ]
 
 
 def get_store(store_id: str) -> StoreConfig:
@@ -99,10 +91,10 @@ def default_store_id() -> str:
 
 
 def store_for_chat_id(chat_id: int | str) -> StoreConfig | None:
-    """Which store a Telegram group belongs to (Фаза C, 23.08) — a group
-    message/button press unambiguously identifies its store this way,
-    unlike a DM (see core.store_access.accessible_stores/pick_default_store
-    for that case, which resolves by the sender's identity instead)."""
+    """Which точка a Telegram group belongs to — a group message/button
+    press unambiguously identifies its точка this way, unlike a DM (see
+    core.store_access.accessible_stores/pick_default_store for that case,
+    which resolves by the sender's identity instead)."""
     try:
         chat_id = int(chat_id)
     except (TypeError, ValueError):

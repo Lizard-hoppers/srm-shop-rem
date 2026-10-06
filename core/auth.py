@@ -42,10 +42,15 @@ def get_staff_by_id(conn: sqlite3.Connection, staff_id: int) -> sqlite3.Row | No
     ).fetchone()
 
 
-def create_staff(conn: sqlite3.Connection, login: str, password: str, name: str, role: str) -> int:
+def create_staff(
+    conn: sqlite3.Connection, login: str, password: str, name: str, role: str, location_id: int | None = None,
+) -> int:
+    """location_id is the employee's own точка — it only matters for roles
+    that aren't owner/admin (those work across every точка, see
+    core.store_access); None means the first one."""
     cur = conn.execute(
-        "INSERT INTO staff (login, password_hash, name, role) VALUES (?, ?, ?, ?)",
-        (login, hash_password(password), name, role),
+        "INSERT INTO staff (login, password_hash, name, role, location_id) VALUES (?, ?, ?, ?, ?)",
+        (login, hash_password(password), name, role, location_id),
     )
     return cur.lastrowid
 
@@ -91,6 +96,7 @@ def create_master(
     telegram_id: int | None,
     pay_type: str | None,
     pay_value: int | None,
+    location_id: int | None = None,
 ) -> int:
     base_login = _slugify_login(name)
     login, suffix = base_login, 0
@@ -98,9 +104,9 @@ def create_master(
         suffix += 1
         login = f"{base_login}-{suffix}"
     cur = conn.execute(
-        """INSERT INTO staff (login, password_hash, name, role, telegram_id, pay_type, pay_value)
-           VALUES (?, ?, ?, 'master', ?, ?, ?)""",
-        (login, hash_password(secrets.token_hex(16)), name.strip(), telegram_id, pay_type, pay_value),
+        """INSERT INTO staff (login, password_hash, name, role, telegram_id, pay_type, pay_value, location_id)
+           VALUES (?, ?, ?, 'master', ?, ?, ?, ?)""",
+        (login, hash_password(secrets.token_hex(16)), name.strip(), telegram_id, pay_type, pay_value, location_id),
     )
     return cur.lastrowid
 
@@ -128,10 +134,12 @@ def update_master(
     telegram_id: int | None,
     pay_type: str | None,
     pay_value: int | None,
+    location_id: int | None = None,
 ) -> None:
     conn.execute(
-        "UPDATE staff SET name = ?, telegram_id = ?, pay_type = ?, pay_value = ? WHERE id = ? AND role = 'master'",
-        (name.strip(), telegram_id, pay_type, pay_value, staff_id),
+        "UPDATE staff SET name = ?, telegram_id = ?, pay_type = ?, pay_value = ?, location_id = ? "
+        "WHERE id = ? AND role = 'master'",
+        (name.strip(), telegram_id, pay_type, pay_value, location_id, staff_id),
     )
 
 

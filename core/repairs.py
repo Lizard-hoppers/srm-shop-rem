@@ -8,6 +8,8 @@ import uuid
 
 from core import clients as _clients
 from core import device_catalog as _device_catalog
+from core import documents as _documents
+from core import locations as _locations
 from core import notify as _notify
 from core import photos as _photos
 from core.storage import get_conn as _get_conn
@@ -38,7 +40,8 @@ _STATUS_TIMESTAMP_LABEL = {
 
 
 def list_repairs(
-    conn: sqlite3.Connection, status: str | None = None, master_id: int | None = None
+    conn: sqlite3.Connection, status: str | None = None, master_id: int | None = None,
+    location_id: int | None = None,
 ) -> list[sqlite3.Row]:
     query = """SELECT repair_orders.*, clients.name AS client_name, devices.device_type,
                       devices.brand, devices.model, devices.photo_path AS device_photo_path,
@@ -55,6 +58,9 @@ def list_repairs(
     if master_id:
         query += " AND repair_orders.master_id = ?"
         params.append(master_id)
+    if location_id is not None:
+        query += " AND repair_orders.location_id = ?"
+        params.append(location_id)
     query += " ORDER BY repair_orders.created_at DESC"
     return conn.execute(query, params).fetchall()
 
@@ -100,7 +106,11 @@ def create_repair(
     master_id: int | None,
     price_estimate: int | None,
     staff_id: int,
+    *,
+    location_id: int | None = None,
+    key: str | None = None,
 ) -> int:
+    location_id = _locations.resolve(conn, location_id)
     device_id = conn.execute(
         """INSERT INTO devices (client_id, device_type, brand, model, serial_number, defect_description)
            VALUES (?, ?, ?, ?, ?, ?)""",
@@ -108,14 +118,19 @@ def create_repair(
     ).lastrowid
 
     order_id = conn.execute(
-        """INSERT INTO repair_orders (device_id, client_id, master_id, status, channel, price_estimate)
-           VALUES (?, ?, ?, 'new', ?, ?)""",
-        (device_id, client_id, master_id, channel, price_estimate),
+        """INSERT INTO repair_orders (device_id, client_id, master_id, status, channel, price_estimate, location_id)
+           VALUES (?, ?, ?, 'new', ?, ?, ?)""",
+        (device_id, client_id, master_id, channel, price_estimate, location_id),
     ).lastrowid
 
     conn.execute(
         "INSERT INTO repair_status_history (order_id, status, changed_by, comment) VALUES (?, 'new', ?, 'Принят')",
         (order_id, staff_id),
+    )
+    _documents.register(
+        conn, "repair", staff_id=staff_id, location_id=location_id, client_id=client_id,
+        ref_table="repair_orders", ref_id=order_id,
+        title=" ".join(x for x in (device_type, brand, model) if x), amount=price_estimate, key=key,
     )
     return order_id
 
@@ -179,6 +194,8 @@ def create_repair_intake(
     price_estimate: int | None,
     staff_id: int,
     photo: tuple[bytes, str] | None,
+    location_id: int | None = None,
+    key: str | None = None,
 ) -> tuple[int, str, dict | None, tuple[bytes, str] | None]:
     """One client (reused by phone, or created) + one repair order + its
     device photo (if given) + catalog remember — the exact sequence
@@ -196,6 +213,7 @@ def create_repair_intake(
     order_id = create_repair(
         conn, client_id, device_type, brand, model, serial_number,
         defect_description, channel, master_id, price_estimate, staff_id,
+        location_id=location_id, key=key,
     )
     _device_catalog.remember(conn, device_type, brand, model)
 
@@ -364,6 +382,8 @@ def set_price(conn: sqlite3.Connection, order_id: int, price_estimate: int | Non
         "UPDATE repair_orders SET price_estimate = ?, price_final = ? WHERE id = ?",
         (price_estimate, price_final, order_id),
     )
+    if price_final or price_estimate:
+        _documents.update_for(conn, "repair", order_id, amount=price_final or price_estimate)
 
 
 def set_warranty(conn: sqlite3.Connection, order_id: int, warranty_until: str | None) -> None:

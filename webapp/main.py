@@ -10,7 +10,7 @@ from core.storage import init_db
 from core.store_prefs import init_db as init_store_prefs_db
 from core.stores import load_stores
 from webapp.deps import resolve_store_for_request
-from webapp.routers import buyback, cash, clients, dashboard, hubs, inventory, masters, miniapp, print_agent, purchases, reports, repairs, sales, settings, store
+from webapp.routers import buyback, cash, clients, dashboard, hubs, inventory, journal, masters, miniapp, print_agent, purchases, reports, repairs, sales, settings, store
 
 if not os.environ.get("CRM_SECRET_KEY"):
     raise RuntimeError("CRM_SECRET_KEY env var is required (auth token signing key)")
@@ -33,14 +33,16 @@ app.include_router(cash.router)
 app.include_router(masters.router)
 app.include_router(store.router)
 app.include_router(buyback.router)
+app.include_router(journal.router)
 
 
 @app.middleware("http")
 async def store_context_middleware(request: Request, call_next):
-    """Resolves which store this request belongs to (from its ?t= token,
-    default store if none/unrecognized) and points core.storage.get_conn()
-    at that store's DB file for the duration of the request. See
-    core/stores.py and webapp/deps.py::resolve_store_for_request."""
+    """Resolves which точка this request belongs to (from its ?t= token,
+    the first one if none/unrecognized) — routes read it back through
+    webapp.deps.loc(). Every точка lives in the same base since 06.10, so
+    the db-path contextvar below now always gets the same file; it stays
+    because get_conn() with no argument reads it."""
     store = resolve_store_for_request(request)
     request.state.store = store
     token = storage.set_current_db_path(store.db_path)
@@ -52,6 +54,5 @@ async def store_context_middleware(request: Request, call_next):
 
 @app.on_event("startup")
 def on_startup():
-    for store_config in load_stores():
-        init_db(store_config.db_path)
+    init_db(load_stores()[0].db_path)
     init_store_prefs_db()

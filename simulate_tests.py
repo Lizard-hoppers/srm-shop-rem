@@ -38,21 +38,11 @@ os.environ.setdefault("CRM_BOT_TOKEN", "123456:test-bot-token-not-real")
 # that; this does.
 _WEBAPP_TEST_DB = os.path.join(tempfile.gettempdir(), "crm_simulate_tests_webapp.sqlite3")
 os.environ["CRM_DB_PATH"] = _WEBAPP_TEST_DB
-# Same reasoning, same unconditional-overwrite fix, for Фаза B's registry:
-# core.stores.load_stores() falls back to a synthetic single store built
-# from CRM_DB_PATH ONLY when stores.json doesn't exist at CRM_STORES_CONFIG
-# (or the default ./stores.json next to this file) — and since Фаза A this
-# repo's real deploy directory legitimately HAS a real stores.json (pointing
-# at the real crm.sqlite3/store2.sqlite3/store3.sqlite3). Running this suite
-# from inside that directory without overriding CRM_STORES_CONFIG made every
-# make_token(staff_id) call (no explicit store_id) default to the real store
-# 1 instead of the throwaway _WEBAPP_TEST_DB above — caught 23.08 while
-# testing Фаза B: scenario_webapp_forms silently authenticated against an
-# empty real-shaped db and its later assertions crashed on missing rows.
-# Point this at a path that can never exist so the legacy single-store
-# fallback always wins by default; scenarios that need a real multi-store
-# stores.json set CRM_STORES_CONFIG themselves and restore this value after.
-os.environ["CRM_STORES_CONFIG"] = os.path.join(tempfile.gettempdir(), "crm_simulate_tests_no_such_stores.json")
+# The точки registry is the `locations` table of whatever base CRM_DB_PATH
+# names (core.stores.registry_db_path, re-read on every call) — so the
+# overwrite above already keeps core.stores away from any real base too.
+# Scenarios that need their own base with several точки switch CRM_DB_PATH
+# for their duration through _separate_base() below and restore it after.
 
 import hashlib
 import hmac
@@ -65,7 +55,7 @@ import httpx
 import jinja2
 from PIL import Image
 
-from core import auth, barcode_label, buyback, cash, clients, device_catalog, inventory, masters, purchases, qr, repairs, sales, store_access, store_prefs, store_settings, stores, timefmt
+from core import auth, barcode_label, buyback, cash, clients, device_catalog, doc_cancel, documents, inventory, locations, masters, purchases, qr, repairs, sales, store_access, store_prefs, store_settings, stores, timefmt
 from core import session_token as _session_token
 from core import storage
 from core.session_token import make_token, read_token
@@ -85,6 +75,29 @@ def check(label: str, condition: bool) -> None:
     else:
         FAIL += 1
         print(f"  FAIL {label}")
+
+
+from contextlib import contextmanager
+
+
+@contextmanager
+def _separate_base(tmp: str, filename: str, location_names: tuple[str, ...] = ("Магазин",)):
+    """A fresh base of its own for one scenario, with the given точки
+    (ids 1, 2, … in order) — the whole app (core.stores registry, the web
+    middleware, session tokens) is pointed at it through CRM_DB_PATH until
+    the block exits."""
+    path = os.path.join(tmp, filename)
+    prev = os.environ["CRM_DB_PATH"]
+    os.environ["CRM_DB_PATH"] = path
+    try:
+        init_db(path)
+        with get_conn(path) as conn:
+            store_settings.update_settings(conn, location_names[0], None, None, None)
+            for name in location_names[1:]:
+                locations.create_location(conn, name)
+        yield path
+    finally:
+        os.environ["CRM_DB_PATH"] = prev
 
 
 def scenario_auth(db_path: str) -> None:
@@ -979,7 +992,7 @@ def scenario_quick_cash_chat(db_path: str) -> None:
 
     CHAT_ID = 777002
     STAFF_TG_ID = 1417059281
-    fake_store = StoreConfig(id="test-cash-store", name="Тестовый магазин", db_path=db_path)
+    fake_store = StoreConfig(id="1", name="Тестовый магазин", db_path=db_path)
 
     with get_conn(db_path) as conn:
         auth.create_staff(conn, "cash_bot_tester", "pass", "Кассир Тест", "storekeeper")
@@ -1173,7 +1186,7 @@ def scenario_quick_client_search_chat(db_path: str) -> None:
 
     CHAT_ID = 777003
     STAFF_TG_ID = 1417059282
-    fake_store = StoreConfig(id="test-client-search-store", name="Тестовый магазин", db_path=db_path)
+    fake_store = StoreConfig(id="1", name="Тестовый магазин", db_path=db_path)
 
     with get_conn(db_path) as conn:
         auth.create_staff(conn, "client_search_bot_tester", "pass", "Продавец Тест", "admin")
@@ -1570,7 +1583,7 @@ def scenario_quick_intake_chat() -> None:
     # The entry handlers resolve a real store + staff row out of the DB;
     # everything under test starts after that, so stub it and drive the
     # genuine handlers from the tap onward.
-    _fake_store = SimpleNamespace(id="test-store", db_path=":memory:")
+    _fake_store = SimpleNamespace(id="1", location_id=1, db_path=":memory:")
     qa._resolve_staff_for_dm = lambda telegram_id: (_fake_store, {"role": "master"})
     # client_menu_add re-resolves the store/staff itself (get_store by id,
     # then a real DB lookup by telegram_id) rather than reusing
@@ -1760,42 +1773,36 @@ def scenario_session_token() -> None:
 
 
 def scenario_stores_config() -> None:
-    print("scenario: store registry (core/stores.py)")
-    prev_config = os.environ.get("CRM_STORES_CONFIG")
-    try:
-        # No stores.json at this path -> single synthetic store from the
-        # legacy CRM_DB_PATH/CRM_*_GROUP_CHAT_ID env vars (backward compat).
-        os.environ["CRM_STORES_CONFIG"] = os.path.join(tempfile.gettempdir(), "definitely-not-a-real-stores-file.json")
-        legacy = stores.load_stores()
-        check("no stores.json -> exactly one synthetic store", len(legacy) == 1)
-        check("synthetic store's db_path is the legacy CRM_DB_PATH", legacy[0].db_path == storage.DB_PATH)
-        check("default_store_id() picks the only store", stores.default_store_id() == legacy[0].id)
+    print("scenario: точки registry (core/stores.py over the locations table)")
+    with tempfile.TemporaryDirectory() as tmp:
+        prev = os.environ["CRM_DB_PATH"]
+        try:
+            os.environ["CRM_DB_PATH"] = os.path.join(tmp, "never-created.sqlite3")
+            bare = stores.load_stores()
+            check("a base that doesn't exist yet still yields exactly one точка (so default_store_id() always answers)",
+                  len(bare) == 1 and bare[0].db_path == os.environ["CRM_DB_PATH"])
+        finally:
+            os.environ["CRM_DB_PATH"] = prev
 
-        with tempfile.TemporaryDirectory() as tmp:
-            config_path = os.path.join(tmp, "stores.json")
-            with open(config_path, "w", encoding="utf-8") as f:
-                json.dump(
-                    [
-                        {"id": "1", "name": "Первый", "db_path": "s1.sqlite3", "staff_group_chat_id": -100, "repair_topic_id": 5, "masters_group_chat_id": -200},
-                        {"id": "2", "name": "Второй", "db_path": os.path.join(tmp, "s2.sqlite3")},
-                    ],
-                    f,
+        with _separate_base(tmp, "registry.sqlite3", ("Первый", "Второй")) as db_path:
+            with get_conn(db_path) as conn:
+                conn.execute(
+                    "UPDATE locations SET staff_group_chat_id = -100, repair_topic_id = 5, masters_group_chat_id = -200 WHERE id = 1"
                 )
-            os.environ["CRM_STORES_CONFIG"] = config_path
             parsed = stores.load_stores()
-            check("stores.json with 2 entries parses to 2 stores", len(parsed) == 2)
-            check("relative db_path is resolved against the repo root", os.path.isabs(parsed[0].db_path))
-            check("absolute db_path passes through unchanged", parsed[1].db_path == os.path.join(tmp, "s2.sqlite3"))
-            check("optional group-chat fields default to None when omitted", parsed[1].staff_group_chat_id is None)
+            check("two точки in the base -> two stores", len(parsed) == 2)
+            check("every store points at the one shared base", {s.db_path for s in parsed} == {db_path})
+            check("store ids are the location ids, as strings (what tokens and callbacks carry)",
+                  [s.id for s in parsed] == ["1", "2"] and parsed[1].location_id == 2)
+            check("optional group-chat fields are None when not set", parsed[1].staff_group_chat_id is None)
             check("get_store finds a known id", stores.get_store("2").name == "Второй")
-            check("default_store_id() is the first entry", stores.default_store_id() == "1")
+            check("default_store_id() is the first точка", stores.default_store_id() == "1")
             try:
                 stores.get_store("nope")
                 check("get_store raises on an unknown id", False)
             except KeyError:
                 check("get_store raises on an unknown id", True)
 
-            # store_for_chat_id (Фаза C, 23.08) — group -> store reverse lookup.
             check("store_for_chat_id resolves the staff group to its store", stores.store_for_chat_id(-100).id == "1")
             check("store_for_chat_id resolves the masters group to its store too", stores.store_for_chat_id(-200).id == "1")
             check("a topic id is not a chat_id — resolves to nothing", stores.store_for_chat_id(5) is None)
@@ -1803,11 +1810,12 @@ def scenario_stores_config() -> None:
             check("store_for_chat_id accepts a string chat_id too (Telegram hands either)",
                   stores.store_for_chat_id("-100").id == "1")
             check("a non-numeric chat_id resolves to no store, doesn't raise", stores.store_for_chat_id("not-a-number") is None)
-    finally:
-        if prev_config is None:
-            os.environ.pop("CRM_STORES_CONFIG", None)
-        else:
-            os.environ["CRM_STORES_CONFIG"] = prev_config
+
+            with get_conn(db_path) as conn:
+                warehouses = conn.execute("SELECT kind, location_id FROM warehouses ORDER BY id").fetchall()
+            check("every точка has its own 'point' склад and there is exactly one «В пути»",
+                  sorted((w["kind"], w["location_id"]) for w in warehouses if w["kind"] == "point") == [("point", 1), ("point", 2)]
+                  and sum(1 for w in warehouses if w["kind"] == "transit") == 1)
 
 
 def scenario_storage_context() -> None:
@@ -1872,64 +1880,46 @@ def scenario_store_prefs() -> None:
 
 
 def scenario_store_access() -> None:
-    print("scenario: cross-store telegram_id lookup (core.store_access)")
-    prev_config = os.environ.get("CRM_STORES_CONFIG")
+    print("scenario: which точки a Telegram user may work in (core.store_access)")
     prev_prefs = os.environ.get("CRM_STORE_PREFS_PATH")
-    with tempfile.TemporaryDirectory() as tmp:
-        db1, db2, db3 = (os.path.join(tmp, f"s{i}.sqlite3") for i in (1, 2, 3))
-        for db_path in (db1, db2, db3):
-            init_db(db_path)
-        config_path = os.path.join(tmp, "stores.json")
-        with open(config_path, "w", encoding="utf-8") as f:
-            json.dump(
-                [
-                    {"id": "1", "name": "Один", "db_path": db1},
-                    {"id": "2", "name": "Два", "db_path": db2},
-                    {"id": "3", "name": "Три", "db_path": db3},
-                ],
-                f,
-            )
-        os.environ["CRM_STORES_CONFIG"] = config_path
+    with tempfile.TemporaryDirectory() as tmp, _separate_base(tmp, "access.sqlite3", ("Один", "Два", "Три")) as db_path:
         os.environ["CRM_STORE_PREFS_PATH"] = os.path.join(tmp, "prefs.sqlite3")
         store_prefs.init_db()
         try:
-            with get_conn(db1) as conn:
-                owner_id_1 = auth.create_staff(conn, "owner", "pass", "Владелец", "owner")
+            with get_conn(db_path) as conn:
+                owner_id = auth.create_staff(conn, "owner", "pass", "Владелец", "owner")
                 auth.link_staff_telegram(conn, "owner", 777)
-            with get_conn(db3) as conn:
-                owner_id_3 = auth.create_staff(conn, "owner", "pass", "Владелец", "owner")
-                auth.link_staff_telegram(conn, "owner", 777)
-            with get_conn(db2) as conn:
-                auth.create_staff(conn, "somemaster", "pass", "Мастер Два", "master")
-                # telegram_id 777 deliberately NOT linked in store 2
+                master_id = auth.create_staff(conn, "somemaster", "pass", "Мастер Два", "master", location_id=2)
+                auth.link_staff_telegram(conn, "somemaster", 888)
+                homeless_id = auth.create_staff(conn, "newbie", "pass", "Без точки", "storekeeper")
+                auth.link_staff_telegram(conn, "newbie", 999)
 
             found = store_access.accessible_stores(777)
-            check("accessible_stores finds exactly the 2 stores this telegram_id has an identity in",
-                  {s.id for s, _ in found} == {"1", "3"})
-            check("each match carries the right staff_id for its own store",
-                  {s.id: st["id"] for s, st in found} == {"1": owner_id_1, "3": owner_id_3})
-            check("a telegram_id with no identity anywhere finds nothing", store_access.accessible_stores(4242) == [])
+            check("an owner can work in every точка", {s.id for s, _ in found} == {"1", "2", "3"})
+            check("and is the SAME staff row in each — one base, one identity",
+                  {st["id"] for _, st in found} == {owner_id})
+            master_found = store_access.accessible_stores(888)
+            check("a master is tied to their own точка only",
+                  [(s.id, st["id"]) for s, st in master_found] == [("2", master_id)])
+            check("an employee with no точка set lands on the first one",
+                  [(s.id, st["id"]) for s, st in store_access.accessible_stores(999)] == [("1", homeless_id)])
+            check("a telegram_id that isn't staff finds nothing", store_access.accessible_stores(4242) == [])
 
-            single = [(s, st) for s, st in found if s.id == "1"]
             check("pick_default_store with a single match just returns it",
-                  store_access.pick_default_store(777, single).id == "1")
-
-            check("pick_default_store with no preference recorded yet falls back to the first configured store",
+                  store_access.pick_default_store(888, master_found).id == "2")
+            check("pick_default_store with no preference recorded yet falls back to the first точка",
                   store_access.pick_default_store(777, found).id == "1")
-
             store_prefs.set_last_store(777, "3")
-            check("pick_default_store honors a recorded preference among the accessible stores",
+            check("pick_default_store honors a recorded preference among the accessible точки",
                   store_access.pick_default_store(777, found).id == "3")
-
-            store_prefs.set_last_store(777, "2")
-            check("a stale preference pointing at a store this telegram_id no longer has access to falls back to the first",
-                  store_access.pick_default_store(777, found).id == "1")
+            store_prefs.set_last_store(888, "3")
+            check("a stale preference pointing at a точка this person can't work in is ignored",
+                  store_access.pick_default_store(888, master_found).id == "2")
         finally:
-            for env_name, prev in (("CRM_STORES_CONFIG", prev_config), ("CRM_STORE_PREFS_PATH", prev_prefs)):
-                if prev is None:
-                    os.environ.pop(env_name, None)
-                else:
-                    os.environ[env_name] = prev
+            if prev_prefs is None:
+                os.environ.pop("CRM_STORE_PREFS_PATH", None)
+            else:
+                os.environ["CRM_STORE_PREFS_PATH"] = prev_prefs
 
 
 def scenario_store_settings(db_path: str) -> None:
@@ -2082,12 +2072,12 @@ def scenario_webapp_forms(db_path: str) -> None:
         resp = client.post(f"/clients?t={token}", data={"name": "Без Телефона", "phone": ""})
         check("a blank optional phone still creates the client (303)",
               resp.status_code == 303 or (resp.history and resp.history[0].status_code == 303))
-        resp = client.post(f"/clients?t={token}", data={"name": "Со Скобками", "phone": "+38 (050) 123-45-67"})
+        resp = client.post(f"/clients?t={token}", data={"name": "Со Скобками", "phone": "+38 (050) 765-43-21"})
         check("a number typed with spaces/brackets/dashes is accepted (303)",
               resp.status_code == 303 or (resp.history and resp.history[0].status_code == 303))
         with get_conn(db_path) as conn:
             stored = conn.execute("SELECT phone FROM clients WHERE name = 'Со Скобками'").fetchone()
-            check("...and stored in canonical form", stored["phone"] == "+380501234567")
+            check("...and stored in canonical form", stored["phone"] == "+380507654321")
             blank = conn.execute("SELECT phone FROM clients WHERE name = 'Без Телефона'").fetchone()
             check("a client with no phone stores NULL, not an empty string", blank["phone"] is None)
 
@@ -2937,329 +2927,255 @@ def scenario_buyback_http(db_path: str) -> None:
 
 
 def scenario_multi_store_http() -> None:
-    """Фаза A end-to-end regression guard: two different store_id tokens
-    hitting the SAME running FastAPI process must read/write two completely
-    separate SQLite files — proving webapp.main's middleware (not the fixed
-    CRM_DB_PATH the process started with) decides where a request's data
-    goes. Uses a real stores.json + two real staff DBs."""
-    print("scenario: multi-store request isolation over real HTTP requests")
-    prev_config = os.environ.get("CRM_STORES_CONFIG")
-    with tempfile.TemporaryDirectory() as tmp:
-        store_a_db = os.path.join(tmp, "storeA.sqlite3")
-        store_b_db = os.path.join(tmp, "storeB.sqlite3")
-        config_path = os.path.join(tmp, "stores.json")
-        with open(config_path, "w", encoding="utf-8") as f:
-            json.dump(
-                [
-                    {"id": "A", "name": "Магазин A", "db_path": store_a_db},
-                    {"id": "B", "name": "Магазин B", "db_path": store_b_db},
-                ],
-                f,
+    """Two точки in ONE base behind the same running process: what is per-
+    точка (ремонты, касса, склад) must follow the token's точка, what is
+    shared (клиенты, мастера, каталог) must be the same from both."""
+    print("scenario: two точки, one base — per-точка vs shared data over real HTTP requests")
+    with tempfile.TemporaryDirectory() as tmp, _separate_base(tmp, "two.sqlite3", ("Точка A", "Точка B")) as db_path:
+        with get_conn(db_path) as conn:
+            owner_id = auth.create_staff(conn, "two-owner", "pass", "Владелец", "owner")
+            auth.create_master(conn, "Уникальный Мастер Альфа", None, "fixed", 100, location_id=1)
+            client_id = clients.get_or_create_by_phone(conn, "Клиент Общий", "+380501119900", source="offline")
+            repairs.create_repair(
+                conn, client_id, "Смартфон", "Xiaomi", "УникальныйРемонтA", None, "не грузится", "offline", None, None,
+                owner_id, location_id=1,
             )
+            cash.record_adjustment(conn, 777, "размен", owner_id, location_id=2)
 
-        init_db(store_a_db)
-        init_db(store_b_db)
-        with get_conn(store_a_db) as conn:
-            staff_a = auth.create_staff(conn, "storeA-owner", "pass", "Владелец A", "owner")
-            auth.create_master(conn, "Уникальный Мастер Альфа", None, "fixed", 100)
-        with get_conn(store_b_db) as conn:
-            staff_b = auth.create_staff(conn, "storeB-owner", "pass", "Владелец B", "owner")
+        import webapp.main  # already imported by scenario_webapp_forms; re-import is a cached no-op
 
-        os.environ["CRM_STORES_CONFIG"] = config_path
-        try:
-            import webapp.main  # already imported by scenario_webapp_forms; re-import is a cached no-op
+        with TestClient(webapp.main.app) as client:
+            token_a = make_token(owner_id, "1")
+            token_b = make_token(owner_id, "2")
 
-            with TestClient(webapp.main.app) as client:
-                token_a = make_token(staff_a, "A")
-                token_b = make_token(staff_b, "B")
-
-                masters_a = client.get(f"/masters?t={token_a}")
-                check("store A's token reaches store A's own db (sees its master)",
-                      "Уникальный Мастер Альфа" in masters_a.text)
-
-                masters_b = client.get(f"/masters?t={token_b}")
-                check("store B's token never sees store A's data — real db-level isolation",
-                      "Уникальный Мастер Альфа" not in masters_b.text)
-
-                dash_b = client.get(f"/?t={token_b}")
-                check("store B's own owner can still reach their own dashboard (200, not leaked into store A)",
-                      dash_b.status_code == 200)
-        finally:
-            if prev_config is None:
-                os.environ.pop("CRM_STORES_CONFIG", None)
-            else:
-                os.environ["CRM_STORES_CONFIG"] = prev_config
+            check("точка A's repair is in точка A's list", "УникальныйРемонтA" in client.get(f"/repairs?t={token_a}").text)
+            check("and NOT in точка B's list — repairs belong to the точка that took them in",
+                  "УникальныйРемонтA" not in client.get(f"/repairs?t={token_b}").text)
+            check("masters are one list for the whole business — visible from both точки",
+                  "Уникальный Мастер Альфа" in client.get(f"/masters?t={token_a}").text
+                  and "Уникальный Мастер Альфа" in client.get(f"/masters?t={token_b}").text)
+            check("clients too — one контрагент base", "Клиент Общий" in client.get(f"/clients?t={token_b}").text)
+            cash_a = client.get(f"/cash?t={token_a}").text
+            cash_b = client.get(f"/cash?t={token_b}").text
+            check("each точка has its own касса balance", ">777<" in cash_b and ">777<" not in cash_a)
+            check("the appbar names the точка the token is for",
+                  "Точка A" in client.get(f"/?t={token_a}").text and "Точка B" in client.get(f"/?t={token_b}").text)
 
 
 def scenario_multi_store_login_and_switch_http() -> None:
-    """Фаза B end-to-end: a Telegram id with an owner identity in two
-    stores must actually land somewhere sensible at login, and switching
-    must be rememberd for the next login — the whole point of
-    core.store_access/core.store_prefs, exercised through the real
-    /miniapp/auto and /store/switch endpoints, not just their building
-    blocks in isolation."""
-    print("scenario: cross-store login + switcher over real HTTP requests")
-    prev_config = os.environ.get("CRM_STORES_CONFIG")
+    """An owner works in every точка: login must land somewhere sensible,
+    and switching must be remembered for the next login — exercised
+    through the real /miniapp/auto and /store/switch endpoints."""
+    print("scenario: login + точка switcher over real HTTP requests")
     prev_prefs = os.environ.get("CRM_STORE_PREFS_PATH")
-    with tempfile.TemporaryDirectory() as tmp:
-        store_a_db = os.path.join(tmp, "loginA.sqlite3")
-        store_b_db = os.path.join(tmp, "loginB.sqlite3")
-        config_path = os.path.join(tmp, "stores.json")
-        with open(config_path, "w", encoding="utf-8") as f:
-            json.dump(
-                [
-                    {"id": "A", "name": "Магазин Логин A", "db_path": store_a_db},
-                    {"id": "B", "name": "Магазин Логин B", "db_path": store_b_db},
-                ],
-                f,
-            )
-        init_db(store_a_db)
-        init_db(store_b_db)
+    with tempfile.TemporaryDirectory() as tmp, _separate_base(tmp, "login.sqlite3", ("Кастомное Имя A", "Вторая Точка")) as db_path:
         telegram_id = 555000111
-        with get_conn(store_a_db) as conn:
+        master_telegram_id = 555000222
+        with get_conn(db_path) as conn:
             auth.create_staff(conn, "loginowner", "pass", "Мультивладелец", "owner")
             auth.link_staff_telegram(conn, "loginowner", telegram_id)
-            # Кабинет-edited name, deliberately different from stores.json's
-            # static "Магазин Логин A" label — regression guard for 23.08:
-            # the switcher used to show the stale stores.json name because
-            # it never looked at store_settings at all.
-            store_settings.update_settings(conn, "Кастомное Имя A", None, None, None)
-        with get_conn(store_b_db) as conn:
-            auth.create_staff(conn, "loginowner", "pass", "Мультивладелец", "owner")
-            auth.link_staff_telegram(conn, "loginowner", telegram_id)
+            auth.create_staff(conn, "loginmaster", "pass", "Мастер Второй", "master", location_id=2)
+            auth.link_staff_telegram(conn, "loginmaster", master_telegram_id)
 
-        os.environ["CRM_STORES_CONFIG"] = config_path
         os.environ["CRM_STORE_PREFS_PATH"] = os.path.join(tmp, "login-prefs.sqlite3")
         try:
             import webapp.main
             from webapp.routers import miniapp as miniapp_router
 
             init_data = _build_init_data(miniapp_router.BOT_TOKEN, {"id": telegram_id, "first_name": "Тест"}, int(time.time()))
+            master_init_data = _build_init_data(
+                miniapp_router.BOT_TOKEN, {"id": master_telegram_id, "first_name": "Мастер"}, int(time.time()))
 
             with TestClient(webapp.main.app) as client:
-                # follow_redirects=False: TestClient follows 303s by default,
-                # but the store_id we need to inspect only lives in the
-                # Location header of the redirect itself, not the page it
-                # points to.
+                # follow_redirects=False: the store_id we need to inspect only
+                # lives in the Location header of the redirect itself.
                 first_login = client.post("/miniapp/auto", data={"initData": init_data}, follow_redirects=False)
                 token_after_first_login = first_login.headers["location"].split("t=", 1)[1]
-                check("first-ever login (no preference yet) lands in the first configured store",
-                      first_login.status_code == 303 and read_token(token_after_first_login)["store_id"] == "A")
+                check("first-ever login (no preference yet) lands in the first точка",
+                      first_login.status_code == 303 and read_token(token_after_first_login)["store_id"] == "1")
                 dash = client.get(f"/?t={token_after_first_login}")
                 check("that token actually authenticates", dash.status_code == 200)
 
                 switch_page = client.get(f"/store/switch?t={token_after_first_login}")
-                check("the switcher shows the Кабинет-edited name (store_settings), not stores.json's static label",
-                      "Кастомное Имя A" in switch_page.text and "Магазин Логин A" not in switch_page.text)
-                check("a store that was never renamed still shows its seeded default name",
-                      "Магазин Логин B" not in switch_page.text)
+                check("the switcher lists every точка by its Кабинет name",
+                      "Кастомное Имя A" in switch_page.text and "Вторая Точка" in switch_page.text)
+                check("«Ещё» offers the switcher to someone with more than one точка",
+                      "/store/switch" in client.get(f"/more?t={token_after_first_login}").text)
 
-                switch = client.post("/store/switch?t=" + token_after_first_login, data={"store_id": "B"}, follow_redirects=False)
-                check("switching to store B redirects (303)", switch.status_code == 303)
+                switch = client.post("/store/switch?t=" + token_after_first_login, data={"store_id": "2"}, follow_redirects=False)
+                check("switching to точка 2 redirects (303)", switch.status_code == 303)
                 token_after_switch = switch.headers["location"].split("t=", 1)[1]
-                check("the new token really is for store B, not a no-op",
-                      token_after_switch != token_after_first_login)
+                check("the new token really is for точка 2, same person",
+                      read_token(token_after_switch)["store_id"] == "2"
+                      and read_token(token_after_switch)["staff_id"] == read_token(token_after_first_login)["staff_id"])
 
                 second_login = client.post("/miniapp/auto", data={"initData": init_data}, follow_redirects=False)
                 token_after_second_login = second_login.headers["location"].split("t=", 1)[1]
-                dash2 = client.get(f"/?t={token_after_second_login}")
-                check("a second login (after switching) authenticates too", dash2.status_code == 200)
-                check("and it landed back on store B (the switch was remembered), not store A again",
-                      read_token(token_after_second_login)["store_id"] == "B")
+                check("a second login (after switching) lands back on точка 2 — the switch was remembered",
+                      client.get(f"/?t={token_after_second_login}").status_code == 200
+                      and read_token(token_after_second_login)["store_id"] == "2")
 
                 bogus_switch = client.post("/store/switch?t=" + token_after_second_login, data={"store_id": "does-not-exist"})
-                check("switching to a store this telegram_id has no identity in doesn't crash, shows a friendly error",
+                check("switching to a точка that doesn't exist doesn't crash, shows a friendly error",
                       bogus_switch.status_code == 200 and "нет доступа" in bogus_switch.text)
+
+                master_login = client.post("/miniapp/auto", data={"initData": master_init_data}, follow_redirects=False)
+                master_token = master_login.headers["location"].split("t=", 1)[1]
+                check("a master logs straight into their own точка", read_token(master_token)["store_id"] == "2")
+                check("and is not offered the switcher at all", "/store/switch" not in client.get(f"/more?t={master_token}").text)
+                denied = client.post("/store/switch?t=" + master_token, data={"store_id": "1"})
+                check("nor can they switch to another точка by hand",
+                      denied.status_code == 200 and "нет доступа" in denied.text)
         finally:
-            for env_name, prev in (("CRM_STORES_CONFIG", prev_config), ("CRM_STORE_PREFS_PATH", prev_prefs)):
-                if prev is None:
-                    os.environ.pop(env_name, None)
-                else:
-                    os.environ[env_name] = prev
+            if prev_prefs is None:
+                os.environ.pop("CRM_STORE_PREFS_PATH", None)
+            else:
+                os.environ["CRM_STORE_PREFS_PATH"] = prev_prefs
 
 
 def scenario_store_settings_http() -> None:
-    """Фаза B: Кабинет магазина over real HTTP — role gate + save round-trip."""
+    """Кабинет магазина over real HTTP — role gate + save round-trip, and
+    the save touching only the точка it was made in."""
     print("scenario: Кабинет магазина over HTTP (role gate + save)")
-    prev_config = os.environ.get("CRM_STORES_CONFIG")
-    with tempfile.TemporaryDirectory() as tmp:
-        db_path = os.path.join(tmp, "cabinet.sqlite3")
-        init_db(db_path)
+    with tempfile.TemporaryDirectory() as tmp, _separate_base(tmp, "cabinet.sqlite3", ("Магазин", "Соседняя")) as db_path:
         with get_conn(db_path) as conn:
             owner_id = auth.create_staff(conn, "cabowner", "pass", "Кабинет Владелец", "owner")
             master_id = auth.create_staff(conn, "cabmaster", "pass", "Кабинет Мастер", "master")
-        owner_token = make_token(owner_id, "cab")
-        master_token = make_token(master_id, "cab")
+        owner_token = make_token(owner_id, "1")
+        master_token = make_token(master_id, "1")
 
-        config_path = os.path.join(tmp, "stores.json")
-        with open(config_path, "w", encoding="utf-8") as f:
-            json.dump([{"id": "cab", "name": "Кабинет-тест", "db_path": db_path}], f)
-        os.environ["CRM_STORES_CONFIG"] = config_path
-        try:
-            import webapp.main
+        import webapp.main
 
-            with TestClient(webapp.main.app) as client:
-                master_get = client.get(f"/store/settings?t={master_token}")
-                check("a master is denied the Кабинет магазина (403), not shown store settings",
-                      master_get.status_code == 403)
+        with TestClient(webapp.main.app) as client:
+            master_get = client.get(f"/store/settings?t={master_token}")
+            check("a master is denied the Кабинет магазина (403), not shown store settings",
+                  master_get.status_code == 403)
 
-                owner_get = client.get(f"/store/settings?t={owner_token}")
-                check("an owner sees the default seeded name on first visit", "Магазин" in owner_get.text)
+            owner_get = client.get(f"/store/settings?t={owner_token}")
+            check("an owner sees the current name on first visit", "Магазин" in owner_get.text)
 
-                empty_name = client.post(f"/store/settings?t={owner_token}", data={
-                    "name": "   ", "address": "", "phone": "", "working_hours": "",
-                })
-                check("an empty name is rejected with a friendly error, no raw 422",
-                      empty_name.status_code == 200 and "не может быть пустым" in empty_name.text)
-                with get_conn(db_path) as conn:
-                    check("the rejected empty-name save left the store's real name untouched",
-                          store_settings.get_settings(conn)["name"] == "Магазин")
+            empty_name = client.post(f"/store/settings?t={owner_token}", data={
+                "name": "   ", "address": "", "phone": "", "working_hours": "",
+            })
+            check("an empty name is rejected with a friendly error, no raw 422",
+                  empty_name.status_code == 200 and "не может быть пустым" in empty_name.text)
+            with get_conn(db_path) as conn:
+                check("the rejected empty-name save left the store's real name untouched",
+                      store_settings.get_settings(conn, 1)["name"] == "Магазин")
 
-                saved = client.post(f"/store/settings?t={owner_token}", data={
-                    "name": "Ремонтная Мастерская №1", "address": "просп. Мира, 10",
-                    "phone": "+380671234567", "working_hours": "пн–сб 9:00–20:00",
-                })
-                check("a valid save succeeds (200, re-rendered with a success flash)", saved.status_code == 200)
-                check("the success flash is shown", "Изменения сохранены" in saved.text)
+            saved = client.post(f"/store/settings?t={owner_token}", data={
+                "name": "Ремонтная Мастерская №1", "address": "просп. Мира, 10",
+                "phone": "+380671234567", "working_hours": "пн–сб 9:00–20:00",
+            })
+            check("a valid save succeeds (200, re-rendered with a success flash)", saved.status_code == 200)
+            check("the success flash is shown", "Изменения сохранены" in saved.text)
 
-                reload = client.get(f"/store/settings?t={owner_token}")
-                check("the saved name is really persisted, visible on a fresh GET", "Ремонтная Мастерская №1" in reload.text)
-                check("the saved address is really persisted too", "просп. Мира, 10" in reload.text)
-        finally:
-            if prev_config is None:
-                os.environ.pop("CRM_STORES_CONFIG", None)
-            else:
-                os.environ["CRM_STORES_CONFIG"] = prev_config
+            reload = client.get(f"/store/settings?t={owner_token}")
+            check("the saved name is really persisted, visible on a fresh GET", "Ремонтная Мастерская №1" in reload.text)
+            check("the saved address is really persisted too", "просп. Мира, 10" in reload.text)
+            with get_conn(db_path) as conn:
+                check("the other точка's profile was not touched by it",
+                      store_settings.get_settings(conn, 2)["name"] == "Соседняя"
+                      and store_settings.get_settings(conn, 2)["address"] is None)
 
 
 def scenario_all_stores_report_http() -> None:
-    """Фаза D: «Все магазины» summary over real HTTP — two stores seeded
-    with deliberately DIFFERENT numbers on every metric (no shared values
-    between stores), so a bug that reads the wrong DB or sums wrong shows
-    up as a wrong number rather than accidentally passing."""
+    """«Все магазины» summary over real HTTP — two точки seeded with
+    deliberately DIFFERENT numbers on every metric (no shared values), so a
+    bug that reads the wrong точка or sums wrong shows up as a wrong number
+    rather than accidentally passing."""
     print("scenario: сводный отчёт «Все магазины» over HTTP")
-    prev_config = os.environ.get("CRM_STORES_CONFIG")
-    with tempfile.TemporaryDirectory() as tmp:
-        db_a = os.path.join(tmp, "allA.sqlite3")
-        db_b = os.path.join(tmp, "allB.sqlite3")
-        init_db(db_a)
-        init_db(db_b)
-        telegram_id = 700700700
+    with tempfile.TemporaryDirectory() as tmp, _separate_base(tmp, "all.sqlite3", ("Магазин Alpha", "Магазин Bravo")) as db_path:
+        with get_conn(db_path) as conn:
+            owner = auth.create_staff(conn, "owner", "pass", "Владелец", "owner")
+            master_b = auth.create_staff(conn, "master", "pass", "Мастер Б", "master", location_id=2)
 
-        # Store A: 1 open repair, 1 issued @1000, 1 sale (qty2*100=200),
-        # cash 500, 1 low-stock product.
-        with get_conn(db_a) as conn:
-            owner_a = auth.create_staff(conn, "owner", "pass", "Владелец", "owner")
-            auth.link_staff_telegram(conn, "owner", telegram_id)
-            store_settings.update_settings(conn, "Магазин Alpha", None, None, None)
+            # Точка A: 1 open repair, 1 issued @1000, 1 sale (qty2*100=200),
+            # cash 500, 1 low-stock product (of the 3 in the shared catalog,
+            # only "Товар A" has stock anywhere — at B — see below).
             client_id = clients.get_or_create_by_phone(conn, "Клиент A", "+380501110001", source="offline")
             open_order = repairs.create_repair(
-                conn, client_id, "Смартфон", "Xiaomi", "Redmi", None, "не грузится", "offline", None, None, owner_a,
+                conn, client_id, "Смартфон", "Xiaomi", "Redmi", None, "не грузится", "offline", None, None, owner,
+                location_id=1,
             )
-            repairs.update_status(conn, open_order, "in_progress", owner_a)
+            repairs.update_status(conn, open_order, "in_progress", owner)
             issued_order = repairs.create_repair(
-                conn, client_id, "Ноутбук", "Dell", "XPS", None, "разбит экран", "offline", None, 1000, owner_a,
+                conn, client_id, "Ноутбук", "Dell", "XPS", None, "разбит экран", "offline", None, 1000, owner,
+                location_id=1,
             )
             repairs.set_price(conn, issued_order, price_estimate=1000, price_final=1000)
-            repairs.update_status(conn, issued_order, "issued", owner_a)
-            product_a = inventory.create_product(conn, "Товар A", "SKU-ALL-A", None, "шт", False, True, 3, 100)
-            conn.execute(
-                "INSERT INTO sales_orders (client_id, channel, status, staff_id) VALUES (?, 'offline', 'completed', ?)",
-                (client_id, owner_a),
-            )
-            order_a_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
-            conn.execute(
-                "INSERT INTO sales_order_items (order_id, product_id, qty, price) VALUES (?, ?, 2, 100)",
-                (order_a_id, product_a),
-            )
-            cash.record_income(conn, "cash", 500, "manual", 0, owner_a)
+            repairs.update_status(conn, issued_order, "issued", owner)
+            cell_a = inventory.create_cell(conn, "ALL-A", None, None, location_id=1)
+            cell_b = inventory.create_cell(conn, "ALL-B", None, None, location_id=2)
+            # The catalog is shared: 3 products, min_qty 3 each. Stock is
+            # per точка: A holds 5 of two of them (1 low at A), B holds 5
+            # of one (2 low at B).
+            product_1 = inventory.create_product(conn, "Товар 1", "SKU-ALL-1", None, "шт", False, True, 3, 100)
+            product_2 = inventory.create_product(conn, "Товар 2", "SKU-ALL-2", None, "шт", False, True, 3, 50)
+            product_3 = inventory.create_product(conn, "Товар 3", "SKU-ALL-3", None, "шт", False, True, 3, 300)
+            inventory.receive_stock(conn, product_1, cell_a, 7, owner)
+            inventory.receive_stock(conn, product_2, cell_a, 5, owner)
+            inventory.receive_stock(conn, product_3, cell_b, 9, owner)
+            sales.create_sale(conn, client_id, "offline", owner, [(product_1, 2, 100)], location_id=1)
+            cash.record_adjustment(conn, 300, None, owner, location_id=1)   # 200 from the sale + 300 = 500
 
-        # Store B: 2 open repairs, 1 issued @3000, 2 sales (150+300=450),
-        # cash 1200, 2 low-stock products — every number deliberately
-        # different from store A's.
-        with get_conn(db_b) as conn:
-            owner_b = auth.create_staff(conn, "owner", "pass", "Владелец", "owner")
-            auth.link_staff_telegram(conn, "owner", telegram_id)
-            store_settings.update_settings(conn, "Магазин Bravo", None, None, None)
-            master_b = auth.create_staff(conn, "master", "pass", "Мастер Б", "master")
-            client_id = clients.get_or_create_by_phone(conn, "Клиент B", "+380501110002", source="offline")
+            # Точка B: 2 open repairs, 1 issued @3000, 2 sales (150+300=450),
+            # cash 1200 — every number deliberately different from A's.
+            client_b = clients.get_or_create_by_phone(conn, "Клиент B", "+380501110002", source="offline")
             for _ in range(2):
                 oid = repairs.create_repair(
-                    conn, client_id, "Смартфон", "Samsung", "A54", None, "не заряжается", "offline", None, None, owner_b,
+                    conn, client_b, "Смартфон", "Samsung", "A54", None, "не заряжается", "offline", None, None, owner,
+                    location_id=2,
                 )
-                repairs.update_status(conn, oid, "in_progress", owner_b)
+                repairs.update_status(conn, oid, "in_progress", owner)
             issued_order_b = repairs.create_repair(
-                conn, client_id, "Планшет", "Apple", "iPad", None, "треснул экран", "offline", None, 3000, owner_b,
+                conn, client_b, "Планшет", "Apple", "iPad", None, "треснул экран", "offline", None, 3000, owner,
+                location_id=2,
             )
             repairs.set_price(conn, issued_order_b, price_estimate=3000, price_final=3000)
-            repairs.update_status(conn, issued_order_b, "issued", owner_b)
-            product_b1 = inventory.create_product(conn, "Товар B1", "SKU-ALL-B1", None, "шт", False, True, 3, 50)
-            product_b2 = inventory.create_product(conn, "Товар B2", "SKU-ALL-B2", None, "шт", False, True, 3, 300)
-            conn.execute(
-                "INSERT INTO sales_orders (client_id, channel, status, staff_id) VALUES (?, 'offline', 'completed', ?)",
-                (client_id, owner_b),
-            )
-            order_b1_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
-            conn.execute(
-                "INSERT INTO sales_order_items (order_id, product_id, qty, price) VALUES (?, ?, 3, 50)",
-                (order_b1_id, product_b1),
-            )
-            conn.execute(
-                "INSERT INTO sales_orders (client_id, channel, status, staff_id) VALUES (?, 'offline', 'completed', ?)",
-                (client_id, owner_b),
-            )
-            order_b2_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
-            conn.execute(
-                "INSERT INTO sales_order_items (order_id, product_id, qty, price) VALUES (?, ?, 1, 300)",
-                (order_b2_id, product_b2),
-            )
-            cash.record_income(conn, "cash", 1200, "manual", 0, owner_b)
+            repairs.update_status(conn, issued_order_b, "issued", owner)
+            sales.create_sale(conn, client_b, "offline", owner, [(product_3, 3, 50)], location_id=2)
+            sales.create_sale(conn, client_b, "offline", owner, [(product_3, 1, 300)], location_id=2)
+            cash.record_adjustment(conn, 750, None, owner, location_id=2)   # 450 from sales + 750 = 1200
 
-        config_path = os.path.join(tmp, "stores.json")
-        with open(config_path, "w", encoding="utf-8") as f:
-            json.dump(
-                [
-                    {"id": "allA", "name": "Магазин Alpha", "db_path": db_a},
-                    {"id": "allB", "name": "Магазин Bravo", "db_path": db_b},
-                ],
-                f,
-            )
-        os.environ["CRM_STORES_CONFIG"] = config_path
+        # Its own connection, and the error escapes the `with`: get_conn()
+        # only commits on a clean exit, so the half-made sale rolls back
+        # instead of leaving an order row behind.
         try:
-            import webapp.main
+            with get_conn(db_path) as conn:
+                sales.create_sale(conn, client_b, "offline", owner, [(product_1, 1, 100)], location_id=2)
+            check("a sale at точка B can't take stock that is physically at точка A", False)
+        except inventory.InsufficientStockError:
+            check("a sale at точка B can't take stock that is physically at точка A", True)
 
-            with TestClient(webapp.main.app) as client:
-                owner_token = make_token(owner_a, "allA")
-                master_token = make_token(master_b, "allB")
+        import webapp.main
 
-                master_resp = client.get(f"/reports/all-stores?t={master_token}")
-                check("a master role is denied «Все магазины» (403), not shown cross-store financials",
-                      master_resp.status_code == 403)
+        with TestClient(webapp.main.app) as client:
+            owner_token = make_token(owner, "1")
+            master_token = make_token(master_b, "2")
 
-                resp = client.get(f"/reports/all-stores?t={owner_token}")
-                text = resp.text
-                check("the page loads for an owner with identity in both stores", resp.status_code == 200)
-                check("both store names appear", "Магазин Alpha" in text and "Магазин Bravo" in text)
+            master_resp = client.get(f"/reports/all-stores?t={master_token}")
+            check("a master role is denied «Все магазины» (403), not shown cross-store financials",
+                  master_resp.status_code == 403)
 
-                # Precise check, not just substring presence: extract every
-                # <div class="stat-num"> value in document order and compare
-                # against the exact expected sequence — store A's 6 stats,
-                # then store B's 6, then the totals' 6 (row order in the
-                # template: open_repairs, sales_orders, low_stock_count,
-                # repairs_revenue, sales_revenue, cash_balance).
-                stat_nums = re.findall(r'<div class="stat-num">([^<]*)</div>', text)
-                expected = [
-                    "1", "1", "1", "1000", "200", "500",       # store A
-                    "2", "2", "2", "3000", "450", "1200",      # store B
-                    "3", "3", "3", "4000", "650", "1700",      # итого — exact sum of both
-                ]
-                check("all 18 stat values (2 stores + totals, 6 each) appear in the exact expected order",
-                      stat_nums == expected)
-        finally:
-            if prev_config is None:
-                os.environ.pop("CRM_STORES_CONFIG", None)
-            else:
-                os.environ["CRM_STORES_CONFIG"] = prev_config
+            resp = client.get(f"/reports/all-stores?t={owner_token}")
+            text = resp.text
+            check("the page loads for an owner", resp.status_code == 200)
+            check("both точки appear by name", "Магазин Alpha" in text and "Магазин Bravo" in text)
+
+            # Precise check, not just substring presence: every
+            # <div class="stat-num"> in document order — A's 6 stats, then
+            # B's 6, then the totals' 6 (template order: open_repairs,
+            # sales_orders, low_stock_count, repairs_revenue,
+            # sales_revenue, cash_balance).
+            stat_nums = re.findall(r'<div class="stat-num">([^<]*)</div>', text)
+            expected = [
+                "1", "1", "1", "1000", "200", "500",       # точка A (low: Товар 3 — none of it here)
+                "2", "2", "2", "3000", "450", "1200",      # точка B (low: Товар 1 and 2)
+                "3", "3", "3", "4000", "650", "1700",      # итого — exact sum of both
+            ]
+            check("all 18 stat values (2 точки + totals, 6 each) appear in the exact expected order",
+                  stat_nums == expected)
 
 
 def scenario_sales_channel_http() -> None:
@@ -3308,11 +3224,8 @@ def scenario_sales_channel_http() -> None:
           channel_posts.parse_buy_payload(channel_posts.buy_payload(42, "shop_2")) == (42, "shop_2")
           and channel_posts.parse_buy_payload("buy_x_1") is None and channel_posts.parse_buy_payload("other") is None)
 
-    prev_config = os.environ.get("CRM_STORES_CONFIG")
     orig_post, orig_token, orig_username = httpx.post, notify._BOT_TOKEN, notify._bot_username
-    with tempfile.TemporaryDirectory() as tmp:
-        db_path = os.path.join(tmp, "channel.sqlite3")
-        init_db(db_path)
+    with tempfile.TemporaryDirectory() as tmp, _separate_base(tmp, "channel.sqlite3", ("Канал-тест",)) as db_path:
         with get_conn(db_path) as conn:
             owner_id = auth.create_staff(conn, "chowner", "pass", "Канал Владелец", "owner")
             auth.link_staff_telegram(conn, "chowner", 9001)
@@ -3326,13 +3239,9 @@ def scenario_sales_channel_http() -> None:
             inventory.receive_stock(conn, old_id, cell_id, 1, owner_id)
             noprice_id = inventory.create_product(conn, "Без цены", None, None, "шт", False, True, 0, None)
             inventory.receive_stock(conn, noprice_id, cell_id, 1, owner_id)
-        owner_token = make_token(owner_id, "ch")
-        master_token = make_token(master_id, "ch")
+        owner_token = make_token(owner_id, "1")
+        master_token = make_token(master_id, "1")
 
-        config_path = os.path.join(tmp, "stores.json")
-        with open(config_path, "w", encoding="utf-8") as f:
-            json.dump([{"id": "ch", "name": "Канал-тест", "db_path": db_path}], f)
-        os.environ["CRM_STORES_CONFIG"] = config_path
         httpx.post = _fake_post
         notify._BOT_TOKEN, notify._bot_username = "test-token", None
         try:
@@ -3383,7 +3292,7 @@ def scenario_sales_channel_http() -> None:
                       and "52\u00a0000\u00a0грн" in sent["text"] and "<blockquote>" in sent["text"] and "Дерибасовская" in sent["text"] and "+380501112233" in sent["text"])
                 button = sent["reply_markup"]["inline_keyboard"][0][0] if sent else {}
                 check("the «Купить» button deep-links into the bot with this product and store",
-                      button.get("url") == f"https://t.me/shop_test_bot?start=buy_{phone_id}_ch")
+                      button.get("url") == f"https://t.me/shop_test_bot?start=buy_{phone_id}_1")
                 check("spec-style description lines get a bold label, plain lines don't",
                       channel_posts._description_block("Состояние: идеал\n\nПросто текст\nОчень длинная фраза без смысла метки тут: хвост")
                       == "<blockquote><b>Состояние:</b> идеал\nПросто текст\nОчень длинная фраза без смысла метки тут: хвост</blockquote>"
@@ -3406,7 +3315,7 @@ def scenario_sales_channel_http() -> None:
                 edit = next((c for c in calls if c["method"] == "editMessageText"), None)
                 check("editing the price edits the channel card in place, button kept",
                       edit is not None and "49\u00a0900\u00a0грн" in edit["text"] and edit["message_id"] == post["message_id"]
-                      and edit["reply_markup"]["inline_keyboard"][0][0]["url"].endswith(f"buy_{phone_id}_ch"))
+                      and edit["reply_markup"]["inline_keyboard"][0][0]["url"].endswith(f"buy_{phone_id}_1"))
                 calls.clear()
                 client.post(f"/inventory/products/{phone_id}/edit?t={owner_token}", data={
                     "name": "iPhone 16 Pro Max <256>", "sku": "", "category": "Телефоны", "unit": "шт",
@@ -3416,27 +3325,27 @@ def scenario_sales_channel_http() -> None:
 
                 # ---- buy leads (bot side, pure function)
                 reply, lead, store, managers = channel_orders.process_buy_request(
-                    f"buy_{phone_id}_ch", 777, "Вася <Пупкин>", "vasya")
+                    f"buy_{phone_id}_1", 777, "Вася <Пупкин>", "vasya")
                 check("a first «Купить» tap confirms to the customer and produces a staff lead with a profile link",
                       "Заявка принята" in reply and lead is not None and "tg://user?id=777" in lead
                       and "@vasya" in lead and "Вася &lt;Пупкин&gt;" in lead and "49\u00a0900\u00a0грн" in lead)
                 check("the lead resolves the right store and its owner as fallback recipient",
-                      store is not None and store.id == "ch" and managers == [9001])
+                      store is not None and store.id == "1" and managers == [9001])
                 check("with no staff group the lead goes to the owner's DM; with one — to its sales topic, or General if none",
                       channel_orders.lead_destinations(store, managers) == [(9001, None)]
                       and channel_orders.lead_destinations(
-                          stores.StoreConfig("x", "X", db_path, staff_group_chat_id=-100500, sales_topic_id=121), managers
+                          stores.StoreConfig("9", "X", db_path, staff_group_chat_id=-100500, sales_topic_id=121), managers
                       ) == [(-100500, 121)]
                       and channel_orders.lead_destinations(
-                          stores.StoreConfig("x", "X", db_path, staff_group_chat_id=-100500), managers
+                          stores.StoreConfig("9", "X", db_path, staff_group_chat_id=-100500), managers
                       ) == [(-100500, None)])
-                reply2, lead2, _s, _m = channel_orders.process_buy_request(f"buy_{phone_id}_ch", 777, "Вася", "vasya")
+                reply2, lead2, _s, _m = channel_orders.process_buy_request(f"buy_{phone_id}_1", 777, "Вася", "vasya")
                 check("a repeat tap by the same person re-confirms but doesn't notify staff twice",
                       "Заявка принята" in reply2 and lead2 is None)
-                reply3, _l, _s, _m = channel_orders.process_buy_request(f"buy_{phone_id}_ch", 778, "Без Юзернейма", None)
+                reply3, _l, _s, _m = channel_orders.process_buy_request(f"buy_{phone_id}_1", 778, "Без Юзернейма", None)
                 check("a customer without @username is told to contact the shop, with its phone",
                       "не указано имя пользователя" in reply3 and "+380501112233" in reply3)
-                bad = channel_orders.process_buy_request("buy_999999_ch", 1, "X", None)
+                bad = channel_orders.process_buy_request("buy_999999_1", 1, "X", None)
                 bad_store = channel_orders.process_buy_request("buy_1_nosuchstore", 1, "X", None)
                 check("an unknown product or store is a polite not-found, no lead",
                       bad[0] == channel_orders.NOT_FOUND_TEXT and bad[1] is None
@@ -3465,7 +3374,7 @@ def scenario_sales_channel_http() -> None:
                           deleted is not None and deleted["message_id"] == post["message_id"]
                           and row["status"] == "removed" and row["closed_at"] is not None
                           and channel_posts.get_active_post(conn, phone_id) is None)
-                sold_reply, sold_lead, _s, _m = channel_orders.process_buy_request(f"buy_{phone_id}_ch", 779, "Опоздавший", "late")
+                sold_reply, sold_lead, _s, _m = channel_orders.process_buy_request(f"buy_{phone_id}_1", 779, "Опоздавший", "late")
                 check("a «Купить» tap on an already-sold product says so, no lead",
                       sold_reply == channel_orders.SOLD_OUT_TEXT and sold_lead is None)
 
@@ -3509,14 +3418,14 @@ def scenario_sales_channel_http() -> None:
                 with get_conn(db_path) as conn:
                     inventory.set_product_photo(conn, case_id, photo_name)
                     calls.clear()
-                    channel_posts.publish(conn, case_id, "ch", owner_id)
+                    channel_posts.publish(conn, case_id, "1", owner_id)
                     photo_post = channel_posts.get_active_post(conn, case_id)
                     check("a product with a photo is posted as one photo message with the card as caption",
                           _methods() == ["sendPhoto"] and calls[0]["has_file"] and "Чехол" in calls[0]["caption"]
                           and photo_post["has_photo"] == 1)
                     inventory.set_product_description(conn, case_id, "силикон")
                     calls.clear()
-                    channel_posts.sync_product(conn, case_id, "ch")
+                    channel_posts.sync_product(conn, case_id, "1")
                     check("a photo card is updated through editMessageCaption, not editMessageText",
                           _methods() == ["editMessageCaption"] and "силикон" in calls[0]["caption"])
             finally:
@@ -3524,6 +3433,371 @@ def scenario_sales_channel_http() -> None:
         finally:
             httpx.post = orig_post
             notify._BOT_TOKEN, notify._bot_username = orig_token, orig_username
+
+
+def scenario_documents_journal() -> None:
+    """core.documents / core.doc_cancel: every operation leaves a journal
+    row with the right number, точка and author; a repeat with the same
+    key creates nothing; a cancel reverses stock and money and keeps the
+    row."""
+    print("scenario: единый журнал документов — регистрация, идемпотентность, отмена")
+    with tempfile.TemporaryDirectory() as tmp, _separate_base(tmp, "journal.sqlite3", ("Первая", "Вторая")) as db_path:
+        with get_conn(db_path) as conn:
+            owner = auth.create_staff(conn, "j-owner", "pass", "Журнал Владелец", "owner")
+            client_id = clients.get_or_create_by_phone(conn, "Журнал Клиент", "+380501234500", source="offline")
+            repair_id = repairs.create_repair(
+                conn, client_id, "Смартфон", "Apple", "iPhone 13", None, "экран", "offline", None, 1500, owner,
+                location_id=2, key="k-repair",
+            )
+            doc = documents.get_for(conn, "repair", repair_id)
+            check("a new repair gets its document", doc is not None and doc["status"] == "posted")
+            check("the repair document's number is the repair's own number (РК-NNN = «Ремонт №NNN»)",
+                  doc["number"] == repair_id and documents.doc_label(doc) == f"РК-{repair_id:03d}")
+            check("it records the точка, the author, the контрагент, a title and the estimate",
+                  doc["location_id"] == 2 and doc["staff_id"] == owner and doc["client_id"] == client_id
+                  and doc["title"] == "Смартфон Apple iPhone 13" and doc["amount"] == 1500
+                  and doc["location_name"] == "Вторая" and doc["client_name"] == "Журнал Клиент")
+            check("find_by_key returns it for the key it was created with",
+                  documents.find_by_key(conn, "k-repair")["id"] == doc["id"]
+                  and documents.find_by_key(conn, "no-such-key") is None and documents.find_by_key(conn, None) is None)
+            repairs.set_price(conn, repair_id, price_estimate=1500, price_final=1800)
+            check("the final price follows through to the document",
+                  documents.get_for(conn, "repair", repair_id)["amount"] == 1800)
+
+            cell_1 = inventory.create_cell(conn, "J-1", None, None, location_id=1)
+            product = inventory.create_product(conn, "Журнал Товар", "J-SKU", None, "шт", False, True, 0, 400)
+            inventory.receive_stock(conn, product, cell_1, 5, owner, key="k-in")
+            stock_doc = documents.find_by_key(conn, "k-in")
+            check("a manual «добавить остаток» is a document of its own (ОП), at the cell's точка",
+                  stock_doc["doc_type"] == "stock_in" and stock_doc["location_id"] == 1
+                  and documents.doc_label(stock_doc) == "ОП-001" and stock_doc["title"] == "Журнал Товар × 5")
+            try:
+                inventory.create_cell(conn, "J-1", None, None, location_id=2)
+                check("a duplicate cell code is a friendly DuplicateCellError, not a raw IntegrityError", False)
+            except inventory.DuplicateCellError:
+                check("a duplicate cell code is a friendly DuplicateCellError, not a raw IntegrityError", True)
+
+            sale_id = sales.create_sale(conn, client_id, "offline", owner, [(product, 2, 400)], location_id=1, key="k-sale")
+            sale_doc = documents.get_for(conn, "sale", sale_id)
+            check("a sale gets its document with the total", sale_doc["amount"] == 800 and sale_doc["doc_type"] == "sale")
+            check("the sale's own stock movement did NOT get a separate document (it belongs to the sale)",
+                  conn.execute("SELECT COUNT(*) AS n FROM documents WHERE doc_type IN ('writeoff','stock_in')").fetchone()["n"] == 1)
+
+            expense_tx = cash.record_expense(conn, "cash", 300, "rent", "аренда", owner, location_id=1, key="k-exp")
+            cash.record_adjustment(conn, 1000, "размен", owner, location_id=1)
+            exp_doc = documents.find_by_key(conn, "k-exp")
+            check("a manual expense is РКО-001, a negative amount (money out)",
+                  documents.doc_label(exp_doc) == "РКО-001" and exp_doc["amount"] == -300 and exp_doc["ref_id"] == expense_tx)
+            check("«внести» is a корректировка document (КР-001)",
+                  documents.doc_label(documents.get_for(conn, "cash_adjust", exp_doc["ref_id"] + 1)) == "КР-001")
+            check("касса of точка 1 = 800 sale − 300 expense + 1000 = 1500; точка 2's is untouched",
+                  cash.cash_balance(conn, 1) == 1500 and cash.cash_balance(conn, 2) == 0 and cash.cash_balance(conn) == 1500)
+
+            supplier_id = purchases.create_supplier(conn, "Журнал Поставщик", None)
+            receipt_id = purchases.create_receipt(conn, supplier_id, "N-1", owner, [(product, cell_1, 10, 250)], location_id=1)
+            receipt_doc = documents.get_for(conn, "receipt", receipt_id)
+            check("a приход gets its document: supplier as title, qty × cost as amount",
+                  receipt_doc["title"] == "Журнал Поставщик" and receipt_doc["amount"] == 2500)
+            return_id = purchases.create_supplier_return(conn, product, supplier_id, receipt_id, cell_1, 1, "брак", owner)
+            check("a return to the supplier gets its document (ВП)",
+                  documents.get_for(conn, "supplier_return", return_id)["doc_type"] == "supplier_return")
+
+            buyback_id = buyback.create_buyback_intake(
+                conn, client_name="Продавец", client_phone="+380501234501", device_type="Смартфон", brand=None,
+                model="A52", serial_number=None, condition_note=None, purchase_price=2000, payment_method="cash",
+                purpose="resale", resale_price=3500, staff_id=owner, photo=None, location_id=2, key="k-buy",
+            )
+            buy_doc = documents.get_for(conn, "buyback", buyback_id)
+            check("a покупка gets ONE document (ПК) — its payout and its stock-in are part of it, not documents of their own",
+                  buy_doc["amount"] == 2000 and buy_doc["location_id"] == 2
+                  and conn.execute("SELECT COUNT(*) AS n FROM documents WHERE doc_type = 'cash_out'").fetchone()["n"] == 1
+                  and conn.execute("SELECT COUNT(*) AS n FROM documents WHERE doc_type = 'stock_in'").fetchone()["n"] == 1)
+            check("the bought phone sits in точка 2's own «СКУПКА-2» cell, and the payout came out of точка 2's касса",
+                  conn.execute("SELECT code FROM storage_cells WHERE id = (SELECT cell_id FROM stock WHERE product_id = ?)",
+                               (conn.execute("SELECT product_id FROM buyback_orders WHERE id = ?", (buyback_id,)).fetchone()["product_id"],)
+                               ).fetchone()["code"] == "СКУПКА-2"
+                  and cash.cash_balance(conn, 2) == -2000)
+
+            feed = documents.list_journal(conn)
+            check("the feed holds every document, newest first",
+                  len(feed) == 8 and feed[0]["doc_type"] == "buyback" and feed[-1]["doc_type"] == "repair")
+            check("the feed filters by точка, by type and by контрагент",
+                  {d["doc_type"] for d in documents.list_journal(conn, location_id=2)} == {"repair", "buyback"}
+                  and len(documents.list_journal(conn, doc_type="sale")) == 1
+                  and {d["doc_type"] for d in documents.list_journal(conn, client_id=client_id)} == {"repair", "sale"})
+
+            # ---- cancel
+            before = len(feed)
+            for bad_reason, label in (("", "an empty reason"), ("   ", "a blank reason")):
+                try:
+                    doc_cancel.cancel_document(conn, sale_doc["id"], owner, bad_reason)
+                    check(f"cancelling with {label} is refused", False)
+                except documents.DocumentError:
+                    check(f"cancelling with {label} is refused", True)
+            try:
+                doc_cancel.cancel_document(conn, receipt_doc["id"], owner, "ошибка")
+                check("a document type with no reverser yet is refused, not half-cancelled", False)
+            except documents.DocumentError:
+                check("a document type with no reverser yet is refused, not half-cancelled", True)
+
+            stock_before = inventory.product_total_qty(conn, product, 1)
+            doc_cancel.cancel_document(conn, sale_doc["id"], owner, "пробили не тот товар")
+            cancelled = documents.get(conn, sale_doc["id"])
+            check("a cancelled sale stays in the journal, marked with reason, who and when",
+                  cancelled["status"] == "cancelled" and cancelled["cancel_reason"] == "пробили не тот товар"
+                  and cancelled["cancelled_by"] == owner and cancelled["cancelled_at"] is not None
+                  and len(documents.list_journal(conn)) == before)
+            check("its stock is back in the cell it left", inventory.product_total_qty(conn, product, 1) == stock_before + 2)
+            check("its money no longer counts: касса 1500 − 800 = 700", cash.cash_balance(conn, 1) == 700)
+            check("the sale order itself is marked cancelled and drops out of sales reports",
+                  sales.get_sale(conn, sale_id)["status"] == "cancelled"
+                  and len(sales.list_sales(conn, location_id=1, include_cancelled=False)) == 0
+                  and len(sales.list_sales(conn, location_id=1)) == 1)
+            check("the trail shows both events, in order",
+                  [e["event"] for e in documents.get_events(conn, sale_doc["id"])] == ["created", "cancelled"])
+            try:
+                doc_cancel.cancel_document(conn, sale_doc["id"], owner, "ещё раз")
+                check("cancelling twice is refused (no double stock return)", False)
+            except documents.DocumentError:
+                check("cancelling twice is refused (no double stock return)", True)
+            check("and the stock did not move a second time", inventory.product_total_qty(conn, product, 1) == stock_before + 2)
+
+            doc_cancel.cancel_document(conn, exp_doc["id"], owner, "ввели дважды")
+            check("a cancelled expense comes back into the balance (700 + 300), the row itself is kept and flagged",
+                  cash.cash_balance(conn, 1) == 1000
+                  and conn.execute("SELECT cancelled_at FROM cash_transactions WHERE id = ?", (expense_tx,)).fetchone()["cancelled_at"] is not None)
+
+        # ---- backfill: a base that had operations before the journal existed
+        with get_conn(db_path) as conn:
+            total = conn.execute("SELECT COUNT(*) AS n FROM documents").fetchone()["n"]
+            conn.execute("DELETE FROM document_events")
+            conn.execute("DELETE FROM documents")
+        init_db(db_path)
+        with get_conn(db_path) as conn:
+            rebuilt = conn.execute("SELECT COUNT(*) AS n FROM documents").fetchone()["n"]
+            check("init_db rebuilds the whole journal from the business tables (same number of documents)", rebuilt == total)
+            repair_doc = documents.get_for(conn, "repair", repair_id)
+            check("a backfilled document keeps the original date, точка and author — not «now»",
+                  repair_doc["created_at"] == repairs.get_repair(conn, repair_id)["created_at"]
+                  and repair_doc["location_id"] == 2 and repair_doc["staff_id"] == owner)
+            check("a sale that was already cancelled comes back as cancelled",
+                  documents.get_for(conn, "sale", sale_id)["status"] == "cancelled")
+        init_db(db_path)
+        with get_conn(db_path) as conn:
+            check("running it again adds nothing (idempotent)",
+                  conn.execute("SELECT COUNT(*) AS n FROM documents").fetchone()["n"] == total)
+
+
+def scenario_journal_http() -> None:
+    """Журнал, отмена and form idempotency through the real web app."""
+    print("scenario: журнал документов over HTTP — лента, фильтры, отмена, повторный сабмит")
+    with tempfile.TemporaryDirectory() as tmp, _separate_base(tmp, "journal-http.sqlite3", ("Первая", "Вторая")) as db_path:
+        with get_conn(db_path) as conn:
+            owner = auth.create_staff(conn, "jh-owner", "pass", "Владелец Журнала", "owner")
+            master = auth.create_staff(conn, "jh-master", "pass", "Мастер Журнала", "master")
+            keeper = auth.create_staff(conn, "jh-keeper", "pass", "Кладовщик", "storekeeper")
+            cell = inventory.create_cell(conn, "JH-1", None, None, location_id=1)
+            product = inventory.create_product(conn, "HTTP Товар", "JH-SKU", None, "шт", False, True, 0, 250)
+            inventory.receive_stock(conn, product, cell, 10, owner)
+        token = make_token(owner, "1")
+        token_2 = make_token(owner, "2")
+        master_token = make_token(master, "1")
+        keeper_token = make_token(keeper, "1")
+
+        import webapp.main
+
+        with TestClient(webapp.main.app) as client:
+            sales_page = client.get(f"/sales?t={token}").text
+            idem = re.search(r'name="idem" value="([0-9a-f]{32})"', sales_page)
+            check("the sale form carries a hidden idempotency token", idem is not None)
+            form = {
+                "idem": idem.group(1), "row_count": "1", "product_id_0": str(product), "product_name_0": "HTTP Товар",
+                "qty_0": "2", "price_0": "250", "channel": "offline", "payment_method": "cash",
+                "client_name": "Покупатель", "client_phone": "+380509998877",
+            }
+            first = client.post(f"/sales?t={token}", data=form, follow_redirects=False)
+            second = client.post(f"/sales?t={token}", data=form, follow_redirects=False)
+            with get_conn(db_path) as conn:
+                sale_count = conn.execute("SELECT COUNT(*) AS n FROM sales_orders").fetchone()["n"]
+                stock_left = inventory.product_total_qty(conn, product, 1)
+            check("submitting the very same form twice creates ONE sale", sale_count == 1)
+            check("the second submit lands on the first one's page instead",
+                  first.status_code == 303 and second.status_code == 303
+                  and first.headers["location"].split("?")[0] == second.headers["location"].split("?")[0])
+            check("and stock was written off once (10 − 2)", stock_left == 8)
+            form_new = dict(form, idem="f" * 32)
+            client.post(f"/sales?t={token}", data=form_new, follow_redirects=False)
+            with get_conn(db_path) as conn:
+                check("a NEW form (new token) with the same contents is a new sale — only repeats are deduplicated",
+                      conn.execute("SELECT COUNT(*) AS n FROM sales_orders").fetchone()["n"] == 2)
+
+            cash_idem = re.search(r'name="idem" value="([0-9a-f]{32})"', client.get(f"/cash?t={token}").text).group(1)
+            for _ in range(2):
+                client.post(f"/cash/expense?t={token}", data={"idem": cash_idem, "amount": "100", "category": "other", "method": "cash", "comment": "чай"})
+            adj = client.post(f"/cash/adjustment?t={token}", data={"idem": cash_idem, "amount": "40", "direction": "in"}, follow_redirects=False)
+            with get_conn(db_path) as conn:
+                check("a double-submitted expense is recorded once (500 + 500 − 100 + 40)",
+                      cash.cash_balance(conn, 1) == 940)
+            check("the same page's OTHER form (внести) is not swallowed by the expense's token", adj.status_code == 303)
+
+            check("the journal is owner/admin only (a master gets 403)", client.get(f"/journal?t={master_token}").status_code == 403)
+            check("«Ещё» shows the journal card to an owner, not to a master",
+                  "/journal" in client.get(f"/more?t={token}").text and "/journal" not in client.get(f"/more?t={master_token}").text)
+            journal = client.get(f"/journal?t={token}")
+            check("the journal lists today's documents with their labels",
+                  journal.status_code == 200 and "ПД-001" in journal.text and "ПД-002" in journal.text
+                  and "РКО-001" in journal.text and "КР-001" in journal.text and "ОП-001" in journal.text)
+            check("it shows the точка and the employee", "Первая" in journal.text and "Владелец Журнала" in journal.text)
+            only_sales = client.get(f"/journal?t={token}&doc_type=sale").text
+            check("the type filter narrows it down", "ПД-001" in only_sales and "РКО-001" not in only_sales)
+            check("the точка filter too — nothing happened at точка 2",
+                  "ПД-001" not in client.get(f"/journal?t={token}&location=2").text)
+            check("and the date filter — nothing happened in 2020",
+                  "ПД-001" not in client.get(f"/journal?t={token}&date_from=2020-01-01&date_to=2020-01-02").text)
+            check("a garbage date doesn't crash the page",
+                  client.get(f"/journal?t={token}&date_from=oops&date_to=").status_code == 200)
+
+            with get_conn(db_path) as conn:
+                sale_doc = documents.list_journal(conn, doc_type="sale")[-1]
+                stock_doc = documents.list_journal(conn, doc_type="stock_in")[0]
+            doc_page = client.get(f"/journal/{sale_doc['id']}?t={token}")
+            check("a document's page shows its trail and a cancel form",
+                  doc_page.status_code == 200 and "ПД-001" in doc_page.text and f"/journal/{sale_doc['id']}/cancel" in doc_page.text)
+            check("a document type that can't be cancelled yet says so, with no cancel form",
+                  f"/journal/{stock_doc['id']}/cancel" not in client.get(f"/journal/{stock_doc['id']}?t={token}").text)
+            no_reason = client.post(f"/journal/{sale_doc['id']}/cancel?t={token}", data={"reason": "  "})
+            check("cancelling without a reason is a friendly error", no_reason.status_code == 200 and "Укажите причину" in no_reason.text)
+            check("a master can't cancel a document (403)",
+                  client.post(f"/journal/{sale_doc['id']}/cancel?t={master_token}", data={"reason": "x"}).status_code == 403)
+            done = client.post(f"/journal/{sale_doc['id']}/cancel?t={token}", data={"reason": "ошиблись товаром"}, follow_redirects=False)
+            check("cancelling with a reason goes through", done.status_code == 303)
+            with get_conn(db_path) as conn:
+                check("stock is back (6 + 2) and the money is out of the касса (940 − 500)",
+                      inventory.product_total_qty(conn, product, 1) == 8 and cash.cash_balance(conn, 1) == 440)
+            after = client.get(f"/journal/{sale_doc['id']}?t={token}").text
+            check("the document page now shows it cancelled, with the reason, and no cancel form",
+                  "ошиблись товаром" in after and f"/journal/{sale_doc['id']}/cancel" not in after)
+            check("the sale's own page and the sales list mark it cancelled",
+                  "ошиблись товаром" in client.get(f"/sales/{sale_doc['ref_id']}?t={token}").text
+                  and "pill-cancelled" in client.get(f"/sales?t={token}").text)
+            check("the cancelled expense-free cash feed still lists the sale's income, flagged",
+                  "pill-cancelled" in client.get(f"/cash?t={token}").text)
+            check("an unknown document id just goes back to the journal",
+                  client.get(f"/journal/999999?t={token}", follow_redirects=False).status_code == 303)
+
+            # ---- per-точка stock on the shared catalog
+            check("точка 1 sees its stock of the shared product", "8 шт" in client.get(f"/inventory/products?t={token}").text)
+            check("точка 2 sees the same product with nothing in stock",
+                  "HTTP Товар" in client.get(f"/inventory/products?t={token_2}").text
+                  and "0 шт" in client.get(f"/inventory/products?t={token_2}").text)
+            check("точка 2's cell list doesn't show точка 1's cell", "JH-1" not in client.get(f"/inventory/cells?t={token_2}").text)
+            dup = client.post(f"/inventory/cells?t={keeper_token}", data={"code": "JH-1", "zone": "", "note": ""})
+            check("creating a cell with a taken code is a friendly error, not a 500",
+                  dup.status_code == 200 and "уже есть" in dup.text)
+
+            # ---- one phone = one контрагент
+            taken = client.post(f"/clients?t={token}", data={"name": "Двойник", "phone": "0509998877", "notes": ""})
+            check("a second client card with an existing phone is refused with the existing client's name",
+                  taken.status_code == 200 and "уже есть" in taken.text and "Покупатель" in taken.text)
+
+            # ---- master's точка
+            client.post(f"/masters?t={token}", data={"name": "Мастер Со Второй", "location_id": "2", "pay_type": "", "pay_value": ""})
+            with get_conn(db_path) as conn:
+                row = conn.execute("SELECT * FROM staff WHERE name = 'Мастер Со Второй'").fetchone()
+            check("a master can be tied to a точка from the Мастера form", row is not None and row["location_id"] == 2)
+
+
+def scenario_merge_stores_tool() -> None:
+    """tools/merge_stores.py — the one-off that folds the per-store files
+    into one base. Rebuilds the pre-merge layout (a main base with data and
+    no locations table, two empty store files with only the owner and a
+    name, a stores.json) and runs the real script against it."""
+    print("scenario: перенос трёх баз в одну (tools/merge_stores.py)")
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "merge_stores", os.path.join(os.path.dirname(__file__), "tools", "merge_stores.py"))
+    merge_stores = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(merge_stores)
+
+    def _to_old_layout(path: str, name: str, sales_channel: str | None = None) -> None:
+        with get_conn(path) as conn:
+            conn.execute("UPDATE store_settings SET name = ?, sales_channel = ? WHERE id = 1", (name, sales_channel))
+            for table in ("document_events", "documents", "warehouses", "locations"):
+                conn.execute(f"DROP TABLE {table}")
+
+    prev_db, prev_config, prev_argv = os.environ["CRM_DB_PATH"], os.environ.get("CRM_STORES_CONFIG"), sys.argv
+    with tempfile.TemporaryDirectory() as tmp:
+        main_db, db2, db3 = (os.path.join(tmp, n) for n in ("crm.sqlite3", "store2.sqlite3", "store3.sqlite3"))
+        try:
+            for path in (main_db, db2, db3):
+                init_db(path)
+                with get_conn(path) as conn:
+                    auth.create_staff(conn, "owner", "pass", "Павел", "owner")
+                    auth.link_staff_telegram(conn, "owner", 1417)
+            with get_conn(main_db) as conn:
+                owner = auth.get_staff_by_login(conn, "owner")["id"]
+                client_id = clients.get_or_create_by_phone(conn, "Старый Клиент", "+380500000001", source="offline")
+                repair_id = repairs.create_repair(conn, client_id, "Смартфон", None, "A12", None, "звук", "offline", None, 700, owner)
+                cell = inventory.create_cell(conn, "OLD-1", None, None)
+                conn.execute("UPDATE storage_cells SET warehouse_id = NULL")
+                conn.execute("UPDATE repair_orders SET location_id = NULL")
+            _to_old_layout(main_db, "007", "@OO7servis")
+            _to_old_layout(db2, "Гибрид сервис")
+            _to_old_layout(db3, "Магазин")
+
+            config = os.path.join(tmp, "stores.json")
+            with open(config, "w", encoding="utf-8") as f:
+                json.dump([
+                    {"id": "1", "name": "Магазин 1", "db_path": main_db, "staff_group_chat_id": -1001,
+                     "repair_topic_id": 5, "sales_topic_id": 121, "masters_group_chat_id": -1002},
+                    {"id": "2", "name": "Магазин 2", "db_path": db2, "staff_group_chat_id": None},
+                    {"id": "3", "name": "Магазин 3", "db_path": db3},
+                ], f)
+            os.environ["CRM_STORES_CONFIG"] = config
+
+            sys.argv = ["merge_stores.py"]
+            merge_stores.main()
+            with get_conn(main_db) as conn:
+                check("a dry run changes nothing (no locations table yet)",
+                      conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'locations'").fetchone() is None)
+
+            sys.argv = ["merge_stores.py", "--apply"]
+            merge_stores.main()
+            os.environ["CRM_DB_PATH"] = main_db
+            merged = stores.load_stores()
+            check("all three точки are in the one base, under the names their owners gave them",
+                  [(s.id, s.name) for s in merged] == [("1", "007"), ("2", "Гибрид сервис"), ("3", "Магазин")])
+            check("точка 1 kept its Telegram groups and topics from stores.json",
+                  merged[0].staff_group_chat_id == -1001 and merged[0].repair_topic_id == 5
+                  and merged[0].sales_topic_id == 121 and merged[0].masters_group_chat_id == -1002
+                  and stores.store_for_chat_id(-1002).id == "1")
+            with get_conn(main_db) as conn:
+                check("точка 1 kept its sales channel", store_settings.get_settings(conn, 1)["sales_channel"] == "@OO7servis")
+                check("the existing repair now belongs to точка 1 and is in the journal as РК-NNN",
+                      repairs.get_repair(conn, repair_id)["location_id"] == 1
+                      and documents.doc_label(documents.get_for(conn, "repair", repair_id)) == f"РК-{repair_id:03d}")
+                check("the existing cell now belongs to точка 1's склад",
+                      [c["id"] for c in inventory.list_cells(conn, 1)] == [cell] and inventory.list_cells(conn, 2) == [])
+                check("each точка has its склад",
+                      conn.execute("SELECT COUNT(*) AS n FROM warehouses WHERE kind = 'point'").fetchone()["n"] == 3)
+            check("the owner — one staff row — can now work in all three",
+                  [s.id for s, _ in store_access.accessible_stores(1417)] == ["1", "2", "3"])
+
+            merge_stores.main()
+            check("running it a second time changes nothing", len(stores.load_stores()) == 3)
+
+            # A store file that isn't empty must stop the merge, not lose data.
+            with get_conn(db2) as conn:
+                conn.execute("INSERT INTO clients (name, phone) VALUES ('Забытый', '+380500000099')")
+            try:
+                merge_stores.main()
+                check("a store file that still holds data stops the merge", False)
+            except SystemExit as exc:
+                check("a store file that still holds data stops the merge", "СТОП" in str(exc))
+        finally:
+            sys.argv = prev_argv
+            os.environ["CRM_DB_PATH"] = prev_db
             if prev_config is None:
                 os.environ.pop("CRM_STORES_CONFIG", None)
             else:
@@ -3573,6 +3847,9 @@ def main() -> None:
     scenario_store_settings_http()
     scenario_all_stores_report_http()
     scenario_sales_channel_http()
+    scenario_documents_journal()
+    scenario_journal_http()
+    scenario_merge_stores_tool()
     if os.path.exists(_WEBAPP_TEST_DB):
         os.remove(_WEBAPP_TEST_DB)
 

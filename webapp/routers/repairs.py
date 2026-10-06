@@ -12,13 +12,14 @@ from core import auth as core_auth
 from core import cash as core_cash
 from core import clients as core_clients
 from core import device_catalog
+from core import documents as core_documents
 from core import inventory as core_inventory
 from core import notify as core_notify
 from core import repairs as core_repairs
 from core import vision_ocr
 from core.inventory import InsufficientStockError
 from core.storage import get_conn
-from webapp.deps import link, optional_int, require_role, require_staff
+from webapp.deps import idem_key, link, loc, optional_int, require_role, require_staff
 from webapp.templating import render
 
 router = APIRouter(prefix="/repairs")
@@ -85,13 +86,13 @@ async def scan_device_view(photo: UploadFile = File(...), staff=Depends(require_
 @router.get("")
 def list_view(request: Request, status: str | None = None, staff=Depends(require_staff)):
     with get_conn() as conn:
-        ctx = _list_context(conn, status)
+        ctx = _list_context(conn, status, loc(request))
     return render(request, "repairs_list.html", staff=staff, **ctx)
 
 
-def _list_context(conn, status: str | None) -> dict:
+def _list_context(conn, status: str | None, location_id: int | None = None) -> dict:
     return {
-        "repairs": core_repairs.list_repairs(conn, status=status),
+        "repairs": core_repairs.list_repairs(conn, status=status, location_id=location_id),
         "status": status,
         "masters": core_auth.list_staff(conn),
         "statuses": core_repairs.STATUSES,
@@ -122,7 +123,7 @@ async def create_view(
 
     if not client_name or not client_phone:
         with get_conn() as conn:
-            ctx = _list_context(conn, None)
+            ctx = _list_context(conn, None, loc(request))
         return render(request, "repairs_list.html", staff=staff, error="Заполните имя и телефон клиента.", **ctx)
 
     devices = []
@@ -139,7 +140,7 @@ async def create_view(
 
         if not device_type:
             with get_conn() as conn:
-                ctx = _list_context(conn, None)
+                ctx = _list_context(conn, None, loc(request))
             return render(
                 request, "repairs_list.html", staff=staff,
                 error=f"Укажите тип устройства для каждого добавленного устройства (устройство {i + 1}).", **ctx,
@@ -147,7 +148,7 @@ async def create_view(
 
         if not model:
             with get_conn() as conn:
-                ctx = _list_context(conn, None)
+                ctx = _list_context(conn, None, loc(request))
             return render(
                 request, "repairs_list.html", staff=staff,
                 error=f"Укажите модель устройства для каждого добавленного устройства (устройство {i + 1}).", **ctx,
@@ -155,7 +156,7 @@ async def create_view(
 
         if not defect_description:
             with get_conn() as conn:
-                ctx = _list_context(conn, None)
+                ctx = _list_context(conn, None, loc(request))
             return render(
                 request, "repairs_list.html", staff=staff,
                 error=f"Опишите неисправность для каждого добавленного устройства (устройство {i + 1}).", **ctx,
@@ -165,12 +166,12 @@ async def create_view(
             photo = await _validate_intake_photo(form.get(f"photo_{i}"))
         except ValueError as exc:
             with get_conn() as conn:
-                ctx = _list_context(conn, None)
+                ctx = _list_context(conn, None, loc(request))
             return render(request, "repairs_list.html", staff=staff, error=str(exc), **ctx)
 
         if not photo:
             with get_conn() as conn:
-                ctx = _list_context(conn, None)
+                ctx = _list_context(conn, None, loc(request))
             return render(
                 request, "repairs_list.html", staff=staff,
                 error=f"Загрузите фото устройства для каждого добавленного устройства (устройство {i + 1}).", **ctx,
@@ -184,13 +185,19 @@ async def create_view(
 
     if not devices:
         with get_conn() as conn:
-            ctx = _list_context(conn, None)
+            ctx = _list_context(conn, None, loc(request))
         return render(request, "repairs_list.html", staff=staff, error="Добавьте хотя бы одно устройство.", **ctx)
 
     last_order_id = None
     store = request.state.store
+    idem = form.get("idem")
     with get_conn() as conn:
-        for device in devices:
+        # A repeat of a submit that already went through (see
+        # webapp.deps.idem_key) — land on what it created, create nothing.
+        already = core_documents.find_by_key(conn, idem_key("repair", f"{idem}:0" if idem else None))
+        if already:
+            return RedirectResponse(link(request, f"/repairs/{already['ref_id']}"), status_code=303)
+        for index, device in enumerate(devices):
             # core_repairs.create_repair_intake does the client/repair/photo/
             # catalog writes (shared with the bot's quick-intake FSM — see
             # its own docstring). Not threadpooled: it needs `conn`, which
@@ -204,6 +211,7 @@ async def create_view(
                 serial_number=device["serial_number"], defect_description=device["defect_description"],
                 channel=channel, master_id=optional_int(master_id), price_estimate=device["price_estimate"],
                 staff_id=staff["id"], photo=device["photo"],
+                location_id=store.location_id, key=idem_key("repair", f"{idem}:{index}" if idem else None),
             )
 
             # The card only goes out once its device is fully on record —
@@ -220,7 +228,7 @@ async def create_view(
     return RedirectResponse(link(request, f"/repairs/{last_order_id}"), status_code=303)
 
 
-def _detail_context(conn, order_id: int) -> dict:
+def _detail_context(conn, order_id: int, location_id: int | None = None) -> dict:
     return {
         "repair": core_repairs.get_repair(conn, order_id),
         "history": core_repairs.get_status_history(conn, order_id),
@@ -228,7 +236,9 @@ def _detail_context(conn, order_id: int) -> dict:
         "attachments": core_repairs.get_attachments(conn, order_id),
         "masters": core_auth.list_staff(conn),
         "products": core_inventory.list_products(conn),
-        "cells": core_inventory.list_cells(conn),
+        "cells": core_inventory.list_cells(conn, location_id),
+        "document": (document := core_documents.get_for(conn, "repair", order_id)),
+        "document_label": core_documents.doc_label(document) if document else None,
         "statuses": core_repairs.STATUSES,
         "status_labels": core_repairs.STATUS_LABELS,
     }
@@ -237,7 +247,7 @@ def _detail_context(conn, order_id: int) -> dict:
 @router.get("/{order_id}")
 def detail_view(request: Request, order_id: int, staff=Depends(require_staff)):
     with get_conn() as conn:
-        ctx = _detail_context(conn, order_id)
+        ctx = _detail_context(conn, order_id, loc(request))
     if not ctx["repair"]:
         return RedirectResponse(link(request, "/repairs"), status_code=303)
     return render(request, "repair_detail.html", staff=staff, **ctx)
@@ -259,7 +269,7 @@ def status_view(
         becoming_issued = status == "issued" and current["status"] != "issued"
 
         if becoming_issued and current["price_final"] and payment_method not in core_cash.METHODS:
-            ctx = _detail_context(conn, order_id)
+            ctx = _detail_context(conn, order_id, loc(request))
             return render(
                 request, "repair_detail.html", staff=staff,
                 error="Укажите способ оплаты, чтобы отметить ремонт как «Выдан».", **ctx,
@@ -269,7 +279,12 @@ def status_view(
         repair = core_repairs.get_repair(conn, order_id)
 
         if becoming_issued and current["price_final"]:
-            core_cash.record_income(conn, payment_method, current["price_final"], "repair_order", order_id, staff["id"])
+            # Money lands in the касса of the точка that took the repair in,
+            # whichever точка the person pressing «Выдан» is looking at.
+            core_cash.record_income(
+                conn, payment_method, current["price_final"], "repair_order", order_id, staff["id"],
+                location_id=current["location_id"],
+            )
 
         messages = core_repairs.get_order_messages(conn, order_id)
 
@@ -354,7 +369,7 @@ def add_part_view(
     with get_conn() as conn:
         pid, cid, q = optional_int(product_id), optional_int(cell_id), optional_int(qty)
         if not pid or not cid or not q:
-            ctx = _detail_context(conn, order_id)
+            ctx = _detail_context(conn, order_id, loc(request))
             return render(request, "repair_detail.html", staff=staff, error="Выберите товар, ячейку и количество.", **ctx)
         try:
             core_inventory.record_movement(
@@ -362,7 +377,7 @@ def add_part_view(
                 from_cell_id=cid, ref_type="repair_order", ref_id=order_id,
             )
         except InsufficientStockError as exc:
-            ctx = _detail_context(conn, order_id)
+            ctx = _detail_context(conn, order_id, loc(request))
             return render(request, "repair_detail.html", staff=staff, error=str(exc), **ctx)
     store = request.state.store
     channel_posts.sync_products([pid], store.id, store.db_path)

@@ -9,6 +9,7 @@
 <datalist id="deviceBrandList">{% for b in device_brands %}<option value="{{ b }}">{% endfor %}</datalist>
 
 <form method="post" action="{{ link('/repairs') }}" class="edit-form" enctype="multipart/form-data" id="repairIntakeForm">
+  <input type="hidden" name="idem" value="{{ idem }}">
   <label>{{ t('client_name_label') }}<span class="required-mark">*</span><input type="text" name="client_name" required></label>
   <label>{{ t('client_phone_label') }}<span class="required-mark">*</span><input type="text" name="client_phone" value="+380" required></label>
   <label>{{ t('channel_label') }}

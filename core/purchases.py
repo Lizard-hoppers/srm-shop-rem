@@ -7,7 +7,9 @@ from __future__ import annotations
 import json
 import sqlite3
 
-from core.inventory import record_movement
+from core import documents as _documents
+from core import locations as _locations
+from core.inventory import cell_location_id, record_movement
 
 
 def list_suppliers(conn: sqlite3.Connection) -> list[sqlite3.Row]:
@@ -20,20 +22,30 @@ def create_supplier(conn: sqlite3.Connection, name: str, contact: str | None) ->
     ).lastrowid
 
 
+def _supplier(conn: sqlite3.Connection, supplier_id: int | None) -> sqlite3.Row | None:
+    if not supplier_id:
+        return None
+    return conn.execute("SELECT * FROM suppliers WHERE id = ?", (supplier_id,)).fetchone()
+
+
 def create_receipt(
     conn: sqlite3.Connection,
     supplier_id: int | None,
     invoice_no: str | None,
     staff_id: int,
     items: list[tuple[int, int, int, int | None]],
+    *,
+    location_id: int | None = None,
+    key: str | None = None,
 ) -> int:
     """items: list of (product_id, cell_id, qty, unit_cost)."""
     if not items:
         raise ValueError("нужна хотя бы одна позиция в приходе")
+    location_id = _locations.resolve(conn, location_id)
 
     receipt_id = conn.execute(
-        "INSERT INTO goods_receipts (supplier_id, invoice_no, staff_id) VALUES (?, ?, ?)",
-        (supplier_id, invoice_no, staff_id),
+        "INSERT INTO goods_receipts (supplier_id, invoice_no, staff_id, location_id) VALUES (?, ?, ?, ?)",
+        (supplier_id, invoice_no, staff_id, location_id),
     ).lastrowid
 
     for product_id, cell_id, qty, unit_cost in items:
@@ -46,18 +58,28 @@ def create_receipt(
             to_cell_id=cell_id, ref_type="goods_receipt", ref_id=receipt_id,
         )
 
+    supplier = _supplier(conn, supplier_id)
+    total = sum(qty * (unit_cost or 0) for _product_id, _cell_id, qty, unit_cost in items)
+    _documents.register(
+        conn, "receipt", staff_id=staff_id, location_id=location_id,
+        client_id=supplier["client_id"] if supplier else None,
+        ref_table="goods_receipts", ref_id=receipt_id, title=supplier["name"] if supplier else None,
+        amount=total or None, key=key,
+    )
     return receipt_id
 
 
-def list_receipts(conn: sqlite3.Connection, limit: int = 100) -> list[sqlite3.Row]:
+def list_receipts(conn: sqlite3.Connection, limit: int = 100, location_id: int | None = None) -> list[sqlite3.Row]:
+    where, params = ("WHERE goods_receipts.location_id = ?", [location_id]) if location_id is not None else ("", [])
     return conn.execute(
-        """SELECT goods_receipts.*, suppliers.name AS supplier_name, staff.name AS staff_name
-           FROM goods_receipts
-           LEFT JOIN suppliers ON suppliers.id = goods_receipts.supplier_id
-           LEFT JOIN staff ON staff.id = goods_receipts.staff_id
-           ORDER BY goods_receipts.created_at DESC
-           LIMIT ?""",
-        (limit,),
+        f"""SELECT goods_receipts.*, suppliers.name AS supplier_name, staff.name AS staff_name
+            FROM goods_receipts
+            LEFT JOIN suppliers ON suppliers.id = goods_receipts.supplier_id
+            LEFT JOIN staff ON staff.id = goods_receipts.staff_id
+            {where}
+            ORDER BY goods_receipts.created_at DESC
+            LIMIT ?""",
+        [*params, limit],
     ).fetchall()
 
 
@@ -111,6 +133,8 @@ def create_supplier_return(
     qty: int,
     reason: str | None,
     staff_id: int,
+    *,
+    key: str | None = None,
 ) -> int:
     """Logs a defective-stock return to whichever supplier delivered it
     and writes off the qty from the cell via the normal stock ledger
@@ -127,6 +151,14 @@ def create_supplier_return(
         conn, product_id, qty, "adjustment", staff_id,
         from_cell_id=cell_id, ref_type="supplier_return", ref_id=return_id,
         comment=f"Возврат поставщику: {reason}" if reason else "Возврат поставщику",
+    )
+    supplier = _supplier(conn, supplier_id)
+    product = conn.execute("SELECT name FROM products WHERE id = ?", (product_id,)).fetchone()
+    _documents.register(
+        conn, "supplier_return", staff_id=staff_id, location_id=cell_location_id(conn, cell_id),
+        client_id=supplier["client_id"] if supplier else None,
+        ref_table="supplier_returns", ref_id=return_id,
+        title=f"{product['name']} × {qty}" if product else None, key=key,
     )
     return return_id
 

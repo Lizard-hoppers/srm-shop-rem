@@ -24,6 +24,8 @@ import uuid
 
 from core import cash as _cash
 from core import clients as _clients
+from core import documents as _documents
+from core import locations as _locations
 from core import inventory as _inventory
 from core import photos as _photos
 
@@ -34,7 +36,9 @@ PHOTO_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "webapp", "
 _BUYBACK_CELL_CODE = "СКУПКА"
 
 
-def list_buyback_orders(conn: sqlite3.Connection, purpose: str | None = None) -> list[sqlite3.Row]:
+def list_buyback_orders(
+    conn: sqlite3.Connection, purpose: str | None = None, location_id: int | None = None
+) -> list[sqlite3.Row]:
     query = """SELECT buyback_orders.*, clients.name AS client_name, clients.phone AS client_phone,
                       staff.name AS staff_name
                FROM buyback_orders
@@ -45,6 +49,9 @@ def list_buyback_orders(conn: sqlite3.Connection, purpose: str | None = None) ->
     if purpose:
         query += " AND buyback_orders.purpose = ?"
         params.append(purpose)
+    if location_id is not None:
+        query += " AND buyback_orders.location_id = ?"
+        params.append(location_id)
     query += " ORDER BY buyback_orders.created_at DESC"
     return conn.execute(query, params).fetchall()
 
@@ -72,15 +79,23 @@ def write_buyback_photo(order_id: int, data: bytes, ext: str) -> str:
     return filename
 
 
-def _get_or_create_buyback_cell(conn: sqlite3.Connection) -> int:
-    """Every purpose='resale' item lands in one fixed cell — staff never
-    has to pick one at buyback intake (keeps the form short); if the shop
-    wants it shelved somewhere specific, that's an ordinary Перемещение
-    (core.inventory.transfer_stock) afterward, same as any other product."""
-    row = conn.execute("SELECT id FROM storage_cells WHERE code = ?", (_BUYBACK_CELL_CODE,)).fetchone()
+def _get_or_create_buyback_cell(conn: sqlite3.Connection, location_id: int) -> int:
+    """Every purpose='resale' item lands in one fixed cell of the точка
+    that bought it — staff never has to pick one at buyback intake (keeps
+    the form short); if the shop wants it shelved somewhere specific,
+    that's an ordinary Перемещение (core.inventory.transfer_stock)
+    afterward, same as any other product. Cell codes are unique across the
+    whole business, so every точка past the first gets its number in the
+    code («СКУПКА-2»)."""
+    code = _BUYBACK_CELL_CODE
+    if location_id != _locations.default_location_id(conn):
+        code = f"{_BUYBACK_CELL_CODE}-{location_id}"
+    row = conn.execute("SELECT id FROM storage_cells WHERE code = ?", (code,)).fetchone()
     if row:
         return row["id"]
-    return _inventory.create_cell(conn, _BUYBACK_CELL_CODE, None, "Автоячейка для техники, скупленной на продажу")
+    return _inventory.create_cell(
+        conn, code, None, "Автоячейка для техники, скупленной на продажу", location_id=location_id
+    )
 
 
 def create_buyback_intake(
@@ -99,6 +114,8 @@ def create_buyback_intake(
     resale_price: int | None,
     staff_id: int,
     photo: tuple[bytes, str] | None,
+    location_id: int | None = None,
+    key: str | None = None,
 ) -> int:
     """One client (reused by phone, or created) + one buyback_orders row +
     a cash expense for the price paid to the client + (only if
@@ -110,13 +127,16 @@ def create_buyback_intake(
     if purpose == "resale" and not resale_price:
         raise ValueError("для «На продажу» нужна цена продажи")
 
+    location_id = _locations.resolve(conn, location_id)
     client_id = _clients.get_or_create_by_phone(conn, client_name, client_phone, source="offline")
 
     order_id = conn.execute(
         """INSERT INTO buyback_orders
-           (client_id, device_type, brand, model, serial_number, condition_note, purchase_price, purpose, staff_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (client_id, device_type, brand, model, serial_number, condition_note, purchase_price, purpose, staff_id),
+           (client_id, device_type, brand, model, serial_number, condition_note, purchase_price, purpose,
+            staff_id, location_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (client_id, device_type, brand, model, serial_number, condition_note, purchase_price, purpose,
+         staff_id, location_id),
     ).lastrowid
 
     photo_filename = None
@@ -128,7 +148,7 @@ def create_buyback_intake(
     device_label = " ".join(b for b in (device_type, brand, model) if b)
     _cash.record_expense(
         conn, payment_method, purchase_price, "buyback", f"Скупка №{order_id}: {device_label}", staff_id,
-        ref_type="buyback_order", ref_id=order_id,
+        ref_type="buyback_order", ref_id=order_id, location_id=location_id,
     )
 
     if purpose == "resale":
@@ -139,8 +159,18 @@ def create_buyback_intake(
         )
         if photo_filename:
             _inventory.set_product_photo(conn, product_id, photo_filename)
-        cell_id = _get_or_create_buyback_cell(conn)
-        _inventory.receive_stock(conn, product_id, cell_id, 1, staff_id, comment=f"Скупка №{order_id}")
+        cell_id = _get_or_create_buyback_cell(conn, location_id)
+        # record_movement directly, tagged with this покупка — not
+        # receive_stock, which is the MANUAL «оприходование» and would
+        # put a second, separate document into the journal for it.
+        _inventory.record_movement(
+            conn, product_id, 1, "receipt", staff_id, to_cell_id=cell_id,
+            ref_type="buyback_order", ref_id=order_id, comment=f"Скупка №{order_id}",
+        )
         conn.execute("UPDATE buyback_orders SET product_id = ? WHERE id = ?", (product_id, order_id))
 
+    _documents.register(
+        conn, "buyback", staff_id=staff_id, location_id=location_id, client_id=client_id,
+        ref_table="buyback_orders", ref_id=order_id, title=device_label, amount=purchase_price, key=key,
+    )
     return order_id
