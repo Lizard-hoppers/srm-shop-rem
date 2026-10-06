@@ -9,10 +9,12 @@ from fastapi.responses import JSONResponse, RedirectResponse, Response
 
 from core import barcode_label
 from core import barcode_scan
+from core import channel_posts
 from core import inventory as core_inventory
 from core import photos as core_photos
 from core import print_queue
 from core import purchases as core_purchases
+from core import store_settings as core_store_settings
 from core import vision_ocr
 from core.inventory import InsufficientStockError
 from core.storage import get_conn
@@ -129,6 +131,17 @@ def _product_detail_context(conn, product_id: int) -> dict | None:
         "receipt_history": core_purchases.list_receipts_for_product(conn, product_id),
         "suppliers": core_purchases.list_suppliers(conn),
         "returns": core_purchases.list_supplier_returns(conn, product_id=product_id),
+        **_channel_context(conn, product_id),
+    }
+
+
+def _channel_context(conn, product_id: int) -> dict:
+    """The «Канал продаж» block of the product card (core.channel_posts)."""
+    post = channel_posts.get_active_post(conn, product_id)
+    return {
+        "sales_channel": core_store_settings.get_settings(conn)["sales_channel"],
+        "channel_post": post,
+        "channel_post_url": channel_posts.post_url(post) if post else None,
     }
 
 
@@ -233,6 +246,7 @@ def product_supplier_return_view(
         if error:
             ctx = _product_detail_context(conn, product_id)
             return render(request, "inventory_product_detail.html", staff=staff, error=error, **ctx)
+    _sync_channel(request, product_id)
     return RedirectResponse(link(request, f"/inventory/products/{product_id}"), status_code=303)
 
 
@@ -260,6 +274,62 @@ def product_edit_view(
             unit=unit.strip() or "шт", is_repair_part=is_repair_part, is_sellable=is_sellable,
             min_qty=optional_int(min_qty) or 0, price=optional_int(price),
         )
+    _sync_channel(request, product_id)  # a new name/price shows up on the live channel card too
+    return RedirectResponse(link(request, f"/inventory/products/{product_id}"), status_code=303)
+
+
+def _sync_channel(request: Request, product_id: int) -> None:
+    """Refresh/take down this product's sales-channel card after a change
+    that's already committed — see core.channel_posts.sync_product."""
+    store = request.state.store
+    channel_posts.sync_products([product_id], store.id, store.db_path)
+
+
+@router.post("/products/{product_id}/channel/publish")
+def product_channel_publish_view(
+    request: Request, product_id: int, description: str = Form(""),
+    staff=Depends(require_role(*_STOCK_WRITE_ROLES)),
+):
+    """«Выставить в канал» on the product card. The description typed
+    here is saved on the product either way, so a failed publish (bot not
+    yet an admin of the channel, say) doesn't lose the text."""
+    with get_conn() as conn:
+        if not core_inventory.get_product(conn, product_id):
+            return RedirectResponse(link(request, "/inventory/products"), status_code=303)
+        core_inventory.set_product_description(conn, product_id, description)
+        try:
+            channel_posts.publish(conn, product_id, request.state.store.id, staff["id"])
+        except channel_posts.ChannelPostError as exc:
+            ctx = _product_detail_context(conn, product_id)
+            return render(request, "inventory_product_detail.html", staff=staff, error=str(exc), **ctx)
+    return RedirectResponse(link(request, f"/inventory/products/{product_id}"), status_code=303)
+
+
+@router.post("/products/{product_id}/channel/update")
+def product_channel_update_view(
+    request: Request, product_id: int, description: str = Form(""),
+    staff=Depends(require_role(*_STOCK_WRITE_ROLES)),
+):
+    """Edit the description of an already-published card in place."""
+    with get_conn() as conn:
+        if not core_inventory.get_product(conn, product_id):
+            return RedirectResponse(link(request, "/inventory/products"), status_code=303)
+        core_inventory.set_product_description(conn, product_id, description)
+    _sync_channel(request, product_id)
+    return RedirectResponse(link(request, f"/inventory/products/{product_id}"), status_code=303)
+
+
+@router.post("/products/{product_id}/channel/unpublish")
+def product_channel_unpublish_view(
+    request: Request, product_id: int, staff=Depends(require_role(*_STOCK_WRITE_ROLES)),
+):
+    with get_conn() as conn:
+        if not channel_posts.unpublish(conn, product_id):
+            ctx = _product_detail_context(conn, product_id)
+            return render(
+                request, "inventory_product_detail.html", staff=staff,
+                error="Не удалось снять карточку с канала — проверьте права бота в канале.", **ctx,
+            )
     return RedirectResponse(link(request, f"/inventory/products/{product_id}"), status_code=303)
 
 
@@ -378,6 +448,7 @@ def movements_writeoff(
         except InsufficientStockError as exc:
             ctx = _movements_context(conn)
             return render(request, "inventory_movements.html", staff=staff, error=str(exc), **ctx)
+    _sync_channel(request, pid)
     return RedirectResponse(link(request, "/inventory/movements"), status_code=303)
 
 

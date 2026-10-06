@@ -140,6 +140,34 @@
   <button type="submit" class="secondary">{{ t('add_to_stock_btn') }}</button>
 </form>
 
+<h2>{{ t('channel_section_title') }}</h2>
+{% if not sales_channel %}
+<p class="meta">{{ t('channel_not_configured') }} <a href="{{ link('/store/settings') }}">{{ t('more_store_settings') }}</a></p>
+{% elif channel_post %}
+<p class="meta">
+  ✅ {{ t('channel_published_at') }} {{ channel_post.created_at | kyiv }} · {{ sales_channel }}
+  {% if channel_post_url %}· <a href="{{ channel_post_url }}" target="_blank" rel="noopener">{{ t('channel_open_post') }}</a>{% endif %}
+</p>
+<p class="meta">{{ t('channel_auto_remove_hint') }}</p>
+<form method="post" action="{{ link('/inventory/products/' ~ product.id ~ '/channel/update') }}" class="edit-form">
+  <label>{{ t('channel_description_label') }}
+    <textarea name="description" rows="4" placeholder="{{ t('channel_description_placeholder') }}">{{ product.description or '' }}</textarea>
+  </label>
+  <button type="submit" class="secondary">{{ t('channel_update_btn') }}</button>
+</form>
+<form method="post" action="{{ link('/inventory/products/' ~ product.id ~ '/channel/unpublish') }}" class="edit-form">
+  <button type="submit" class="danger">{{ t('channel_unpublish_btn') }}</button>
+</form>
+{% else %}
+<p class="meta">{{ t('channel_publish_hint') }} {{ sales_channel }}</p>
+<form method="post" action="{{ link('/inventory/products/' ~ product.id ~ '/channel/publish') }}" class="edit-form">
+  <label>{{ t('channel_description_label') }}
+    <textarea name="description" rows="4" placeholder="{{ t('channel_description_placeholder') }}">{{ product.description or '' }}</textarea>
+  </label>
+  <button type="submit">{{ t('channel_publish_btn') }}</button>
+</form>
+{% endif %}
+
 <h2>{{ t('suppliers_section_title') }}</h2>
 <p class="meta">{{ t('suppliers_section_hint') }}</p>
 <div class="table-scroll">

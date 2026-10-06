@@ -32,6 +32,9 @@ class StoreConfig:
     staff_group_chat_id: int | None = None
     repair_topic_id: int | None = None
     masters_group_chat_id: int | None = None
+    # Forum topic of the staff group for «Купить» leads from the sales
+    # channel (bot/channel_orders.py); None -> the group's General feed.
+    sales_topic_id: int | None = None
 
 
 def _optional_int(value) -> int | None:
@@ -76,6 +79,7 @@ def load_stores() -> list[StoreConfig]:
                 staff_group_chat_id=_optional_int(entry.get("staff_group_chat_id")),
                 repair_topic_id=_optional_int(entry.get("repair_topic_id")),
                 masters_group_chat_id=_optional_int(entry.get("masters_group_chat_id")),
+                sales_topic_id=_optional_int(entry.get("sales_topic_id")),
             )
         )
     if not stores:

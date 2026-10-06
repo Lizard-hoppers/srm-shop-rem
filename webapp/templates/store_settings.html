@@ -9,6 +9,8 @@
   <label>{{ t('store_settings_address') }}<input type="text" name="address" value="{{ settings.address or '' }}"></label>
   <label>{{ t('store_settings_phone') }}<input type="text" name="phone" value="{{ settings.phone or '' }}"></label>
   <label>{{ t('store_settings_hours') }}<input type="text" name="working_hours" value="{{ settings.working_hours or '' }}"></label>
+  <label>{{ t('store_settings_sales_channel') }}<input type="text" name="sales_channel" value="{{ settings.sales_channel or '' }}" placeholder="@my_shop_channel"></label>
+  <p class="meta">{{ t('store_settings_sales_channel_hint') }}</p>
   <button type="submit">{{ t('store_settings_save') }}</button>
 </form>
 {% endblock %}

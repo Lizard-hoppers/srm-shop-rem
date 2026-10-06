@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import RedirectResponse
 
 from core import cash as core_cash
+from core import channel_posts
 from core import clients as core_clients
 from core import inventory as core_inventory
 from core import sales as core_sales
@@ -99,6 +101,13 @@ async def create_view(request: Request, staff=Depends(require_staff)):
         except InsufficientStockError as exc:
             ctx = _list_context(conn)
             return render(request, "sales_list.html", staff=staff, error=str(exc), **ctx)
+    # Sold out -> the bot takes the product's card off the sales channel
+    # (core.channel_posts). After the sale's own commit, and threadpooled:
+    # it's blocking httpx to Telegram, this is an async route.
+    store = request.state.store
+    await run_in_threadpool(
+        channel_posts.sync_products, [product_id for product_id, _qty, _price in items], store.id, store.db_path
+    )
     return RedirectResponse(link(request, f"/sales/{order_id}"), status_code=303)
 
 

@@ -30,3 +30,27 @@ def update_settings(
             (working_hours or "").strip() or None,
         ),
     )
+
+
+def normalize_sales_channel(value: str | None) -> str | None:
+    """What staff type into Кабинет магазина -> what the Bot API accepts as
+    chat_id: a public channel's @username (also accepted pasted as a
+    t.me/... link or without the @), or a private channel's numeric
+    -100... id. Empty -> None (channel publishing off for this store)."""
+    value = (value or "").strip()
+    if not value:
+        return None
+    for prefix in ("https://t.me/", "http://t.me/", "t.me/"):
+        if value.startswith(prefix):
+            value = value[len(prefix):]
+    value = value.strip("/")
+    if value.lstrip("-").isdigit():
+        return value
+    return "@" + value.lstrip("@")
+
+
+def set_sales_channel(conn: sqlite3.Connection, sales_channel: str | None) -> None:
+    conn.execute(
+        "UPDATE store_settings SET sales_channel = ?, updated_at = datetime('now') WHERE id = 1",
+        (normalize_sales_channel(sales_channel),),
+    )

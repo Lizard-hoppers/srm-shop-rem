@@ -7,6 +7,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, RedirectResponse
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
+from core import channel_posts
 from core import auth as core_auth
 from core import cash as core_cash
 from core import clients as core_clients
@@ -363,4 +364,6 @@ def add_part_view(
         except InsufficientStockError as exc:
             ctx = _detail_context(conn, order_id)
             return render(request, "repair_detail.html", staff=staff, error=str(exc), **ctx)
+    store = request.state.store
+    channel_posts.sync_products([pid], store.id, store.db_path)
     return RedirectResponse(link(request, f"/repairs/{order_id}"), status_code=303)

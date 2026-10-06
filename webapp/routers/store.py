@@ -33,6 +33,7 @@ def store_settings_save(
     address: str = Form(""),
     phone: str = Form(""),
     working_hours: str = Form(""),
+    sales_channel: str = Form(""),
     staff=Depends(require_role("owner", "admin")),
 ):
     if not name.strip():
@@ -44,6 +45,7 @@ def store_settings_save(
         )
     with get_conn() as conn:
         core_store_settings.update_settings(conn, name, address, phone, working_hours)
+        core_store_settings.set_sales_channel(conn, sales_channel)
         settings = core_store_settings.get_settings(conn)
     return render(request, "store_settings.html", staff=staff, settings=settings, success="Изменения сохранены.")
 

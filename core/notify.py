@@ -185,6 +185,64 @@ def edit_message_caption(
         return False
 
 
+def send_card(
+    chat_id: str | int | None,
+    text: str,
+    photo: tuple[bytes, str] | None = None,
+    reply_markup: dict | None = None,
+) -> int | None:
+    """Post one card to an arbitrary chat (the sales channel — see
+    core.channel_posts) — a photo with the text as its caption when there
+    is one, a plain text message otherwise. Same never-raises contract and
+    return value as _send()/_send_photo()."""
+    if photo:
+        photo_bytes, filename = photo
+        return _send_photo(chat_id, photo_bytes, filename, caption=text, reply_markup=reply_markup)
+    return _send(chat_id, text, reply_markup=reply_markup)
+
+
+def delete_message(chat_id: str | int, message_id: int) -> bool:
+    """Never raises; returns whether Telegram actually deleted it. A bot
+    can only delete a message for ~48h after sending, so a False here is
+    an expected outcome for an old post, not an error — callers fall back
+    to editing the message instead (core.channel_posts)."""
+    if not chat_id or not message_id or not _BOT_TOKEN:
+        return False
+    try:
+        resp = httpx.post(
+            f"https://api.telegram.org/bot{_BOT_TOKEN}/deleteMessage",
+            json={"chat_id": chat_id, "message_id": message_id},
+            timeout=5,
+        )
+        if resp.status_code != 200:
+            logger.info("deleteMessage refused: %s %s", resp.status_code, resp.text)
+            return False
+        return True
+    except httpx.HTTPError:
+        logger.warning("deleteMessage failed", exc_info=True)
+        return False
+
+
+_bot_username: str | None = None
+
+
+def bot_username() -> str | None:
+    """This bot's @username (without the @), for building t.me deep links
+    from the web process, which has no aiogram Bot object to ask. One
+    getMe per process — a bot's username practically never changes; a
+    failed lookup isn't cached, so the next call retries."""
+    global _bot_username
+    if _bot_username or not _BOT_TOKEN:
+        return _bot_username
+    try:
+        resp = httpx.post(f"https://api.telegram.org/bot{_BOT_TOKEN}/getMe", json={}, timeout=5)
+        if resp.status_code == 200:
+            _bot_username = resp.json()["result"]["username"]
+    except (httpx.HTTPError, KeyError, ValueError):
+        logger.warning("getMe failed", exc_info=True)
+    return _bot_username
+
+
 def notify_staff_group(
     text: str,
     message_thread_id: str | int | None = None,

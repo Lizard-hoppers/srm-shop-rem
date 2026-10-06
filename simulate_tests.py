@@ -3262,6 +3262,274 @@ def scenario_all_stores_report_http() -> None:
                 os.environ["CRM_STORES_CONFIG"] = prev_config
 
 
+def scenario_sales_channel_http() -> None:
+    """Витрина в канале (02.10): publish a product card from the product
+    page, the card follows price edits, and a sale that empties the stock
+    takes it down — delete first, ПРОДАНО stub when Telegram refuses the
+    delete. Plus the «Купить» deep link's lead logic (bot/channel_orders).
+    Telegram itself is faked at httpx.post, same as scenario_repair_card_notify."""
+    print("scenario: sales channel — publish, auto-update, auto-remove on sale, buy lead")
+    from bot import channel_orders
+    from core import channel_posts, notify
+
+    calls = []
+    state = {"delete_ok": True, "send_ok": True, "next_id": 700}
+
+    class _Resp:
+        def __init__(self, ok, result=None):
+            self.status_code = 200 if ok else 400
+            self.text = "ok" if ok else "Bad Request"
+            self._result = result or {}
+
+        def json(self):
+            return {"result": self._result}
+
+    def _fake_post(url, json=None, data=None, files=None, timeout=None):
+        method = url.rsplit("/", 1)[1]
+        calls.append({"method": method, **(json or data or {}), "has_file": bool(files)})
+        if method == "getMe":
+            return _Resp(True, {"username": "shop_test_bot"})
+        if method == "deleteMessage":
+            return _Resp(state["delete_ok"])
+        if method in ("sendPhoto", "sendMessage"):
+            state["next_id"] += 1
+            return _Resp(state["send_ok"], {"message_id": state["next_id"]})
+        return _Resp(True)
+
+    def _methods():
+        return [c["method"] for c in calls]
+
+    check("a pasted t.me link / bare name / @name all normalize to @username",
+          {store_settings.normalize_sales_channel(v) for v in ("https://t.me/my_shop", "my_shop", "@my_shop", " t.me/my_shop/ ")} == {"@my_shop"})
+    check("a private channel's numeric id is kept as-is, empty turns publishing off",
+          store_settings.normalize_sales_channel("-1001234567890") == "-1001234567890"
+          and store_settings.normalize_sales_channel("  ") is None)
+    check("buy payload round-trips, including a store id with an underscore",
+          channel_posts.parse_buy_payload(channel_posts.buy_payload(42, "shop_2")) == (42, "shop_2")
+          and channel_posts.parse_buy_payload("buy_x_1") is None and channel_posts.parse_buy_payload("other") is None)
+
+    prev_config = os.environ.get("CRM_STORES_CONFIG")
+    orig_post, orig_token, orig_username = httpx.post, notify._BOT_TOKEN, notify._bot_username
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = os.path.join(tmp, "channel.sqlite3")
+        init_db(db_path)
+        with get_conn(db_path) as conn:
+            owner_id = auth.create_staff(conn, "chowner", "pass", "Канал Владелец", "owner")
+            auth.link_staff_telegram(conn, "chowner", 9001)
+            master_id = auth.create_staff(conn, "chmaster", "pass", "Канал Мастер", "master")
+            cell_id = inventory.create_cell(conn, "V-01", None, None)
+            phone_id = inventory.create_product(conn, "iPhone 16 Pro Max <256>", None, "Телефоны", "шт", False, True, 0, 52000)
+            inventory.receive_stock(conn, phone_id, cell_id, 1, owner_id)
+            case_id = inventory.create_product(conn, "Чехол", None, None, "шт", False, True, 0, 300)
+            inventory.receive_stock(conn, case_id, cell_id, 3, owner_id)
+            old_id = inventory.create_product(conn, "iPad Air", None, None, "шт", False, True, 0, 20000)
+            inventory.receive_stock(conn, old_id, cell_id, 1, owner_id)
+            noprice_id = inventory.create_product(conn, "Без цены", None, None, "шт", False, True, 0, None)
+            inventory.receive_stock(conn, noprice_id, cell_id, 1, owner_id)
+        owner_token = make_token(owner_id, "ch")
+        master_token = make_token(master_id, "ch")
+
+        config_path = os.path.join(tmp, "stores.json")
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump([{"id": "ch", "name": "Канал-тест", "db_path": db_path}], f)
+        os.environ["CRM_STORES_CONFIG"] = config_path
+        httpx.post = _fake_post
+        notify._BOT_TOKEN, notify._bot_username = "test-token", None
+        try:
+            import webapp.main
+
+            with TestClient(webapp.main.app) as client:
+                page = client.get(f"/inventory/products/{phone_id}?t={owner_token}")
+                check("with no channel configured the product card points to Кабинет магазина, no publish button",
+                      "Канал продаж не указан" in page.text and "/channel/publish" not in page.text)
+                denied = client.post(f"/inventory/products/{phone_id}/channel/publish?t={owner_token}", data={"description": "x"})
+                check("publishing with no channel configured is a friendly error, nothing sent",
+                      "Канал продаж не указан" in denied.text and not calls)
+
+                client.post(f"/store/settings?t={owner_token}", data={
+                    "name": "Магазин 007", "address": "ул. Дерибасовская, 1", "phone": "+380501112233",
+                    "working_hours": "", "sales_channel": "https://t.me/shop_channel",
+                })
+                with get_conn(db_path) as conn:
+                    check("Кабинет магазина saves the channel, normalized to @username",
+                          store_settings.get_settings(conn)["sales_channel"] == "@shop_channel")
+
+                forbidden = client.post(f"/inventory/products/{phone_id}/channel/publish?t={master_token}", data={"description": "x"})
+                check("a master can't publish to the channel (403)", forbidden.status_code == 403)
+
+                no_price = client.post(f"/inventory/products/{noprice_id}/channel/publish?t={owner_token}", data={"description": ""})
+                check("a product without a price is refused with a clear message", "Укажите цену" in no_price.text and "sendMessage" not in _methods())
+
+                state["send_ok"] = False
+                failed = client.post(f"/inventory/products/{phone_id}/channel/publish?t={owner_token}",
+                                     data={"description": "Идеал, АКБ 100% <новый>"})
+                state["send_ok"] = True
+                with get_conn(db_path) as conn:
+                    check("a Telegram refusal (bot not admin) shows a hint, records no post, but keeps the typed description",
+                          "администратором" in failed.text and channel_posts.get_active_post(conn, phone_id) is None
+                          and inventory.get_product(conn, phone_id)["description"] == "Идеал, АКБ 100% <новый>")
+
+                calls.clear()
+                client.post(f"/inventory/products/{phone_id}/channel/publish?t={owner_token}",
+                            data={"description": "Идеал, АКБ 100% <новый>"})
+                sent = next((c for c in calls if c["method"] == "sendMessage"), None)
+                with get_conn(db_path) as conn:
+                    post = channel_posts.get_active_post(conn, phone_id)
+                check("publish sends one card to the store's channel and records it",
+                      sent is not None and sent["chat_id"] == "@shop_channel" and post is not None
+                      and post["message_id"] == state["next_id"] and post["chat_id"] == "@shop_channel")
+                check("the card carries name, description, price and shop contacts, HTML-escaped",
+                      sent is not None and "iPhone 16 Pro Max &lt;256&gt;" in sent["text"] and "&lt;новый&gt;" in sent["text"]
+                      and "52\u00a0000\u00a0грн" in sent["text"] and "<blockquote>" in sent["text"] and "Дерибасовская" in sent["text"] and "+380501112233" in sent["text"])
+                button = sent["reply_markup"]["inline_keyboard"][0][0] if sent else {}
+                check("the «Купить» button deep-links into the bot with this product and store",
+                      button.get("url") == f"https://t.me/shop_test_bot?start=buy_{phone_id}_ch")
+                check("spec-style description lines get a bold label, plain lines don't",
+                      channel_posts._description_block("Состояние: идеал\n\nПросто текст\nОчень длинная фраза без смысла метки тут: хвост")
+                      == "<blockquote><b>Состояние:</b> идеал\nПросто текст\nОчень длинная фраза без смысла метки тут: хвост</blockquote>"
+                      and channel_posts._description_block("  ") == "")
+                check("post_url builds a public t.me link to the card",
+                      channel_posts.post_url(post) == f"https://t.me/shop_channel/{post['message_id']}")
+
+                page = client.get(f"/inventory/products/{phone_id}?t={owner_token}")
+                check("the product card now shows the live post with a «Снять с канала» action",
+                      "/channel/unpublish" in page.text and f"t.me/shop_channel/{post['message_id']}" in page.text)
+                again = client.post(f"/inventory/products/{phone_id}/channel/publish?t={owner_token}", data={"description": "x"})
+                check("a second publish of the same product is refused, no duplicate card", "уже выставлен" in again.text)
+
+                # ---- price edit follows through to the live card
+                calls.clear()
+                client.post(f"/inventory/products/{phone_id}/edit?t={owner_token}", data={
+                    "name": "iPhone 16 Pro Max <256>", "sku": "", "category": "Телефоны", "unit": "шт",
+                    "min_qty": "0", "price": "49900", "is_sellable": "on",
+                })
+                edit = next((c for c in calls if c["method"] == "editMessageText"), None)
+                check("editing the price edits the channel card in place, button kept",
+                      edit is not None and "49\u00a0900\u00a0грн" in edit["text"] and edit["message_id"] == post["message_id"]
+                      and edit["reply_markup"]["inline_keyboard"][0][0]["url"].endswith(f"buy_{phone_id}_ch"))
+                calls.clear()
+                client.post(f"/inventory/products/{phone_id}/edit?t={owner_token}", data={
+                    "name": "iPhone 16 Pro Max <256>", "sku": "", "category": "Телефоны", "unit": "шт",
+                    "min_qty": "0", "price": "49900", "is_sellable": "on",
+                })
+                check("saving the form with nothing changed makes no Telegram call", not calls)
+
+                # ---- buy leads (bot side, pure function)
+                reply, lead, store, managers = channel_orders.process_buy_request(
+                    f"buy_{phone_id}_ch", 777, "Вася <Пупкин>", "vasya")
+                check("a first «Купить» tap confirms to the customer and produces a staff lead with a profile link",
+                      "Заявка принята" in reply and lead is not None and "tg://user?id=777" in lead
+                      and "@vasya" in lead and "Вася &lt;Пупкин&gt;" in lead and "49\u00a0900\u00a0грн" in lead)
+                check("the lead resolves the right store and its owner as fallback recipient",
+                      store is not None and store.id == "ch" and managers == [9001])
+                check("with no staff group the lead goes to the owner's DM; with one — to its sales topic, or General if none",
+                      channel_orders.lead_destinations(store, managers) == [(9001, None)]
+                      and channel_orders.lead_destinations(
+                          stores.StoreConfig("x", "X", db_path, staff_group_chat_id=-100500, sales_topic_id=121), managers
+                      ) == [(-100500, 121)]
+                      and channel_orders.lead_destinations(
+                          stores.StoreConfig("x", "X", db_path, staff_group_chat_id=-100500), managers
+                      ) == [(-100500, None)])
+                reply2, lead2, _s, _m = channel_orders.process_buy_request(f"buy_{phone_id}_ch", 777, "Вася", "vasya")
+                check("a repeat tap by the same person re-confirms but doesn't notify staff twice",
+                      "Заявка принята" in reply2 and lead2 is None)
+                reply3, _l, _s, _m = channel_orders.process_buy_request(f"buy_{phone_id}_ch", 778, "Без Юзернейма", None)
+                check("a customer without @username is told to contact the shop, with its phone",
+                      "не указано имя пользователя" in reply3 and "+380501112233" in reply3)
+                bad = channel_orders.process_buy_request("buy_999999_ch", 1, "X", None)
+                bad_store = channel_orders.process_buy_request("buy_1_nosuchstore", 1, "X", None)
+                check("an unknown product or store is a polite not-found, no lead",
+                      bad[0] == channel_orders.NOT_FOUND_TEXT and bad[1] is None
+                      and bad_store[0] == channel_orders.NOT_FOUND_TEXT and bad_store[1] is None)
+
+                # ---- a partial sale keeps the card, the last unit removes it
+                client.post(f"/inventory/products/{case_id}/channel/publish?t={owner_token}", data={"description": ""})
+                calls.clear()
+                client.post(f"/sales?t={owner_token}", data={
+                    "row_count": "1", "product_id_0": str(case_id), "qty_0": "2", "price_0": "300",
+                    "channel": "offline", "payment_method": "cash",
+                })
+                with get_conn(db_path) as conn:
+                    check("selling 2 of 3 leaves the card up (still in stock), no Telegram call",
+                          channel_posts.get_active_post(conn, case_id) is not None and not calls)
+
+                calls.clear()
+                client.post(f"/sales?t={owner_token}", data={
+                    "row_count": "1", "product_id_0": str(phone_id), "qty_0": "1", "price_0": "49900",
+                    "channel": "offline", "payment_method": "cash",
+                })
+                deleted = next((c for c in calls if c["method"] == "deleteMessage"), None)
+                with get_conn(db_path) as conn:
+                    row = conn.execute("SELECT * FROM channel_posts WHERE product_id = ?", (phone_id,)).fetchone()
+                    check("selling the last unit deletes the card from the channel",
+                          deleted is not None and deleted["message_id"] == post["message_id"]
+                          and row["status"] == "removed" and row["closed_at"] is not None
+                          and channel_posts.get_active_post(conn, phone_id) is None)
+                sold_reply, sold_lead, _s, _m = channel_orders.process_buy_request(f"buy_{phone_id}_ch", 779, "Опоздавший", "late")
+                check("a «Купить» tap on an already-sold product says so, no lead",
+                      sold_reply == channel_orders.SOLD_OUT_TEXT and sold_lead is None)
+
+                # ---- delete refused (post older than 48h) -> ПРОДАНО stub
+                client.post(f"/inventory/products/{old_id}/channel/publish?t={owner_token}", data={"description": "как новый"})
+                state["delete_ok"] = False
+                calls.clear()
+                client.post(f"/sales?t={owner_token}", data={
+                    "row_count": "1", "product_id_0": str(old_id), "qty_0": "1", "price_0": "20000",
+                    "channel": "offline", "payment_method": "cash",
+                })
+                stub = next((c for c in calls if c["method"] == "editMessageText"), None)
+                with get_conn(db_path) as conn:
+                    row = conn.execute("SELECT * FROM channel_posts WHERE product_id = ?", (old_id,)).fetchone()
+                check("when Telegram refuses the delete, the card becomes a ПРОДАНО stub with the button removed",
+                      _methods()[:2] == ["deleteMessage", "editMessageText"] and stub is not None
+                      and "ПРОДАНО" in stub["text"] and "000" not in stub["text"]
+                      and stub["reply_markup"] == {"inline_keyboard": []} and row["status"] == "sold")
+                state["delete_ok"] = True
+
+                # ---- manual take-down
+                calls.clear()
+                client.post(f"/inventory/products/{case_id}/channel/unpublish?t={owner_token}")
+                with get_conn(db_path) as conn:
+                    check("«Снять с канала» deletes the card while the product stays in stock",
+                          "deleteMessage" in _methods() and channel_posts.get_active_post(conn, case_id) is None
+                          and inventory.product_total_qty(conn, case_id) == 1)
+                page = client.get(f"/inventory/products/{case_id}?t={owner_token}")
+                check("after take-down the product can be published again", "/channel/publish" in page.text)
+
+            # ---- photo card: sendPhoto + caption edits
+            photo_name = "channel_test_photo.jpg"
+            photo_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webapp", "static", "product_photos")
+            os.makedirs(photo_dir, exist_ok=True)
+            photo_path = os.path.join(photo_dir, photo_name)
+            buf = io.BytesIO()
+            Image.new("RGB", (40, 40), "white").save(buf, format="JPEG")
+            with open(photo_path, "wb") as f:
+                f.write(buf.getvalue())
+            try:
+                with get_conn(db_path) as conn:
+                    inventory.set_product_photo(conn, case_id, photo_name)
+                    calls.clear()
+                    channel_posts.publish(conn, case_id, "ch", owner_id)
+                    photo_post = channel_posts.get_active_post(conn, case_id)
+                    check("a product with a photo is posted as one photo message with the card as caption",
+                          _methods() == ["sendPhoto"] and calls[0]["has_file"] and "Чехол" in calls[0]["caption"]
+                          and photo_post["has_photo"] == 1)
+                    inventory.set_product_description(conn, case_id, "силикон")
+                    calls.clear()
+                    channel_posts.sync_product(conn, case_id, "ch")
+                    check("a photo card is updated through editMessageCaption, not editMessageText",
+                          _methods() == ["editMessageCaption"] and "силикон" in calls[0]["caption"])
+            finally:
+                os.remove(photo_path)
+        finally:
+            httpx.post = orig_post
+            notify._BOT_TOKEN, notify._bot_username = orig_token, orig_username
+            if prev_config is None:
+                os.environ.pop("CRM_STORES_CONFIG", None)
+            else:
+                os.environ["CRM_STORES_CONFIG"] = prev_config
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         db_path = os.path.join(tmp, "test.sqlite3")
@@ -3304,6 +3572,7 @@ def main() -> None:
     scenario_multi_store_login_and_switch_http()
     scenario_store_settings_http()
     scenario_all_stores_report_http()
+    scenario_sales_channel_http()
     if os.path.exists(_WEBAPP_TEST_DB):
         os.remove(_WEBAPP_TEST_DB)
 

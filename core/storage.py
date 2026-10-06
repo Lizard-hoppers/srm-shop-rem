@@ -305,6 +305,41 @@ CREATE TABLE IF NOT EXISTS buyback_orders (
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_buyback_orders_client ON buyback_orders(client_id);
+
+-- Витрина в Telegram-канале (02.10): one row per product card the bot
+-- posted to the store's sales channel (store_settings.sales_channel), so
+-- the card can be edited (price change) or taken down (sold) later — see
+-- core.channel_posts. status: 'active' (live card), 'removed' (message
+-- deleted from the channel), 'sold' (couldn't delete — Telegram only lets
+-- a bot delete a message for ~48h — so the card was edited to a ПРОДАНО
+-- stub instead). caption is the last text actually sent, so a sync that
+-- changes nothing skips the API call.
+CREATE TABLE IF NOT EXISTS channel_posts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_id INTEGER NOT NULL REFERENCES products(id),
+    chat_id TEXT NOT NULL,
+    message_id INTEGER NOT NULL,
+    has_photo INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','sold','removed')),
+    caption TEXT,
+    staff_id INTEGER REFERENCES staff(id),
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    closed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_channel_posts_product ON channel_posts(product_id);
+
+-- A customer tapping «Купить» under a channel card (bot/channel_orders.py).
+-- Kept so a second tap by the same person on the same product doesn't
+-- re-notify staff, and so there's a trail of who asked about what.
+CREATE TABLE IF NOT EXISTS channel_leads (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_id INTEGER NOT NULL REFERENCES products(id),
+    telegram_id INTEGER NOT NULL,
+    name TEXT,
+    username TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(product_id, telegram_id)
+);
 """
 
 
@@ -330,6 +365,8 @@ def init_db(db_path: str = DB_PATH) -> None:
         _ensure_column(conn, "stock_movements", "unit_cost", "unit_cost INTEGER")
         _ensure_column(conn, "staff", "pay_type", "pay_type TEXT")
         _ensure_column(conn, "staff", "pay_value", "pay_value INTEGER")
+        _ensure_column(conn, "store_settings", "sales_channel", "sales_channel TEXT")
+        _ensure_column(conn, "products", "description", "description TEXT")
         device_catalog.seed(conn)
         conn.execute("INSERT OR IGNORE INTO store_settings (id) VALUES (1)")
         conn.commit()

@@ -14,6 +14,7 @@ from aiogram.types import (
 )
 
 from bot.config import BOT_TOKEN, MINIAPP_URL
+from bot.channel_orders import router as channel_orders_router
 from bot.handlers import router
 from bot.purchase_photo import router as purchase_photo_router
 from bot.quick_actions import router as quick_actions_router
@@ -39,6 +40,9 @@ async def main() -> None:
     # abandoned draft (nothing's written to the DB until the final
     # confirm), no persistence needed across process restarts.
     dp = Dispatcher(storage=MemoryStorage())
+    # Before `router`: its bare CommandStart() matches every /start, deep
+    # link or not — see bot/channel_orders.py.
+    dp.include_router(channel_orders_router)
     dp.include_router(router)
     dp.include_router(quick_actions_router)
     dp.include_router(repair_actions_router)

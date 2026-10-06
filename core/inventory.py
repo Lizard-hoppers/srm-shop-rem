@@ -81,6 +81,16 @@ def set_product_photo(conn: sqlite3.Connection, product_id: int, photo_filename:
     conn.execute("UPDATE products SET photo_path = ? WHERE id = ?", (photo_filename, product_id))
 
 
+def set_product_description(conn: sqlite3.Connection, product_id: int, description: str | None) -> None:
+    """Customer-facing text for the sales-channel card (core.channel_posts)
+    — condition, memory, what's in the box. Its own setter rather than
+    another update_product() argument: that one is a full-replace driven by
+    the «Данные товара» form, and this field isn't on that form."""
+    conn.execute(
+        "UPDATE products SET description = ? WHERE id = ?", ((description or "").strip() or None, product_id)
+    )
+
+
 def product_stock_by_cell(conn: sqlite3.Connection, product_id: int) -> list[sqlite3.Row]:
     return conn.execute(
         """SELECT stock.cell_id, storage_cells.code, stock.qty
