@@ -135,11 +135,33 @@
         <option value="">{{ t('cell_placeholder') }}</option>
         {% for c in cells %}<option value="{{ c.id }}">{{ c.code }}</option>{% endfor %}
       </select>
-      <input type="number" name="qty" placeholder="{{ t('qty_col') }}" style="width:100px; flex:0 0 auto;">
+      <input type="number" name="qty" placeholder="{{ t('qty_col') }}" {% if product.is_serial %}value="1" readonly{% endif %} style="width:100px; flex:0 0 auto;">
     </div>
   </label>
+  {% if product.is_serial %}<label>IMEI<span class="required-mark">*</span><input type="text" name="imei" autocomplete="off"></label>{% endif %}
   <button type="submit" class="secondary">{{ t('add_to_stock_btn') }}</button>
 </form>
+
+<h2>{{ t('batches_title') }}</h2>
+{% if elsewhere_qty %}<p class="meta">{{ t('batches_elsewhere_hint') }} {{ elsewhere_qty }} {{ product.unit }}</p>{% endif %}
+<div class="table-scroll">
+<table class="table">
+  <thead><tr><th>{{ t('batch_col') }}</th><th>{{ t('col_supplier') }}</th><th>{{ t('col_unit_cost') }}</th><th>{{ t('batch_left_col') }}</th><th>{{ t('batch_where_col') }}</th></tr></thead>
+  <tbody>
+    {% for b in batches %}
+    <tr>
+      <td>№{{ b.id }}{% if b.imei %}<div class="meta">IMEI {{ b.imei }}</div>{% endif %}<div class="meta">{{ b.created_at | kyiv }}</div></td>
+      <td>{{ b.supplier_name or t('batch_source_' ~ b.source) }}{% if b.receipt_id %}<div class="meta"><a href="{{ link('/purchases/' ~ b.receipt_id) }}">{{ t('doc_type_receipt') }} №{{ b.receipt_id }}</a></div>{% endif %}</td>
+      <td>{% if b.unit_cost is not none %}{{ b.unit_cost | money }}{% if b.currency != 'UAH' %} {{ b.currency }} <span class="meta">= {{ b.unit_cost_uah | money }} грн</span>{% endif %}{% else %}—{% endif %}</td>
+      <td>{{ b.qty_left }} {{ product.unit }}</td>
+      <td>{{ b.where_text or '—' }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="5">{{ t('batches_empty') }}</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
 
 <h2>{{ t('channel_section_title') }}</h2>
 {% if not sales_channel %}
@@ -273,6 +295,7 @@
   <div class="checkbox-row">
     <label class="checkbox-label"><input type="checkbox" name="is_repair_part" {% if product.is_repair_part %}checked{% endif %}> {{ t('product_is_repair_part') }}</label>
     <label class="checkbox-label"><input type="checkbox" name="is_sellable" {% if product.is_sellable %}checked{% endif %}> {{ t('product_is_sellable') }}</label>
+    <label class="checkbox-label"><input type="checkbox" name="is_serial" {% if product.is_serial %}checked{% endif %}> {{ t('product_is_serial') }}</label>
   </div>
   <button type="submit">{{ t('save_btn') }}</button>
 </form>

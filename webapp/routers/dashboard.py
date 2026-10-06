@@ -6,6 +6,7 @@ from core.clients import list_clients
 from core.inventory import list_products, low_stock_report
 from core.repairs import list_repairs
 from core.sales import list_sales
+from core.shifts import current_shift
 from core.storage import get_conn
 from webapp.deps import loc, require_staff
 from webapp.templating import render
@@ -26,6 +27,7 @@ def dashboard(request: Request, staff=Depends(require_staff)):
             r for r in list_repairs(conn, location_id=location_id) if r["status"] not in ("issued", "cancelled")
         ])
         sales_today_count = len(list_sales(conn, limit=1000, location_id=location_id, include_cancelled=False))
+        shift = current_shift(conn, staff["id"], location_id)
     return render(
         request,
         "dashboard.html",
@@ -35,4 +37,5 @@ def dashboard(request: Request, staff=Depends(require_staff)):
         low_stock_count=low_stock_count,
         open_repairs_count=open_repairs_count,
         sales_count=sales_today_count,
+        shift=shift,
     )

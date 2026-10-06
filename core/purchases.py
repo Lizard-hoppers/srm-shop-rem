@@ -9,7 +9,12 @@ import sqlite3
 
 from core import documents as _documents
 from core import locations as _locations
+from core import inventory as _inventory
 from core.inventory import cell_location_id, record_movement
+
+
+class ReceiptError(Exception):
+    """A приход that can't be проведён as entered — message is shown to staff as-is."""
 
 
 def list_suppliers(conn: sqlite3.Connection) -> list[sqlite3.Row]:
@@ -33,33 +38,74 @@ def create_receipt(
     supplier_id: int | None,
     invoice_no: str | None,
     staff_id: int,
-    items: list[tuple[int, int, int, int | None]],
+    items: list[tuple],
     *,
     location_id: int | None = None,
     key: str | None = None,
+    currency: str = "UAH",
+    rate: float = 1,
 ) -> int:
-    """items: list of (product_id, cell_id, qty, unit_cost)."""
+    """items: list of (product_id, cell_id, qty, unit_cost) or, for a
+    serial product, (product_id, cell_id, qty, unit_cost, [imei, …]).
+
+    Every line becomes a партия — this supplier, this приход, this cost —
+    and the stock arrives into it. unit_cost is in the receipt's `currency`
+    at `rate` гривня per unit of it (one currency per накладная). A serial
+    product's line becomes one партия PER UNIT, each with its IMEI: the
+    list must hold exactly `qty` distinct IMEIs, none already in stock.
+    ReceiptError before anything is written otherwise."""
     if not items:
         raise ValueError("нужна хотя бы одна позиция в приходе")
     location_id = _locations.resolve(conn, location_id)
+    currency = currency or "UAH"
+    rate = float(rate or 1) if currency != "UAH" else 1
+
+    # Validate serial lines up front — nothing must be half-received.
+    normalized = []
+    seen_imeis: set[str] = set()
+    for item in items:
+        product_id, cell_id, qty, unit_cost = item[:4]
+        imeis = [_inventory.normalize_imei(x) for x in (item[4] if len(item) > 4 and item[4] else [])]
+        imeis = [x for x in imeis if x]
+        product = _inventory.get_product(conn, product_id)
+        if product and product["is_serial"]:
+            if len(imeis) != qty:
+                raise ReceiptError(
+                    f"«{product['name']}» — серийный товар: нужно {qty} IMEI, указано {len(imeis)}."
+                )
+            for imei in imeis:
+                if imei in seen_imeis:
+                    raise ReceiptError(f"IMEI {imei} указан дважды.")
+                if _inventory.find_unit_by_imei(conn, imei):
+                    raise ReceiptError(f"Устройство с IMEI {imei} уже числится на складе.")
+                seen_imeis.add(imei)
+        else:
+            imeis = []
+        normalized.append((product_id, cell_id, qty, unit_cost, imeis))
 
     receipt_id = conn.execute(
-        "INSERT INTO goods_receipts (supplier_id, invoice_no, staff_id, location_id) VALUES (?, ?, ?, ?)",
-        (supplier_id, invoice_no, staff_id, location_id),
+        "INSERT INTO goods_receipts (supplier_id, invoice_no, staff_id, location_id, currency, rate) VALUES (?, ?, ?, ?, ?, ?)",
+        (supplier_id, invoice_no, staff_id, location_id, currency, rate),
     ).lastrowid
 
-    for product_id, cell_id, qty, unit_cost in items:
+    for product_id, cell_id, qty, unit_cost, imeis in normalized:
         conn.execute(
             "INSERT INTO goods_receipt_items (receipt_id, product_id, cell_id, qty, unit_cost) VALUES (?, ?, ?, ?, ?)",
             (receipt_id, product_id, cell_id, qty, unit_cost),
         )
-        record_movement(
-            conn, product_id, qty, "receipt", staff_id,
-            to_cell_id=cell_id, ref_type="goods_receipt", ref_id=receipt_id,
-        )
+        for imei, unit_qty in ([(imei, 1) for imei in imeis] or [(None, qty)]):
+            batch_id = _inventory.create_batch(
+                conn, product_id, source="receipt", supplier_id=supplier_id, receipt_id=receipt_id,
+                unit_cost=unit_cost, currency=currency, rate=rate, imei=imei,
+            )
+            record_movement(
+                conn, product_id, unit_qty, "receipt", staff_id,
+                to_cell_id=cell_id, ref_type="goods_receipt", ref_id=receipt_id, batch_id=batch_id,
+            )
 
     supplier = _supplier(conn, supplier_id)
-    total = sum(qty * (unit_cost or 0) for _product_id, _cell_id, qty, unit_cost in items)
+    total = round(sum(qty * (unit_cost or 0) * rate for _p, _c, qty, unit_cost, _i in normalized), 2)
+    total = int(total) if total == int(total) else total
     _documents.register(
         conn, "receipt", staff_id=staff_id, location_id=location_id,
         client_id=supplier["client_id"] if supplier else None,
@@ -105,6 +151,18 @@ def get_receipt_items(conn: sqlite3.Connection, receipt_id: int) -> list[sqlite3
     ).fetchall()
 
 
+def get_receipt_batches(conn: sqlite3.Connection, receipt_id: int) -> list[sqlite3.Row]:
+    """The партии this приход created, with what is left of each — where
+    its goods went is one glance away."""
+    return conn.execute(
+        """SELECT batches.*, products.name AS product_name, products.unit,
+                  COALESCE((SELECT SUM(qty) FROM batch_stock WHERE batch_id = batches.id), 0) AS qty_left
+           FROM batches JOIN products ON products.id = batches.product_id
+           WHERE batches.receipt_id = ? ORDER BY batches.id""",
+        (receipt_id,),
+    ).fetchall()
+
+
 def list_receipts_for_product(conn: sqlite3.Connection, product_id: int) -> list[sqlite3.Row]:
     """Every delivery of this product on record, newest first — the
     product card's "Поставщики этого товара" section, so staff can tell
@@ -135,6 +193,7 @@ def create_supplier_return(
     staff_id: int,
     *,
     key: str | None = None,
+    batch_id: int | None = None,
 ) -> int:
     """Logs a defective-stock return to whichever supplier delivered it
     and writes off the qty from the cell via the normal stock ledger
@@ -151,6 +210,7 @@ def create_supplier_return(
         conn, product_id, qty, "adjustment", staff_id,
         from_cell_id=cell_id, ref_type="supplier_return", ref_id=return_id,
         comment=f"Возврат поставщику: {reason}" if reason else "Возврат поставщику",
+        batch_id=batch_id or _return_batch(conn, product_id, supplier_id, receipt_id, cell_id, qty),
     )
     supplier = _supplier(conn, supplier_id)
     product = conn.execute("SELECT name FROM products WHERE id = ?", (product_id,)).fetchone()
@@ -161,6 +221,30 @@ def create_supplier_return(
         title=f"{product['name']} × {qty}" if product else None, key=key,
     )
     return return_id
+
+
+def _return_batch(
+    conn: sqlite3.Connection, product_id: int, supplier_id: int, receipt_id: int | None, cell_id: int, qty: int,
+) -> int | None:
+    """Which партия a return comes out of when the caller didn't name one:
+    that приход's own партия if the cell still holds enough of it, else
+    any партия of that supplier that does — so the брак is charged to the
+    supplier who actually delivered it. None (plain FIFO) if neither."""
+    conditions = []
+    if receipt_id:
+        conditions.append(("batches.receipt_id = ?", receipt_id))
+    conditions.append(("batches.supplier_id = ?", supplier_id))
+    for clause, value in conditions:
+        row = conn.execute(
+            f"""SELECT batch_stock.batch_id FROM batch_stock
+                JOIN batches ON batches.id = batch_stock.batch_id
+                WHERE batches.product_id = ? AND batch_stock.cell_id = ? AND batch_stock.qty >= ? AND {clause}
+                ORDER BY batch_stock.batch_id LIMIT 1""",
+            (product_id, cell_id, qty, value),
+        ).fetchone()
+        if row:
+            return row["batch_id"]
+    return None
 
 
 def list_supplier_returns(conn: sqlite3.Connection, product_id: int | None = None, limit: int = 100) -> list[sqlite3.Row]:

@@ -7,10 +7,65 @@
 
 <div class="cash-layout">
 <div>
-<div class="panel-box" style="margin-bottom: 20px;">
-  <div style="font-size: 32px; font-weight: 800; letter-spacing: -0.02em;">{{ balance }}</div>
+<div class="panel-box" style="margin-bottom: 12px;">
+  <div style="font-size: 32px; font-weight: 800; letter-spacing: -0.02em;">{{ balance | money }}</div>
   <div class="stat-label" style="margin-top: 4px;">{{ t('cash_balance_label') }}</div>
 </div>
+
+<div class="nav-list" style="margin-bottom: 20px;">
+  <a class="card nav-card" href="{{ link('/cash/shift') }}">
+    <div class="card-icon">{{ icons.icon('user', 18) }}</div>
+    <div class="nav-card-body">
+      <div class="nav-card-title">{{ t('shift_title') }}</div>
+      <div class="nav-card-sub">{% if shift %}{{ t('shift_open_since') }} {{ shift.opened_at | kyiv }}{% else %}{{ t('shift_not_open') }}{% endif %}</div>
+    </div>
+    <div class="chevron">{{ icons.icon('chevron', 18) }}</div>
+  </a>
+</div>
+
+<h2>{{ t('accounts_title') }}</h2>
+<div class="table-scroll">
+<table class="table">
+  <thead><tr><th>{{ t('account_col') }}</th><th>{{ t('account_balance_col') }}</th></tr></thead>
+  <tbody>
+    {% for a in accounts %}
+    <tr>
+      <td>{{ a.name }}{% if not a.active %} <span class="pill pill-cancelled">{{ t('account_off') }}</span>{% endif %}</td>
+      <td><b>{{ a.balance | money }}</b> {{ a.currency_label }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+{% if can_adjust %}<p class="meta"><a href="{{ link('/cash/accounts') }}">{{ t('accounts_manage_link') }} →</a></p>{% endif %}
+
+{% if incoming %}
+<h2>{{ t('transit_incoming_title') }}</h2>
+{% for tr in incoming %}
+<div class="panel-box" style="margin-bottom: 12px;">
+  <p style="margin:0;"><b>{{ tr.amount | money }} {{ tr.currency }}</b> · {{ tr.from_location_name }} · {{ tr.from_name }} → {{ tr.to_name }}</p>
+  <p class="meta" style="margin:4px 0 8px;">{{ tr.sent_by_name or '—' }} · {{ tr.sent_at | kyiv }}{% if tr.comment %} · {{ tr.comment }}{% endif %}</p>
+  <form method="post" action="{{ link('/cash/transfer/' ~ tr.id ~ '/receive') }}" class="edit-form">
+    <label>{{ t('transit_received_label') }}<input type="text" inputmode="decimal" name="received_amount" value="{{ tr.amount | money }}"></label>
+    <label>{{ t('transit_note_label') }}<input type="text" name="note"></label>
+    <button type="submit">{{ t('transit_receive_btn') }}</button>
+  </form>
+</div>
+{% endfor %}
+{% endif %}
+
+{% if outgoing %}
+<h2>{{ t('transit_outgoing_title') }}</h2>
+<div class="table-scroll">
+<table class="table">
+  <tbody>
+    {% for tr in outgoing %}
+    <tr><td>{{ tr.sent_at | kyiv }}</td><td><b>{{ tr.amount | money }} {{ tr.currency }}</b></td><td>{{ tr.from_name }} → {{ tr.to_location_name }} · {{ tr.to_name }}</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
 
 <h2>{{ t('cash_period_title') }}</h2>
 <form method="get" action="{{ link('/cash') }}" class="edit-form" style="margin-bottom: 20px;">
@@ -21,38 +76,41 @@
 
 <div class="stat-row" style="grid-template-columns: repeat(2, 1fr);">
   <div class="stat">
-    <div class="stat-num">{{ summary.income_cash }}</div>
+    <div class="stat-num">{{ summary.income_cash | money }}</div>
     <div class="stat-label">{{ t('income_cash_label') }}</div>
   </div>
   <div class="stat">
-    <div class="stat-num">{{ summary.income_card }}</div>
+    <div class="stat-num">{{ summary.income_card | money }}</div>
     <div class="stat-label">{{ t('income_card_label') }}</div>
   </div>
   <div class="stat">
-    <div class="stat-num">{{ summary.expense_total }}</div>
+    <div class="stat-num">{{ summary.expense_total | money }}</div>
     <div class="stat-label">{{ t('expense_total_label') }}</div>
   </div>
   <div class="stat">
-    <div class="stat-num">{{ summary.net }}</div>
+    <div class="stat-num">{{ summary.net | money }}</div>
     <div class="stat-label">{{ t('net_label') }}</div>
   </div>
 </div>
+<p class="meta">{{ t('summary_uah_hint') }}</p>
 
 <h2>{{ t('recent_ops_title') }}</h2>
 <div class="table-scroll">
 <table class="table">
-  <thead><tr><th>{{ t('col_when') }}</th><th>{{ t('col_type') }}</th><th>{{ t('col_method') }}</th><th>{{ t('sales_col_amount') }}</th><th>{{ t('col_for_what') }}</th><th>{{ t('col_who') }}</th></tr></thead>
+  <thead><tr><th>{{ t('col_when') }}</th><th>{{ t('col_type') }}</th><th>{{ t('account_col') }}</th><th>{{ t('sales_col_amount') }}</th><th>{{ t('col_for_what') }}</th><th>{{ t('col_who') }}</th></tr></thead>
   <tbody>
     {% for tx in transactions %}
     <tr>
       <td>{{ tx.created_at | kyiv }}</td>
       <td>{{ t('income_arrow_label') if tx.kind == 'income' else t('expense_arrow_label') }}</td>
-      <td>{{ t('payment_method_' ~ tx.method) }}</td>
-      <td>{{ tx.amount }}</td>
+      <td>{{ tx.account_name or t('payment_method_' ~ tx.method) }}</td>
+      <td>{{ tx.amount | money }}{% if tx.currency and tx.currency != 'UAH' %} {{ tx.currency }}{% endif %}</td>
       <td>
         {% if tx.ref_type == 'sales_order' %}{{ t('sale_ref_label') }}{{ tx.ref_id }}
         {% elif tx.ref_type == 'repair_order' %}{{ t('repair_ref_label') }}{{ tx.ref_id }}
         {% elif tx.category == 'adjustment' %}{{ t('adjustment_ref_label') }}
+        {% elif tx.category == 'exchange' %}{{ t('doc_type_exchange') }}
+        {% elif tx.category == 'transfer' %}{{ t('doc_type_money_transfer') }}
         {% else %}{{ t('expense_category_' ~ tx.category) if tx.category else '—' }}
         {% endif %}
         {% if tx.comment %}<div class="meta">{{ tx.comment }}</div>{% endif %}
@@ -72,7 +130,7 @@
 <div class="panel-box">
   <h3>{{ t('expense_section_title') }}</h3>
   <form method="post" action="{{ link('/cash/expense') }}" class="edit-form">
-  <input type="hidden" name="idem" value="{{ idem }}">
+    <input type="hidden" name="idem" value="{{ idem }}">
     <label>{{ t('category_label') }}
       <select name="category">
         <option value="rent">{{ t('expense_category_rent') }}</option>
@@ -81,34 +139,82 @@
         <option value="other">{{ t('expense_category_other') }}</option>
       </select>
     </label>
-    <label>{{ t('col_method') }}
-      <select name="method">
-        <option value="cash">{{ t('payment_method_cash') }}</option>
-        <option value="card">{{ t('payment_method_card') }}</option>
+    <label>{{ t('account_from_label') }}
+      <select name="account_id">
+        {% for a in active_accounts %}<option value="{{ a.id }}">{{ a.name }} · {{ a.balance | money }} {{ a.currency_label }}</option>{% endfor %}
       </select>
     </label>
-    <label>{{ t('sales_col_amount') }}<input type="number" name="amount" placeholder="{{ t('amount_placeholder') }}"></label>
+    <label>{{ t('sales_col_amount') }}<input type="text" inputmode="decimal" name="amount" placeholder="{{ t('amount_placeholder') }}"></label>
     <label>{{ t('comment_label') }}<input type="text" name="comment" placeholder="{{ t('comment_label') }}"></label>
     <button type="submit" class="secondary">{{ t('expense_submit_btn') }}</button>
   </form>
 </div>
 
 <div class="panel-box" style="margin-top: 16px;">
+  <h3>{{ t('exchange_section_title') }}</h3>
+  <p class="meta">{{ t('exchange_hint') }}</p>
+  <form method="post" action="{{ link('/cash/exchange') }}" class="edit-form">
+    <input type="hidden" name="idem" value="{{ idem }}">
+    <label>{{ t('exchange_from_label') }}
+      <select name="from_account_id">
+        {% for a in active_accounts %}<option value="{{ a.id }}">{{ a.name }} · {{ a.balance | money }} {{ a.currency_label }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>{{ t('exchange_amount_from_label') }}<input type="text" inputmode="decimal" name="amount_from" placeholder="45000"></label>
+    <label>{{ t('exchange_to_label') }}
+      <select name="to_account_id">
+        {% for a in active_accounts %}<option value="{{ a.id }}" {% if loop.index == 2 %}selected{% endif %}>{{ a.name }} ({{ a.currency_label }})</option>{% endfor %}
+      </select>
+    </label>
+    <label>{{ t('exchange_amount_to_label') }}<input type="text" inputmode="decimal" name="amount_to" placeholder="1000"></label>
+    <button type="submit" class="secondary">{{ t('exchange_submit_btn') }}</button>
+  </form>
+</div>
+
+<div class="panel-box" style="margin-top: 16px;">
+  <h3>{{ t('transfer_money_section_title') }}</h3>
+  <p class="meta">{{ t('transfer_money_hint') }}</p>
+  <form method="post" action="{{ link('/cash/transfer') }}" class="edit-form">
+    <input type="hidden" name="idem" value="{{ idem }}">
+    <label>{{ t('account_from_label') }}
+      <select name="from_account_id">
+        {% for a in active_accounts %}<option value="{{ a.id }}">{{ a.name }} · {{ a.balance | money }} {{ a.currency_label }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>{{ t('transfer_money_to_label') }}
+      <select name="to_account_id">
+        {% for a in all_accounts %}<option value="{{ a.id }}">{{ a.location_name }} · {{ a.name }} ({{ a.currency }})</option>{% endfor %}
+      </select>
+    </label>
+    <label>{{ t('sales_col_amount') }}<input type="text" inputmode="decimal" name="amount" placeholder="{{ t('amount_placeholder') }}"></label>
+    <label>{{ t('comment_label') }}<input type="text" name="comment"></label>
+    <button type="submit" class="secondary">{{ t('transfer_money_submit_btn') }}</button>
+  </form>
+</div>
+
+{% if can_adjust %}
+<div class="panel-box" style="margin-top: 16px;">
   <h3>{{ t('adjustment_section_title') }}</h3>
   <p class="meta">{{ t('adjustment_hint') }}</p>
   <form method="post" action="{{ link('/cash/adjustment') }}" class="edit-form">
-  <input type="hidden" name="idem" value="{{ idem }}">
+    <input type="hidden" name="idem" value="{{ idem }}">
     <label>{{ t('action_label') }}
       <select name="direction">
         <option value="in">{{ t('action_in') }}</option>
         <option value="out">{{ t('action_out') }}</option>
       </select>
     </label>
-    <label>{{ t('sales_col_amount') }}<input type="number" name="amount" placeholder="{{ t('amount_placeholder') }}"></label>
-    <label>{{ t('comment_optional_placeholder') }}<input type="text" name="comment"></label>
+    <label>{{ t('account_col') }}
+      <select name="account_id">
+        {% for a in active_accounts %}<option value="{{ a.id }}">{{ a.name }} · {{ a.balance | money }} {{ a.currency_label }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>{{ t('sales_col_amount') }}<input type="text" inputmode="decimal" name="amount" placeholder="{{ t('amount_placeholder') }}"></label>
+    <label>{{ t('adjustment_reason_label') }}<input type="text" name="comment"></label>
     <button type="submit" class="secondary">{{ t('adjustment_submit_btn') }}</button>
   </form>
 </div>
+{% endif %}
 </div>
 </div>
 {% endblock %}

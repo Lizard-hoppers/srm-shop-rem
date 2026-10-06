@@ -1,0 +1,166 @@
+{% extends "base.html" %}
+{% import "_icons.html" as icons %}
+{% block title %}{{ t('transfers_title') }}{% endblock %}
+{% block content %}
+<a class="back-link" href="{{ link('/warehouse') }}">{{ icons.icon('back', 16) }} {{ t('nav_warehouse') }}</a>
+{% if error %}<div class="flash flash-error">{{ error }}</div>{% endif %}
+
+{% if incoming %}
+<h2>{{ t('transfers_incoming_title') }}</h2>
+<div class="nav-list">
+  {% for tr in incoming %}
+  <a class="card nav-card card-warn" href="{{ link('/transfers/' ~ tr.id) }}">
+    <div class="card-icon">{{ icons.icon('truck', 18) }}</div>
+    <div class="nav-card-body">
+      <div class="nav-card-title">№{{ tr.id }} · {{ tr.route }}</div>
+      <div class="nav-card-sub">{{ tr.sent_by_name or '—' }} · {{ tr.sent_at | kyiv }} · {{ t('transfers_tap_to_receive') }}</div>
+    </div>
+    <div class="chevron">{{ icons.icon('chevron', 18) }}</div>
+  </a>
+  {% endfor %}
+</div>
+{% endif %}
+
+{% if outgoing %}
+<h2>{{ t('transfers_outgoing_title') }}</h2>
+<div class="nav-list">
+  {% for tr in outgoing %}
+  <a class="card nav-card" href="{{ link('/transfers/' ~ tr.id) }}">
+    <div class="card-icon">{{ icons.icon('truck', 18) }}</div>
+    <div class="nav-card-body">
+      <div class="nav-card-title">№{{ tr.id }} · {{ tr.route }}</div>
+      <div class="nav-card-sub">{{ tr.sent_by_name or '—' }} · {{ tr.sent_at | kyiv }}</div>
+    </div>
+    <div class="chevron">{{ icons.icon('chevron', 18) }}</div>
+  </a>
+  {% endfor %}
+</div>
+{% endif %}
+
+{% if source %}
+<h2>{{ t('transfers_new_title') }}</h2>
+{% if sendable | length > 1 %}
+<form method="get" action="/transfers" class="edit-form" style="margin-bottom: 12px;">
+  <input type="hidden" name="t" value="{{ token }}">
+  <label>{{ t('transfers_from_label') }}
+    <select name="source" onchange="this.form.submit()">
+      {% for w in sendable %}<option value="{{ w.id }}" {% if w.id == source.id %}selected{% endif %}>{{ w.display_name }}</option>{% endfor %}
+    </select>
+  </label>
+  <noscript><button type="submit" class="secondary">{{ t('show_btn') }}</button></noscript>
+</form>
+{% endif %}
+<form method="post" action="{{ link('/transfers') }}" class="edit-form" id="transferForm">
+  <input type="hidden" name="idem" value="{{ idem }}">
+  <input type="hidden" name="from_warehouse_id" value="{{ source.id }}">
+  <label>{{ t('transfers_to_label') }}
+    <select name="to_warehouse_id">
+      {% for w in targets %}<option value="{{ w.id }}">{{ w.display_name }}</option>{% endfor %}
+    </select>
+  </label>
+  <datalist id="transferLineList"></datalist>
+  <input type="hidden" name="row_count" id="transferRowCount" value="{{ item_rows | length }}">
+  <div id="transferRows">
+    {% for i in item_rows %}
+    <div class="transfer-row" style="display:flex; gap:6px; flex-wrap:wrap; align-items:center; padding-top:8px; border-top: 1px solid var(--border);">
+      <input type="text" class="line-search" list="transferLineList" name="line_{{ i }}" placeholder="{{ t('transfers_line_placeholder') }}" autocomplete="off" style="flex:1; min-width:0;">
+      <input type="hidden" class="line-id-input" name="line_id_{{ i }}">
+      <input type="number" name="qty_{{ i }}" placeholder="{{ t('qty_col') }}" min="1" style="width:90px; flex:0 0 auto;">
+      <div class="transfer-row-hint meta" style="display:none; flex-basis:100%;"></div>
+    </div>
+    {% endfor %}
+  </div>
+  <button type="button" id="addTransferRowBtn" class="secondary">{{ t('sales_add_row_btn') }}</button>
+  <label>{{ t('comment_label') }}<input type="text" name="comment"></label>
+  <p class="meta">{{ t('transfers_send_hint') }}</p>
+  <button type="submit">{{ t('transfers_send_btn') }}</button>
+</form>
+
+<template id="transferRowTemplate">
+  <div class="transfer-row" style="display:flex; gap:6px; flex-wrap:wrap; align-items:center; padding-top:8px; border-top: 1px solid var(--border);">
+    <input type="text" class="line-search" list="transferLineList" name="line___IDX__" placeholder="{{ t('transfers_line_placeholder') }}" autocomplete="off" style="flex:1; min-width:0;">
+    <input type="hidden" class="line-id-input" name="line_id___IDX__">
+    <input type="number" name="qty___IDX__" placeholder="{{ t('qty_col') }}" min="1" style="width:90px; flex:0 0 auto;">
+    <div class="transfer-row-hint meta" style="display:none; flex-basis:100%;"></div>
+  </div>
+</template>
+
+<script>
+/* Same picker pattern as sale-rows.js / purchase-rows.js: a text field
+   with a datalist of this склад's stock lines (one per партия per cell),
+   resolved to a hidden "batch:cell" id. A hardware scanner types an IMEI
+   or SKU into the field like any keyboard — a line whose label contains
+   exactly one match is picked on Enter-less input too. */
+(function () {
+  var lines = {{ lines_for_picker | tojson }};
+  var byLabel = {};
+  var datalist = document.getElementById("transferLineList");
+  lines.forEach(function (l) {
+    byLabel[l.label] = l;
+    var opt = document.createElement("option");
+    opt.value = l.label;
+    datalist.appendChild(opt);
+  });
+  var rows = document.getElementById("transferRows");
+  var countInput = document.getElementById("transferRowCount");
+  var template = document.getElementById("transferRowTemplate");
+  var nextIndex = rows.children.length;
+
+  function resolve(input) {
+    var row = input.closest(".transfer-row");
+    var hidden = row.querySelector(".line-id-input");
+    var qty = row.querySelector('[name^="qty_"]');
+    var hint = row.querySelector(".transfer-row-hint");
+    var typed = input.value.trim();
+    var line = byLabel[typed];
+    if (!line && typed.length >= 4) {
+      var needle = typed.toLowerCase();
+      var found = lines.filter(function (l) { return l.label.toLowerCase().indexOf(needle) !== -1; });
+      if (found.length === 1) { line = found[0]; input.value = line.label; }
+    }
+    if (line) {
+      hidden.value = line.id;
+      qty.max = line.qty;
+      if (line.serial || line.qty === 1) { qty.value = 1; }
+      hint.style.display = "none";
+    } else {
+      hidden.value = "";
+      hint.style.display = typed ? "block" : "none";
+      hint.textContent = "⚠️ {{ t('transfers_line_not_found') }}";
+    }
+  }
+  rows.addEventListener("input", function (e) {
+    if (e.target.classList.contains("line-search")) resolve(e.target);
+  });
+  document.getElementById("addTransferRowBtn").addEventListener("click", function () {
+    var wrapper = document.createElement("div");
+    wrapper.innerHTML = template.innerHTML.split("__IDX__").join(String(nextIndex)).trim();
+    rows.appendChild(wrapper.firstElementChild);
+    nextIndex++;
+    countInput.value = nextIndex;
+  });
+})();
+</script>
+{% else %}
+<p class="meta">{{ t('transfers_no_source') }}</p>
+{% endif %}
+
+<h2>{{ t('transfers_history_title') }}</h2>
+<div class="table-scroll">
+<table class="table">
+  <thead><tr><th>№</th><th>{{ t('transfers_route_col') }}</th><th>{{ t('col_status') }}</th><th>{{ t('col_when') }}</th></tr></thead>
+  <tbody>
+    {% for tr in history %}
+    <tr onclick="location.href='{{ link('/transfers/' ~ tr.id) }}'" class="clickable">
+      <td>{{ tr.id }}</td>
+      <td>{{ tr.route }}</td>
+      <td><span class="pill {{ 'pill-cancelled' if tr.status == 'cancelled' else 'pill-ready' }}">{{ t('transfer_status_' ~ tr.status) }}</span>{% if tr.discrepancy_note %} <span class="pill pill-new">{{ t('transfer_shortage_pill') }}</span>{% endif %}</td>
+      <td>{{ tr.sent_at | kyiv }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="4">{{ t('transfers_history_empty') }}</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}

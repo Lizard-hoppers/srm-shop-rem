@@ -8,6 +8,8 @@ import re
 import secrets
 import sqlite3
 
+from core import storage as _storage
+
 _ITERATIONS = 260_000
 
 PAY_TYPES = {"percent": "Процент от прибыли", "fixed": "Фиксированная ставка за ремонт"}
@@ -108,6 +110,9 @@ def create_master(
            VALUES (?, ?, ?, 'master', ?, ?, ?, ?)""",
         (login, hash_password(secrets.token_hex(16)), name.strip(), telegram_id, pay_type, pay_value, location_id),
     )
+    # Every master has a материально-ответственный склад from the moment
+    # he exists (core.warehouses) — parts handed to him land there.
+    _storage.ensure_master_warehouse(conn, cur.lastrowid, name.strip())
     return cur.lastrowid
 
 
@@ -141,6 +146,7 @@ def update_master(
         "WHERE id = ? AND role = 'master'",
         (name.strip(), telegram_id, pay_type, pay_value, location_id, staff_id),
     )
+    _storage.ensure_master_warehouse(conn, staff_id, name.strip())
 
 
 def set_master_active(conn: sqlite3.Connection, staff_id: int, active: bool) -> None:

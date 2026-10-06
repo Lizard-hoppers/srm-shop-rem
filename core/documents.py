@@ -38,12 +38,17 @@ DOC_TYPES: dict[str, tuple[str, str]] = {
     "transfer": ("ПМ", "Перемещение"),
     "cash_out": ("РКО", "Расход из кассы"),
     "cash_adjust": ("КР", "Корректировка кассы"),
+    "exchange": ("ОБ", "Обмен валют"),
+    "money_transfer": ("ДП", "Перемещение денег"),
+    "shift": ("СМ", "Открытие смены"),
 }
 
 # Types whose number IS the id of the row they wrap (repair №44 has always
 # been called «№44» on its card and in the group chat — its document is
 # РК-44, not a second, different number). The rest count up on their own.
-_NUMBER_FROM_REF = {"repair", "sale", "buyback", "receipt", "supplier_return"}
+_NUMBER_FROM_REF = {
+    "repair", "sale", "buyback", "receipt", "supplier_return", "exchange", "money_transfer", "shift",
+}
 
 # Where «открыть документ» leads, by type. {id} is ref_id.
 _SOURCE_PATHS = {
@@ -74,6 +79,8 @@ def type_name(doc_type: str) -> str:
 
 
 def source_path(doc: sqlite3.Row) -> str | None:
+    if doc["doc_type"] == "transfer" and doc["ref_table"] == "stock_transfers":
+        return f"/transfers/{doc['ref_id']}"
     template = _SOURCE_PATHS.get(doc["doc_type"])
     return template.format(id=doc["ref_id"]) if template and doc["ref_id"] else None
 

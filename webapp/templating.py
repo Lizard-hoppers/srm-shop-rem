@@ -5,6 +5,7 @@ import uuid
 from fastapi import Request
 from fastapi.templating import Jinja2Templates
 
+from core.accounts import money as normalize_money
 from core.i18n import DEFAULT_LANGUAGE, t as translate
 from core.storage import get_conn
 from core.store_settings import get_settings as get_store_settings
@@ -16,6 +17,19 @@ templates = Jinja2Templates(directory=os.path.join(os.path.dirname(__file__), "t
 templates.env.globals["role_labels"] = ROLE_LABELS
 templates.env.filters["kyiv"] = kyiv_datetime
 templates.env.filters["rudate"] = ru_date
+
+
+def _money(value) -> str:
+    """Amounts as staff read them: «500», «12.5», «1 200» is NOT applied
+    (existing screens show bare numbers) — only the float tail goes: a
+    whole amount never renders as «500.0»."""
+    if value is None:
+        return "—"
+    normalized = normalize_money(value)
+    return str(normalized)
+
+
+templates.env.filters["money"] = _money
 
 # Telegram's WebView caches static/* by ETag and can keep serving a stale
 # copy after a deploy; tying every static asset URL to this process's start

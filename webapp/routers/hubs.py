@@ -14,6 +14,7 @@ from core import vision_ocr
 from core.storage import get_conn
 from core.store_access import stores_for_staff
 from webapp.deps import link, require_staff
+from webapp.routers import transfers as transfers_router
 from webapp.templating import render
 
 router = APIRouter()
@@ -23,7 +24,9 @@ _MAX_PHOTO_BYTES = 15 * 1024 * 1024  # comfortably under nginx's client_max_body
 
 @router.get("/warehouse")
 def warehouse_hub(request: Request, staff=Depends(require_staff)):
-    return render(request, "warehouse_hub.html", staff=staff)
+    with get_conn() as conn:
+        pending = transfers_router.pending_count(conn, staff)
+    return render(request, "warehouse_hub.html", staff=staff, pending_transfers=pending)
 
 
 @router.get("/warehouse/find")
@@ -42,6 +45,12 @@ def warehouse_find(request: Request, code: str = "", staff=Depends(require_staff
         product = core_inventory.get_product_by_sku(conn, code)
         if product:
             return RedirectResponse(link(request, f"/inventory/products/{product['id']}"), status_code=303)
+
+        # A phone's own IMEI barcode — lands on the product card of that
+        # exact unit (its партия row there says which склад it is at).
+        unit = core_inventory.find_unit_by_imei(conn, code)
+        if unit:
+            return RedirectResponse(link(request, f"/inventory/products/{unit['product_id']}"), status_code=303)
 
         client_id = core_qr.parse_client_code(code)
         if client_id and core_clients.get_client(conn, client_id):

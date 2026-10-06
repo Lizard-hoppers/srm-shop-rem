@@ -1,0 +1,21 @@
+{# «Оплата» — one amount field per денежный счёт of the точка; a foreign-
+   currency account also gets a rate field (гривен за единицу). Read back
+   by webapp.payments.payments_from_form. Pair layout follows the project
+   rule for two fields in a row: the first flexes (min-width:0), the
+   second is fixed-width. #}
+{% macro rows(accounts, t) %}
+<div class="payment-rows" style="display:flex; flex-direction:column; gap:10px;">
+  {% for a in accounts %}
+  <label>{{ a.name }}{% if a.currency != 'UAH' %}, {{ a.currency }}{% endif %}
+    <div style="display:flex; gap:6px;">
+      <input type="text" inputmode="decimal" name="pay_{{ a.id }}" class="pay-amount" data-currency="{{ a.currency }}"
+             placeholder="0" autocomplete="off" style="flex:1; min-width:0;">
+      {% if a.currency != 'UAH' %}
+      <input type="text" inputmode="decimal" name="rate_{{ a.id }}" class="pay-rate"
+             placeholder="{{ t('pay_rate_placeholder') }}" autocomplete="off" style="width:100px; flex:0 0 auto;">
+      {% endif %}
+    </div>
+  </label>
+  {% endfor %}
+</div>
+{% endmacro %}

@@ -1,7 +1,9 @@
-"""Products, storage cells, stock levels and movements.
+"""Products, storage cells, партии, stock levels and movements.
 
 `stock_movements` is the audit ledger; `stock` (product_id, cell_id) -> qty
-is a cache kept in sync by _apply_stock_delta so reads stay cheap.
+is the per-cell total kept in sync by record_movement so reads stay cheap,
+and `batch_stock` is that same quantity broken down by партия (origin and
+cost) — see the «партии» section below.
 """
 from __future__ import annotations
 
@@ -51,11 +53,12 @@ def create_product(
     is_sellable: bool,
     min_qty: int,
     price: int | None,
+    is_serial: bool = False,
 ) -> int:
     cur = conn.execute(
-        """INSERT INTO products (name, sku, category, unit, is_repair_part, is_sellable, min_qty, price)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-        (name, sku or None, category, unit, int(is_repair_part), int(is_sellable), min_qty, price),
+        """INSERT INTO products (name, sku, category, unit, is_repair_part, is_sellable, min_qty, price, is_serial)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (name, sku or None, category, unit, int(is_repair_part), int(is_sellable), min_qty, price, int(bool(is_serial))),
     )
     return cur.lastrowid
 
@@ -151,6 +154,21 @@ def low_stock_report(conn: sqlite3.Connection, location_id: int | None = None) -
     ).fetchall()
 
 
+def stock_value(conn: sqlite3.Connection, location_id: int | None = None):
+    """«В товаре» — what the stock on hand cost to buy, партия by партия
+    (qty × that партия's гривня cost). A партия with no cost on record
+    (manual stock with no purchase history) counts as 0."""
+    clause, params = _locations.cells_clause(location_id, "batch_stock.cell_id")
+    row = conn.execute(
+        f"""SELECT COALESCE(SUM(batch_stock.qty * COALESCE(batches.unit_cost_uah, 0)), 0) AS total
+            FROM batch_stock JOIN batches ON batches.id = batch_stock.batch_id
+            WHERE batch_stock.qty > 0{clause}""",
+        params,
+    ).fetchone()
+    total = round(row["total"], 2)
+    return int(total) if total == int(total) else total
+
+
 # ---- storage cells ----
 
 class DuplicateCellError(Exception):
@@ -216,14 +234,32 @@ def _apply_stock_delta(conn: sqlite3.Connection, product_id: int, cell_id: int, 
         )
 
 
-def _latest_unit_cost(conn: sqlite3.Connection, product_id: int) -> int | None:
-    """Best-known cost basis for a product right now — the unit_cost of its
-    most recent goods receipt. Parts from different suppliers aren't
-    segregated by cell (see core.purchases.create_supplier_return's
-    docstring — deliberately not batch-tracked), so this is an
-    approximation, not the exact cost of the specific unit consumed —
-    good enough for a repair's profit estimate (see core.masters), not
-    precise accounting."""
+# ---- партии ----
+#
+# Every unit of stock belongs to a партия (see the `batches` table): where
+# it came from and what it cost. `stock` is the per-cell total, batch_stock
+# the same quantity by партия; record_movement below is the only writer of
+# both and keeps them equal.
+
+class DuplicateImeiError(Exception):
+    pass
+
+
+class SerialUnitError(Exception):
+    pass
+
+
+def _latest_unit_cost(conn: sqlite3.Connection, product_id: int):
+    """The product's most recent purchase cost in гривня — the price tag
+    for stock arriving with no cost of its own (a manual «оприходование»).
+    From the newest priced партия; falls back to the newest priced приход
+    line for products last bought before партии existed."""
+    row = conn.execute(
+        "SELECT unit_cost_uah FROM batches WHERE product_id = ? AND unit_cost_uah IS NOT NULL ORDER BY id DESC LIMIT 1",
+        (product_id,),
+    ).fetchone()
+    if row:
+        return row["unit_cost_uah"]
     row = conn.execute(
         """SELECT goods_receipt_items.unit_cost
            FROM goods_receipt_items
@@ -234,6 +270,118 @@ def _latest_unit_cost(conn: sqlite3.Connection, product_id: int) -> int | None:
         (product_id,),
     ).fetchone()
     return row["unit_cost"] if row else None
+
+
+def normalize_imei(value: str | None) -> str | None:
+    """IMEI / serial as typed or scanned -> one canonical form (no spaces,
+    upper case), None for blank."""
+    cleaned = "".join(str(value or "").split()).upper()
+    return cleaned or None
+
+
+def find_unit_by_imei(conn: sqlite3.Connection, imei: str | None) -> sqlite3.Row | None:
+    """The serial unit with this IMEI that is in stock right now, with
+    where it is — None if there is no such unit on hand."""
+    imei = normalize_imei(imei)
+    if not imei:
+        return None
+    return conn.execute(
+        """SELECT batches.*, batch_stock.cell_id, batch_stock.qty, products.name AS product_name
+           FROM batches
+           JOIN batch_stock ON batch_stock.batch_id = batches.id AND batch_stock.qty > 0
+           JOIN products ON products.id = batches.product_id
+           WHERE batches.imei = ? ORDER BY batches.id DESC LIMIT 1""",
+        (imei,),
+    ).fetchone()
+
+
+def create_batch(
+    conn: sqlite3.Connection,
+    product_id: int,
+    *,
+    source: str = "manual",
+    supplier_id: int | None = None,
+    receipt_id: int | None = None,
+    unit_cost=None,
+    currency: str = "UAH",
+    rate: float = 1,
+    imei: str | None = None,
+) -> int:
+    """A new партия. unit_cost is in `currency`; its гривня value at `rate`
+    is what every later document snapshots. An IMEI may exist on only one
+    unit in stock at a time (the same phone can come back later — sold,
+    bought again — as a new партия)."""
+    imei = normalize_imei(imei)
+    if imei and find_unit_by_imei(conn, imei):
+        raise DuplicateImeiError(f"Устройство с IMEI {imei} уже числится на складе.")
+    unit_cost_uah = None if unit_cost is None else round(float(unit_cost) * float(rate or 1), 2)
+    return conn.execute(
+        """INSERT INTO batches (product_id, supplier_id, receipt_id, source, unit_cost, currency, rate, unit_cost_uah, imei)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (product_id, supplier_id, receipt_id, source, unit_cost, currency or "UAH", rate or 1, unit_cost_uah, imei),
+    ).lastrowid
+
+
+def get_batch(conn: sqlite3.Connection, batch_id: int | None) -> sqlite3.Row | None:
+    if not batch_id:
+        return None
+    return conn.execute("SELECT * FROM batches WHERE id = ?", (batch_id,)).fetchone()
+
+
+def _apply_batch_delta(conn: sqlite3.Connection, batch_id: int, cell_id: int, delta: int) -> None:
+    row = conn.execute(
+        "SELECT qty FROM batch_stock WHERE batch_id = ? AND cell_id = ?", (batch_id, cell_id)
+    ).fetchone()
+    new_qty = (row["qty"] if row else 0) + delta
+    if new_qty < 0:
+        raise InsufficientStockError(
+            f"В этой партии на ячейке только {row['qty'] if row else 0}, требуется списать {-delta}"
+        )
+    if row:
+        conn.execute("UPDATE batch_stock SET qty = ? WHERE batch_id = ? AND cell_id = ?", (new_qty, batch_id, cell_id))
+    else:
+        conn.execute("INSERT INTO batch_stock (batch_id, cell_id, qty) VALUES (?, ?, ?)", (batch_id, cell_id, new_qty))
+
+
+def _cover_gap(conn: sqlite3.Connection, product_id: int, cell_id: int) -> None:
+    """Self-heal for stock that reached a cell without a партия (a raw
+    insert, data from before партии): the uncovered remainder becomes one
+    'legacy' партия, same as core.storage's backfill does at startup."""
+    total = conn.execute(
+        "SELECT qty FROM stock WHERE product_id = ? AND cell_id = ?", (product_id, cell_id)
+    ).fetchone()
+    covered = conn.execute(
+        """SELECT COALESCE(SUM(batch_stock.qty), 0) AS n FROM batch_stock
+           JOIN batches ON batches.id = batch_stock.batch_id
+           WHERE batches.product_id = ? AND batch_stock.cell_id = ?""",
+        (product_id, cell_id),
+    ).fetchone()["n"]
+    gap = (total["qty"] if total else 0) - covered
+    if gap > 0:
+        batch_id = create_batch(conn, product_id, source="legacy", unit_cost=_latest_unit_cost(conn, product_id))
+        _apply_batch_delta(conn, batch_id, cell_id, gap)
+
+
+def _allocate(conn: sqlite3.Connection, product_id: int, cell_id: int, qty: int, batch_id: int | None) -> list[tuple[int, int]]:
+    """Which партии an outgoing quantity comes from: the named one, or
+    oldest-first (FIFO) across what the cell holds. [(batch_id, qty), …]."""
+    if batch_id is not None:
+        return [(batch_id, qty)]
+    rows = conn.execute(
+        """SELECT batch_stock.batch_id, batch_stock.qty FROM batch_stock
+           JOIN batches ON batches.id = batch_stock.batch_id
+           WHERE batches.product_id = ? AND batch_stock.cell_id = ? AND batch_stock.qty > 0
+           ORDER BY batch_stock.batch_id""",
+        (product_id, cell_id),
+    ).fetchall()
+    allocations, left = [], qty
+    for row in rows:
+        take = min(left, row["qty"])
+        allocations.append((row["batch_id"], take))
+        left -= take
+        if left == 0:
+            break
+    return allocations
 
 
 def record_movement(
@@ -247,33 +395,131 @@ def record_movement(
     ref_type: str | None = None,
     ref_id: int | None = None,
     comment: str | None = None,
+    batch_id: int | None = None,
 ) -> int:
-    """Apply a stock movement and write the audit row. qty is always positive.
+    """Apply a stock movement and write the audit row(s). qty is always
+    positive. The only writer of `stock`, `batch_stock` and
+    `stock_movements`.
 
-    A 'repair_use' movement snapshots the product's current unit_cost onto
-    the row (see _latest_unit_cost) — core.masters nets this against a
-    repair's price_final to estimate a master's profit-based payout.
-    Snapshotted at write time, not looked up later, so a subsequent
-    purchase-price change never silently reshuffles an already-issued
-    repair's numbers."""
+    Stock leaving a cell comes from a specific партия — `batch_id` if the
+    caller names one (a serial unit, a part picked from a given закупка),
+    otherwise oldest-first; a quantity spanning several партии is written
+    as one movement row per партия. Stock arriving from nowhere (no
+    from_cell) lands in `batch_id`, or in a fresh 'manual' партия priced at
+    the product's last known cost.
+
+    Every row snapshots its партия's гривня cost (unit_cost) at write time
+    — what a repair's or sale's profit is later netted against — so a
+    later purchase at a different price never reshuffles the numbers of
+    something already done. Returns the id of the first row written."""
     if qty <= 0:
         raise ValueError("qty должен быть положительным")
     if from_cell_id is None and to_cell_id is None:
         raise ValueError("нужна хотя бы одна ячейка (from или to)")
 
     if from_cell_id is not None:
+        # Everything that can refuse is checked BEFORE the first write:
+        # several callers catch InsufficientStockError inside their own
+        # `with get_conn()` block and render an error page, which commits
+        # — a half-applied movement must never be what gets committed.
+        _cover_gap(conn, product_id, from_cell_id)
+        if batch_id is not None:
+            held = conn.execute(
+                "SELECT qty FROM batch_stock WHERE batch_id = ? AND cell_id = ?", (batch_id, from_cell_id)
+            ).fetchone()
+            if not held or held["qty"] < qty:
+                raise InsufficientStockError(
+                    f"В этой партии на ячейке только {held['qty'] if held else 0}, требуется списать {qty}"
+                )
+        # The total: its «недостаточно товара» message is the one staff know.
         _apply_stock_delta(conn, product_id, from_cell_id, -qty)
+        allocations = _allocate(conn, product_id, from_cell_id, qty, batch_id)
+    else:
+        if batch_id is None:
+            batch_id = create_batch(conn, product_id, unit_cost=_latest_unit_cost(conn, product_id))
+        allocations = [(batch_id, qty)]
     if to_cell_id is not None:
         _apply_stock_delta(conn, product_id, to_cell_id, qty)
 
-    unit_cost = _latest_unit_cost(conn, product_id) if reason == "repair_use" else None
-    cur = conn.execute(
-        """INSERT INTO stock_movements
-           (product_id, from_cell_id, to_cell_id, qty, reason, ref_type, ref_id, staff_id, comment, unit_cost)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (product_id, from_cell_id, to_cell_id, qty, reason, ref_type, ref_id, staff_id, comment, unit_cost),
-    )
-    return cur.lastrowid
+    first_id = None
+    for allocated_batch, allocated_qty in allocations:
+        if from_cell_id is not None:
+            _apply_batch_delta(conn, allocated_batch, from_cell_id, -allocated_qty)
+        if to_cell_id is not None:
+            _apply_batch_delta(conn, allocated_batch, to_cell_id, allocated_qty)
+        batch = get_batch(conn, allocated_batch)
+        movement_id = conn.execute(
+            """INSERT INTO stock_movements
+               (product_id, from_cell_id, to_cell_id, qty, reason, ref_type, ref_id, staff_id, comment,
+                unit_cost, batch_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (product_id, from_cell_id, to_cell_id, allocated_qty, reason, ref_type, ref_id, staff_id, comment,
+             batch["unit_cost_uah"] if batch else None, allocated_batch),
+        ).lastrowid
+        first_id = first_id or movement_id
+    return first_id
+
+
+def list_batches(conn: sqlite3.Connection, product_id: int, in_stock_only: bool = True) -> list[sqlite3.Row]:
+    """The product's партии with what is left of each and where — «чей
+    именно товар»: supplier, приход, cost, and for a serial unit its IMEI."""
+    having = "HAVING qty_left > 0" if in_stock_only else ""
+    return conn.execute(
+        f"""SELECT batches.*, suppliers.name AS supplier_name,
+                   COALESCE(SUM(batch_stock.qty), 0) AS qty_left,
+                   GROUP_CONCAT(CASE WHEN batch_stock.qty > 0
+                                     THEN warehouses.name || ' · ' || storage_cells.code || ' × ' || batch_stock.qty END,
+                                '; ') AS where_text
+            FROM batches
+            LEFT JOIN suppliers ON suppliers.id = batches.supplier_id
+            LEFT JOIN batch_stock ON batch_stock.batch_id = batches.id
+            LEFT JOIN storage_cells ON storage_cells.id = batch_stock.cell_id
+            LEFT JOIN warehouses ON warehouses.id = storage_cells.warehouse_id
+            WHERE batches.product_id = ?
+            GROUP BY batches.id {having}
+            ORDER BY batches.id DESC""",
+        (product_id,),
+    ).fetchall()
+
+
+def stock_lines(
+    conn: sqlite3.Connection, *, warehouse_id: int | None = None, location_id: int | None = None,
+    product_id: int | None = None,
+) -> list[sqlite3.Row]:
+    """Stock on hand, one row per партия per cell — the picker for
+    anything that must name a specific партия/IMEI (перемещение, продажа
+    of a serial unit) and the contents list of a склад."""
+    query = """SELECT batch_stock.batch_id, batch_stock.cell_id, batch_stock.qty,
+                      batches.product_id, batches.imei, batches.unit_cost_uah, batches.receipt_id,
+                      products.name AS product_name, products.sku, products.unit, products.is_serial,
+                      suppliers.name AS supplier_name, storage_cells.code AS cell_code,
+                      warehouses.id AS warehouse_id, warehouses.name AS warehouse_name, warehouses.kind AS warehouse_kind,
+                      warehouses.location_id AS location_id
+               FROM batch_stock
+               JOIN batches ON batches.id = batch_stock.batch_id
+               JOIN products ON products.id = batches.product_id
+               JOIN storage_cells ON storage_cells.id = batch_stock.cell_id
+               JOIN warehouses ON warehouses.id = storage_cells.warehouse_id
+               LEFT JOIN suppliers ON suppliers.id = batches.supplier_id
+               WHERE batch_stock.qty > 0"""
+    params: list = []
+    if warehouse_id is not None:
+        query += " AND warehouses.id = ?"
+        params.append(warehouse_id)
+    if location_id is not None:
+        query += " AND warehouses.location_id = ?"
+        params.append(location_id)
+    if product_id is not None:
+        query += " AND batches.product_id = ?"
+        params.append(product_id)
+    return conn.execute(query + " ORDER BY products.name, batch_stock.batch_id", params).fetchall()
+
+
+def set_product_serial(conn: sqlite3.Connection, product_id: int, is_serial: bool) -> None:
+    """Серийный товар (телефон): every unit is its own партия with an
+    IMEI. Its own setter, like set_product_description — update_product is
+    the full-replace behind the «Данные товара» form's original fields."""
+    conn.execute("UPDATE products SET is_serial = ? WHERE id = ?", (int(bool(is_serial)), product_id))
 
 
 # The three manual stock operations (Склад → Движения, «Добавить остаток» on
@@ -292,8 +538,22 @@ def _manual_movement_document(
     )
 
 
-def receive_stock(conn, product_id: int, cell_id: int, qty: int, staff_id: int, comment=None, key=None) -> int:
-    movement_id = record_movement(conn, product_id, qty, "receipt", staff_id, to_cell_id=cell_id, comment=comment)
+def receive_stock(
+    conn, product_id: int, cell_id: int, qty: int, staff_id: int, comment=None, key=None, imei: str | None = None,
+) -> int:
+    """Manual «оприходование» — stock with no supplier document behind it
+    (found on a recount, the opening balance). A serial product comes in
+    one unit at a time, with its IMEI."""
+    batch_id = None
+    product = get_product(conn, product_id)
+    if product and product["is_serial"]:
+        imei = normalize_imei(imei)
+        if qty != 1 or not imei:
+            raise SerialUnitError("Серийный товар добавляется по одному устройству, с IMEI.")
+        batch_id = create_batch(conn, product_id, unit_cost=_latest_unit_cost(conn, product_id), imei=imei)
+    movement_id = record_movement(
+        conn, product_id, qty, "receipt", staff_id, to_cell_id=cell_id, comment=comment, batch_id=batch_id,
+    )
     _manual_movement_document(conn, "stock_in", movement_id, product_id, qty, staff_id, cell_id, key)
     return movement_id
 

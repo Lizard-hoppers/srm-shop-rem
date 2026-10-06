@@ -20,4 +20,24 @@
   </tbody>
 </table>
 </div>
+{% if receipt.currency and receipt.currency != 'UAH' %}<p class="meta">{{ t('purchase_currency_label') }}: {{ receipt.currency }} · {{ t('pay_rate_placeholder') }} {{ receipt.rate | money }}</p>{% endif %}
+
+{% if batches %}
+<h2>{{ t('batches_title') }}</h2>
+<div class="table-scroll">
+<table class="table">
+  <thead><tr><th>{{ t('batch_col') }}</th><th>{{ t('col_product') }}</th><th>{{ t('col_unit_cost') }}</th><th>{{ t('batch_left_col') }}</th></tr></thead>
+  <tbody>
+    {% for b in batches %}
+    <tr onclick="location.href='{{ link('/inventory/products/' ~ b.product_id) }}'" class="clickable">
+      <td>№{{ b.id }}{% if b.imei %}<div class="meta">IMEI {{ b.imei }}</div>{% endif %}</td>
+      <td>{{ b.product_name }}</td>
+      <td>{{ b.unit_cost_uah | money }} грн</td>
+      <td>{{ b.qty_left }} {{ b.unit }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
 {% endblock %}

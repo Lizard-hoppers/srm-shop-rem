@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% import "_icons.html" as icons %}
+{% block title %}{{ t('shift_title') }}{% endblock %}
+{% block content %}
+<a class="back-link" href="{{ link('/') }}">{{ icons.icon('back', 16) }} {{ t('nav_home') }}</a>
+{% if error %}<div class="flash flash-error">{{ error }}</div>{% endif %}
+
+<div class="panel-box">
+  <h3 style="margin:0;">{{ staff.name }}{% if store_name %} · {{ store_name }}{% endif %}</h3>
+  <p class="meta" style="margin:6px 0 0;">
+    {% if shift %}<span class="pill pill-ready">{{ t('shift_status_open') }}</span> · {{ shift.opened_at | kyiv }}{% if shift.discrepancy_note %} · {{ t('shift_discrepancy_prefix') }} {{ shift.discrepancy_note }}{% endif %}
+    {% else %}<span class="pill pill-cancelled">{{ t('shift_not_open') }}</span>{% endif %}
+  </p>
+</div>
+
+<h2>{{ t('shift_check_title') }}</h2>
+<div class="table-scroll">
+<table class="table">
+  <tbody>
+    {% for a in snapshot.accounts %}
+    <tr><td>{{ a.name }}</td><td><b>{{ a.balance | money }}</b> {{ a.currency_label }}</td></tr>
+    {% endfor %}
+    <tr><td>{{ t('shift_stock_value_label') }}</td><td><b>{{ snapshot.stock_value | money }}</b> грн</td></tr>
+  </tbody>
+</table>
+</div>
+<p class="meta">{{ t('shift_check_hint') }}</p>
+
+{% if not shift %}
+<form method="post" action="{{ link('/cash/shift/open') }}" class="edit-form">
+  <button type="submit">{{ t('shift_open_ok_btn') }}</button>
+</form>
+<form method="post" action="{{ link('/cash/shift/open') }}" class="edit-form" style="margin-top: 12px;">
+  <input type="hidden" name="mismatch" value="1">
+  <label>{{ t('shift_mismatch_label') }}<input type="text" name="note" placeholder="{{ t('shift_mismatch_placeholder') }}"></label>
+  <button type="submit" class="secondary">{{ t('shift_open_mismatch_btn') }}</button>
+</form>
+{% else %}
+<form method="post" action="{{ link('/cash/shift/close') }}" class="edit-form">
+  <button type="submit" class="secondary">{{ t('shift_close_btn') }}</button>
+</form>
+{% endif %}
+{% endblock %}

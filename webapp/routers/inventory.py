@@ -17,7 +17,8 @@ from core import print_queue
 from core import purchases as core_purchases
 from core import store_settings as core_store_settings
 from core import vision_ocr
-from core.inventory import DuplicateCellError, InsufficientStockError
+from core import warehouses as core_warehouses
+from core.inventory import DuplicateCellError, DuplicateImeiError, InsufficientStockError, SerialUnitError
 from core.storage import get_conn
 from webapp.deps import idem_key, link, loc, optional_int, require_role, require_staff
 from webapp.templating import render
@@ -53,6 +54,7 @@ def products_create(
     price: str = Form(""),
     is_repair_part: bool = Form(False),
     is_sellable: bool = Form(False),
+    is_serial: bool = Form(False),
     staff=Depends(require_role(*_STOCK_WRITE_ROLES)),
 ):
     if not name.strip():
@@ -71,6 +73,7 @@ def products_create(
             is_sellable=is_sellable,
             min_qty=optional_int(min_qty) or 0,
             price=optional_int(price),
+            is_serial=is_serial,
         )
     # Straight to the new product's card — that's where stock actually
     # gets added (Добавить остаток), not on this list page.
@@ -130,6 +133,11 @@ def _product_detail_context(conn, product_id: int, location_id: int) -> dict | N
     return {
         "product": product,
         "stock_by_cell": core_inventory.product_stock_by_cell(conn, product_id, location_id),
+        # «Где товар и чей он»: every партия still on hand, at any склад
+        # of the business (this точка's, another's, a master's, в пути).
+        "batches": core_inventory.list_batches(conn, product_id),
+        "elsewhere_qty": core_inventory.product_total_qty(conn, product_id)
+        - core_inventory.product_total_qty(conn, product_id, location_id),
         "cells": core_inventory.list_cells(conn, location_id),
         "receipt_history": core_purchases.list_receipts_for_product(conn, product_id),
         "suppliers": core_purchases.list_suppliers(conn),
@@ -204,6 +212,7 @@ def print_job_status_view(job_id: int, staff=Depends(require_staff)):
 @router.post("/products/{product_id}/receive")
 def product_receive_view(
     request: Request, product_id: int, cell_id: str = Form(""), qty: str = Form(""), idem: str = Form(""),
+    imei: str = Form(""),
     staff=Depends(require_role(*_STOCK_WRITE_ROLES)),
 ):
     """"Добавить остаток" on the product card — the same
@@ -219,7 +228,12 @@ def product_receive_view(
             return render(request, "inventory_product_detail.html", staff=staff, error="Выберите ячейку и укажите количество.", **ctx)
         key = idem_key("stock_in", idem)
         if not core_documents.find_by_key(conn, key):
-            core_inventory.receive_stock(conn, product_id, cid, q, staff["id"], key=key)
+            try:
+                core_inventory.receive_stock(conn, product_id, cid, q, staff["id"], key=key, imei=imei)
+            except (SerialUnitError, DuplicateImeiError) as exc:
+                # Both are raised before anything is written.
+                ctx = _product_detail_context(conn, product_id, loc(request))
+                return render(request, "inventory_product_detail.html", staff=staff, error=str(exc), **ctx)
     return RedirectResponse(link(request, f"/inventory/products/{product_id}"), status_code=303)
 
 
@@ -269,6 +283,7 @@ def product_edit_view(
     price: str = Form(""),
     is_repair_part: bool = Form(False),
     is_sellable: bool = Form(False),
+    is_serial: bool = Form(False),
     staff=Depends(require_role(*_STOCK_WRITE_ROLES)),
 ):
     with get_conn() as conn:
@@ -281,6 +296,7 @@ def product_edit_view(
             unit=unit.strip() or "шт", is_repair_part=is_repair_part, is_sellable=is_sellable,
             min_qty=optional_int(min_qty) or 0, price=optional_int(price),
         )
+        core_inventory.set_product_serial(conn, product_id, is_serial)
     _sync_channel(request, product_id)  # a new name/price shows up on the live channel card too
     return RedirectResponse(link(request, f"/inventory/products/{product_id}"), status_code=303)
 
@@ -496,3 +512,25 @@ def movements_transfer(
             ctx = _movements_context(conn, loc(request))
             return render(request, "inventory_movements.html", staff=staff, error=str(exc), **ctx)
     return RedirectResponse(link(request, "/inventory/movements"), status_code=303)
+
+
+@router.get("/warehouses")
+def warehouses_view(request: Request, staff=Depends(require_staff)):
+    """«Склады» — every склад of the business with what it holds: точки,
+    each master's материально-ответственный склад, and «В пути»."""
+    with get_conn() as conn:
+        rows = core_warehouses.summary(conn)
+    return render(request, "warehouses.html", staff=staff, warehouses=rows)
+
+
+@router.get("/warehouses/{warehouse_id}")
+def warehouse_detail_view(request: Request, warehouse_id: int, staff=Depends(require_staff)):
+    with get_conn() as conn:
+        warehouse = core_warehouses.get_warehouse(conn, warehouse_id)
+        if not warehouse:
+            return RedirectResponse(link(request, "/inventory/warehouses"), status_code=303)
+        lines = core_inventory.stock_lines(conn, warehouse_id=warehouse_id)
+    return render(
+        request, "warehouse_detail.html", staff=staff, warehouse=warehouse,
+        warehouse_name=core_warehouses.display_name(warehouse), lines=lines,
+    )

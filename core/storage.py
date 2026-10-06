@@ -17,6 +17,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 
 from core import device_catalog
+from core import accounts as _accounts
 from core import documents as _documents
 
 DB_PATH = os.environ.get("CRM_DB_PATH", os.path.join(os.path.dirname(__file__), "..", "crm.sqlite3"))
@@ -419,6 +420,141 @@ CREATE INDEX IF NOT EXISTS idx_documents_created ON documents(created_at);
 CREATE INDEX IF NOT EXISTS idx_documents_ref ON documents(doc_type, ref_id);
 CREATE INDEX IF NOT EXISTS idx_documents_client ON documents(client_id);
 
+-- Партии (Заход 3, 06.10): «один SKU — много партий». A партия is one
+-- arrival of a product: which supplier, which приход document, what it
+-- cost (in what currency, at what rate). Stock keeps its origin all the
+-- way through — перемещение, ремонт, продажа, возврат each take from a
+-- specific партия and snapshot its cost. A serial item (телефон) is a
+-- партия of exactly one unit carrying its IMEI. `stock` stays as the
+-- per-cell total every screen already reads; batch_stock is the same
+-- quantity broken down by партия, and core.inventory keeps the two equal.
+CREATE TABLE IF NOT EXISTS batches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_id INTEGER NOT NULL REFERENCES products(id),
+    supplier_id INTEGER REFERENCES suppliers(id),
+    receipt_id INTEGER REFERENCES goods_receipts(id),
+    source TEXT NOT NULL DEFAULT 'manual',
+    unit_cost REAL,
+    currency TEXT NOT NULL DEFAULT 'UAH',
+    rate REAL NOT NULL DEFAULT 1,
+    unit_cost_uah REAL,
+    imei TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_batches_product ON batches(product_id);
+CREATE INDEX IF NOT EXISTS idx_batches_imei ON batches(imei);
+
+CREATE TABLE IF NOT EXISTS batch_stock (
+    batch_id INTEGER NOT NULL REFERENCES batches(id),
+    cell_id INTEGER NOT NULL REFERENCES storage_cells(id),
+    qty INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (batch_id, cell_id)
+);
+
+-- Перемещение товара между складами: «Отправил → В пути → Принял». Sending
+-- moves the goods into the «В пути» склад at once (not sellable, nobody's
+-- yet); they reach the destination only when its keeper — the master
+-- himself for a master's склад — confirms what actually arrived
+-- (received_qty per line; a shortfall stays «в пути» with a note until an
+-- owner settles it). Cell-to-cell inside one склад needs none of this.
+CREATE TABLE IF NOT EXISTS stock_transfers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    from_warehouse_id INTEGER NOT NULL REFERENCES warehouses(id),
+    to_warehouse_id INTEGER NOT NULL REFERENCES warehouses(id),
+    status TEXT NOT NULL DEFAULT 'sent' CHECK(status IN ('sent','received','cancelled')),
+    comment TEXT,
+    sent_by INTEGER REFERENCES staff(id),
+    sent_at TEXT NOT NULL DEFAULT (datetime('now')),
+    received_by INTEGER REFERENCES staff(id),
+    received_at TEXT,
+    discrepancy_note TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_stock_transfers_status ON stock_transfers(status);
+
+CREATE TABLE IF NOT EXISTS stock_transfer_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    transfer_id INTEGER NOT NULL REFERENCES stock_transfers(id),
+    product_id INTEGER NOT NULL REFERENCES products(id),
+    batch_id INTEGER NOT NULL REFERENCES batches(id),
+    from_cell_id INTEGER NOT NULL REFERENCES storage_cells(id),
+    to_cell_id INTEGER REFERENCES storage_cells(id),
+    qty INTEGER NOT NULL,
+    received_qty INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_stock_transfer_items_transfer ON stock_transfer_items(transfer_id);
+
+-- Денежные счета (Заход 2, 06.10): «не одна касса, а набор независимых
+-- балансов» — every точка has its own set (наличные UAH/USD/EUR, ФОП,
+-- карта, USDT by default; owner/admin add, rename and switch off their own
+-- from Касса → Счета). A balance is never stored: it is the signed sum of
+-- the account's live cash_transactions rows (core.accounts.balance), each
+-- of which belongs to a document — «баланс нельзя исправлять вручную».
+CREATE TABLE IF NOT EXISTS money_accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    location_id INTEGER NOT NULL REFERENCES locations(id),
+    kind TEXT NOT NULL CHECK(kind IN ('cash','fop','card','crypto')),
+    currency TEXT NOT NULL,
+    name TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1,
+    sort INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_money_accounts_location ON money_accounts(location_id);
+
+-- Смены: an employee opens their shift at a точка by looking at its
+-- balances and saying «всё совпадает» or «есть расхождение» (the note is
+-- kept — a discrepancy is a signal for the owner, it doesn't fix anything
+-- by itself). snapshot_json is what the balances were at that moment.
+CREATE TABLE IF NOT EXISTS shifts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    location_id INTEGER NOT NULL REFERENCES locations(id),
+    staff_id INTEGER NOT NULL REFERENCES staff(id),
+    opened_at TEXT NOT NULL DEFAULT (datetime('now')),
+    closed_at TEXT,
+    discrepancy_note TEXT,
+    snapshot_json TEXT,
+    closing_snapshot_json TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_shifts_staff ON shifts(staff_id, location_id);
+
+-- Обмен валют: money leaves one account and arrives in another of the same
+-- точка at a rate — two cash_transactions rows (category 'exchange') tied
+-- to this row. Not income and not an expense of the business.
+CREATE TABLE IF NOT EXISTS money_exchanges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    location_id INTEGER NOT NULL REFERENCES locations(id),
+    from_account_id INTEGER NOT NULL REFERENCES money_accounts(id),
+    to_account_id INTEGER NOT NULL REFERENCES money_accounts(id),
+    amount_from REAL NOT NULL,
+    amount_to REAL NOT NULL,
+    rate REAL NOT NULL,
+    comment TEXT,
+    staff_id INTEGER REFERENCES staff(id),
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Перемещение денег between two accounts of the same currency. Between
+-- точки it is «Отправил → В пути → Принял»: the money leaves the source at
+-- once (status 'sent'), and only reaches the destination when someone
+-- there confirms the amount they actually counted (received_amount; a
+-- difference is kept as discrepancy_note, never silently absorbed).
+-- Within one точка it is received in the same step.
+CREATE TABLE IF NOT EXISTS money_transfers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    from_account_id INTEGER NOT NULL REFERENCES money_accounts(id),
+    to_account_id INTEGER NOT NULL REFERENCES money_accounts(id),
+    amount REAL NOT NULL,
+    status TEXT NOT NULL DEFAULT 'sent' CHECK(status IN ('sent','received','cancelled')),
+    comment TEXT,
+    sent_by INTEGER REFERENCES staff(id),
+    sent_at TEXT NOT NULL DEFAULT (datetime('now')),
+    received_by INTEGER REFERENCES staff(id),
+    received_at TEXT,
+    received_amount REAL,
+    discrepancy_note TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_money_transfers_status ON money_transfers(status);
+
 CREATE TABLE IF NOT EXISTS document_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     document_id INTEGER NOT NULL REFERENCES documents(id),
@@ -502,6 +638,83 @@ def _backfill_locations(conn: sqlite3.Connection) -> None:
     conn.execute("UPDATE storage_cells SET warehouse_id = ? WHERE warehouse_id IS NULL", (first_warehouse,))
 
 
+TRANSIT_CELL_CODE = "В-ПУТИ"
+
+
+def master_cell_code(staff_id: int) -> str:
+    return f"МАСТЕР-{staff_id}"
+
+
+def ensure_master_warehouse(conn: sqlite3.Connection, staff_id: int, name: str) -> int:
+    """A master's материально-ответственный склад, with its one cell.
+    Idempotent; returns the warehouse id. Stock only ever lives in cells,
+    so a склад without shelves of its own (a master's, «В пути») gets
+    exactly one, named after it."""
+    row = conn.execute(
+        "SELECT id FROM warehouses WHERE kind = 'master' AND staff_id = ?", (staff_id,)
+    ).fetchone()
+    if row:
+        warehouse_id = row["id"]
+        conn.execute("UPDATE warehouses SET name = ? WHERE id = ?", (name, warehouse_id))
+    else:
+        warehouse_id = conn.execute(
+            "INSERT INTO warehouses (kind, staff_id, name) VALUES ('master', ?, ?)", (staff_id, name)
+        ).lastrowid
+    if not conn.execute("SELECT 1 FROM storage_cells WHERE warehouse_id = ?", (warehouse_id,)).fetchone():
+        conn.execute(
+            "INSERT INTO storage_cells (code, note, warehouse_id) VALUES (?, 'Склад мастера', ?)",
+            (master_cell_code(staff_id), warehouse_id),
+        )
+    return warehouse_id
+
+
+def _ensure_service_cells(conn: sqlite3.Connection) -> None:
+    """The «В пути» склад's single cell, and a склад for every master
+    already on the books."""
+    transit = conn.execute("SELECT id FROM warehouses WHERE kind = 'transit'").fetchone()
+    if transit and not conn.execute(
+        "SELECT 1 FROM storage_cells WHERE warehouse_id = ?", (transit["id"],)
+    ).fetchone():
+        conn.execute(
+            "INSERT INTO storage_cells (code, note, warehouse_id) VALUES (?, 'Товар в пути между складами', ?)",
+            (TRANSIT_CELL_CODE, transit["id"]),
+        )
+    for master in conn.execute("SELECT id, name FROM staff WHERE role = 'master'").fetchall():
+        ensure_master_warehouse(conn, master["id"], master["name"])
+
+
+def _backfill_batches(conn: sqlite3.Connection) -> None:
+    """Stock that was on the shelves before партии existed has no origin
+    on record — each such (product, cell) remainder becomes one 'legacy'
+    партия priced at the product's last known purchase cost, so that
+    batch_stock adds up to stock everywhere from day one."""
+    rows = conn.execute(
+        """SELECT stock.product_id, stock.cell_id, stock.qty,
+                  COALESCE((SELECT SUM(bs.qty) FROM batch_stock bs JOIN batches b ON b.id = bs.batch_id
+                            WHERE b.product_id = stock.product_id AND bs.cell_id = stock.cell_id), 0) AS covered
+           FROM stock WHERE stock.qty > 0"""
+    ).fetchall()
+    for row in rows:
+        gap = row["qty"] - row["covered"]
+        if gap <= 0:
+            continue
+        cost = conn.execute(
+            """SELECT goods_receipt_items.unit_cost FROM goods_receipt_items
+               JOIN goods_receipts ON goods_receipts.id = goods_receipt_items.receipt_id
+               WHERE goods_receipt_items.product_id = ? AND goods_receipt_items.unit_cost IS NOT NULL
+               ORDER BY goods_receipts.created_at DESC, goods_receipts.id DESC LIMIT 1""",
+            (row["product_id"],),
+        ).fetchone()
+        unit_cost = cost["unit_cost"] if cost else None
+        batch_id = conn.execute(
+            "INSERT INTO batches (product_id, source, unit_cost, unit_cost_uah) VALUES (?, 'legacy', ?, ?)",
+            (row["product_id"], unit_cost, unit_cost),
+        ).lastrowid
+        conn.execute(
+            "INSERT INTO batch_stock (batch_id, cell_id, qty) VALUES (?, ?, ?)", (batch_id, row["cell_id"], gap)
+        )
+
+
 def init_db(db_path: str = DB_PATH) -> None:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -532,6 +745,20 @@ def init_db(db_path: str = DB_PATH) -> None:
         _ensure_column(conn, "staff", "client_id", "client_id INTEGER REFERENCES clients(id)")
         _ensure_column(conn, "suppliers", "client_id", "client_id INTEGER REFERENCES clients(id)")
         _ensure_column(conn, "cash_transactions", "cancelled_at", "cancelled_at TEXT")
+        # Заход 2: every money row sits on a specific account; amount is in
+        # that account's currency, amount_uah is what it was worth in гривня
+        # at the operation's own rate (what documents and reports add up).
+        _ensure_column(conn, "cash_transactions", "account_id", "account_id INTEGER REFERENCES money_accounts(id)")
+        _ensure_column(conn, "cash_transactions", "amount_uah", "amount_uah REAL")
+        _ensure_column(conn, "cash_transactions", "rate", "rate REAL")
+        # Заход 3: партии. is_serial marks a product tracked unit by unit
+        # (IMEI); movements and sale lines remember which партия they took.
+        _ensure_column(conn, "products", "is_serial", "is_serial INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "stock_movements", "batch_id", "batch_id INTEGER REFERENCES batches(id)")
+        _ensure_column(conn, "goods_receipts", "currency", "currency TEXT NOT NULL DEFAULT 'UAH'")
+        _ensure_column(conn, "goods_receipts", "rate", "rate REAL NOT NULL DEFAULT 1")
+        _ensure_column(conn, "sales_order_items", "batch_id", "batch_id INTEGER REFERENCES batches(id)")
+        _ensure_column(conn, "sales_order_items", "unit_cost", "unit_cost REAL")
         try:
             # One phone = one контрагент. Partial: a walk-in with no phone
             # on record is fine, any number of them.
@@ -547,6 +774,10 @@ def init_db(db_path: str = DB_PATH) -> None:
         _seed_first_location(conn)
         ensure_warehouses(conn)
         _backfill_locations(conn)
+        _ensure_service_cells(conn)
+        _backfill_batches(conn)
+        _accounts.ensure_default_accounts(conn)
+        _accounts.backfill_transactions(conn)
         _documents.backfill(conn)
         conn.commit()
     finally:

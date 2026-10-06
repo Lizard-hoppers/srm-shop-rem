@@ -14,6 +14,18 @@
   var productPicker = window.PURCHASE_PRODUCTS || [];
   var defaultCellByProduct = window.PURCHASE_DEFAULT_CELLS || {};
   var initialRows = window.PURCHASE_INITIAL_ROWS || null;
+  var serialIds = {};
+  (window.PURCHASE_SERIAL_IDS || []).forEach(function (id) { serialIds[id] = true; });
+
+  /* Валюта накладной: the rate field only matters (and only shows) for a
+     foreign currency. */
+  var currencySelect = document.getElementById("receiptCurrency");
+  var rateRow = document.getElementById("receiptRateRow");
+  if (currencySelect && rateRow) {
+    var syncRate = function () { rateRow.style.display = currencySelect.value === "UAH" ? "none" : "flex"; };
+    currencySelect.addEventListener("change", syncRate);
+    syncRate();
+  }
 
   var labelToId = {};
   var idToLabel = {};
@@ -38,6 +50,11 @@
     var hint = row.querySelector(".new-product-hint");
     var label = searchInput.value.trim();
     var matchedId = labelToId[label];
+
+    /* A serial product (телефон) is received unit by unit — the row
+       opens a field for its IMEIs, one per line. */
+    var imeiInput = row.querySelector(".imei-input");
+    if (imeiInput) imeiInput.style.display = matchedId && serialIds[matchedId] ? "block" : "none";
 
     if (matchedId) {
       hiddenId.value = matchedId;

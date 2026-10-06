@@ -55,7 +55,7 @@ import httpx
 import jinja2
 from PIL import Image
 
-from core import auth, barcode_label, buyback, cash, clients, device_catalog, doc_cancel, documents, inventory, locations, masters, purchases, qr, repairs, sales, store_access, store_prefs, store_settings, stores, timefmt
+from core import accounts, auth, barcode_label, buyback, cash, clients, device_catalog, doc_cancel, documents, inventory, locations, masters, money_ops, shifts, purchases, qr, repairs, sales, store_access, store_prefs, store_settings, stores, timefmt
 from core import session_token as _session_token
 from core import storage
 from core.session_token import make_token, read_token
@@ -991,12 +991,16 @@ def scenario_quick_cash_chat(db_path: str) -> None:
     from core.stores import StoreConfig
 
     CHAT_ID = 777002
+    owner_alerts: list[tuple] = []
     STAFF_TG_ID = 1417059281
     fake_store = StoreConfig(id="1", name="Тестовый магазин", db_path=db_path)
 
     with get_conn(db_path) as conn:
-        auth.create_staff(conn, "cash_bot_tester", "pass", "Кассир Тест", "storekeeper")
+        # admin, not storekeeper: «внести/снять» is a balance correction,
+        # owner/admin only since Заход 2 — and this scenario drives all three.
+        auth.create_staff(conn, "cash_bot_tester", "pass", "Кассир Тест", "admin")
         auth.link_staff_telegram(conn, "cash_bot_tester", STAFF_TG_ID)
+        tester_row = dict(auth.get_staff_by_telegram_id(conn, STAFF_TG_ID))
         balance_before = cash.cash_balance(conn)
 
     class _Chat:
@@ -1038,6 +1042,11 @@ def scenario_quick_cash_chat(db_path: str) -> None:
         async def edit_message_text(self, chat_id, message_id, text, reply_markup=None):
             self.chat.edit(message_id, text, reply_markup)
 
+        async def send_message(self, chat_id, text, **kwargs):
+            # DMs to OTHER people (the owner alert on a shift discrepancy)
+            # — not part of this chat's screen, just recorded.
+            owner_alerts.append((chat_id, text))
+
     class _Msg:
         def __init__(self, chat: "_Chat", bot: "_Bot", text: str) -> None:
             self._chat_log = chat
@@ -1072,7 +1081,7 @@ def scenario_quick_cash_chat(db_path: str) -> None:
 
     original_resolve = qa._resolve_staff_for_dm
     original_get_store = qa.get_store
-    qa._resolve_staff_for_dm = lambda telegram_id: (fake_store, {"role": "storekeeper"})
+    qa._resolve_staff_for_dm = lambda telegram_id: (fake_store, tester_row)
     qa.get_store = lambda store_id: fake_store
 
     async def run() -> None:
@@ -1089,9 +1098,33 @@ def scenario_quick_cash_chat(db_path: str) -> None:
         def screen() -> dict:
             return chat.bot_messages[-1]
 
+        # --- Смена: nothing that writes works before today's shift is open ---
+        await qa.cash_start(say(qa.BTN_CASH), state)
+        check("with no shift open, Касса shows «сверить остатки» (the точка's accounts) instead of its menu",
+              "Сверьте остатки" in screen()["text"] and "Наличные:" in screen()["text"]
+              and "В товаре по всему бизнесу" in screen()["text"] and "Баланс:" not in screen()["text"])
+        await qa.shift_open_mismatch(tap("shift_open_mismatch"), state)
+        check("«есть расхождение» asks what exactly doesn't match", "не сходится" in screen()["text"])
+        await qa.shift_got_note(say("наличных на 200 грн меньше"), state)
+        check("the shift opens anyway, the discrepancy is acknowledged",
+              "Смена открыта" in screen()["text"] and "наличных на 200 грн меньше" in screen()["text"])
+        with get_conn(db_path) as conn:
+            opened = shifts.current_shift(conn, tester_row["id"], 1)
+            check("the shift is on record with its note and a snapshot of the balances",
+                  opened is not None and opened["discrepancy_note"] == "наличных на 200 грн меньше"
+                  and "accounts" in json.loads(opened["snapshot_json"]))
+            shift_doc = documents.get_for(conn, "shift", opened["id"])
+            check("every OTHER owner/admin with a Telegram id is told about the discrepancy, the author isn't",
+                  owner_alerts and all("Расхождение при открытии смены" in text for _cid, text in owner_alerts)
+                  and STAFF_TG_ID not in [cid for cid, _text in owner_alerts])
+            check("and it is in the journal as a document (СМ) carrying the discrepancy",
+                  shift_doc is not None and "Расхождение" in shift_doc["title"])
+
         # --- Расход ---
         await qa.cash_start(say(qa.BTN_CASH), state)
         check("cash menu shows the current balance", "Баланс:" in screen()["text"])
+        check("and offers to close the shift",
+              any(b.callback_data == "shift_close" for row in screen()["markup"].inline_keyboard for b in row))
 
         await qa.cash_menu_expense(tap("cash_menu_expense"), state)
         check("expense flow asks for the amount", "Сумма расхода" in screen()["text"])
@@ -1585,6 +1618,10 @@ def scenario_quick_intake_chat() -> None:
     # genuine handlers from the tap onward.
     _fake_store = SimpleNamespace(id="1", location_id=1, db_path=":memory:")
     qa._resolve_staff_for_dm = lambda telegram_id: (_fake_store, {"role": "master"})
+    # No real base behind this scenario — the shift check has nothing to
+    # read; the shift flow itself is covered in scenario_quick_cash_chat.
+    original_shift_is_open = qa._shift_is_open
+    qa._shift_is_open = lambda store, staff: True
     # client_menu_add re-resolves the store/staff itself (get_store by id,
     # then a real DB lookup by telegram_id) rather than reusing
     # _resolve_staff_for_dm — ":memory:" has no schema/rows and "test-store"
@@ -1690,6 +1727,7 @@ def scenario_quick_intake_chat() -> None:
         asyncio.run(run())
     finally:
         qa._resolve_staff_for_dm = original_resolve
+        qa._shift_is_open = original_shift_is_open
         qa.get_store = original_get_store
         auth.get_staff_by_telegram_id = original_get_staff
 
@@ -3663,8 +3701,14 @@ def scenario_journal_http() -> None:
             doc_page = client.get(f"/journal/{sale_doc['id']}?t={token}")
             check("a document's page shows its trail and a cancel form",
                   doc_page.status_code == 200 and "ПД-001" in doc_page.text and f"/journal/{sale_doc['id']}/cancel" in doc_page.text)
-            check("a document type that can't be cancelled yet says so, with no cancel form",
-                  f"/journal/{stock_doc['id']}/cancel" not in client.get(f"/journal/{stock_doc['id']}?t={token}").text)
+            client.post(f"/cash/shift/open?t={token}", data={})
+            with get_conn(db_path) as conn:
+                shift_doc = documents.list_journal(conn, doc_type="shift")[0]
+            shift_page = client.get(f"/journal/{shift_doc['id']}?t={token}").text
+            check("a document type with nothing to reverse (a shift opening) says so, with no cancel form",
+                  f"/journal/{shift_doc['id']}/cancel" not in shift_page and "нельзя отменить" in shift_page)
+            check("a manual stock-in CAN be cancelled now (партии made it reversible)",
+                  f"/journal/{stock_doc['id']}/cancel" in client.get(f"/journal/{stock_doc['id']}?t={token}").text)
             no_reason = client.post(f"/journal/{sale_doc['id']}/cancel?t={token}", data={"reason": "  "})
             check("cancelling without a reason is a friendly error", no_reason.status_code == 200 and "Укажите причину" in no_reason.text)
             check("a master can't cancel a document (403)",
@@ -3723,7 +3767,12 @@ def scenario_merge_stores_tool() -> None:
     def _to_old_layout(path: str, name: str, sales_channel: str | None = None) -> None:
         with get_conn(path) as conn:
             conn.execute("UPDATE store_settings SET name = ?, sales_channel = ? WHERE id = 1", (name, sales_channel))
-            for table in ("document_events", "documents", "warehouses", "locations"):
+            conn.execute("UPDATE cash_transactions SET account_id = NULL")
+            # Service cells (a master's, «В пути») came with склады.
+            conn.execute("DELETE FROM storage_cells WHERE code = 'В-ПУТИ' OR code LIKE 'МАСТЕР-%'")
+            conn.execute("UPDATE storage_cells SET warehouse_id = NULL")
+            for table in ("document_events", "documents", "shifts", "money_transfers", "money_exchanges",
+                          "money_accounts", "stock_transfer_items", "stock_transfers", "warehouses", "locations"):
                 conn.execute(f"DROP TABLE {table}")
 
     prev_db, prev_config, prev_argv = os.environ["CRM_DB_PATH"], os.environ.get("CRM_STORES_CONFIG"), sys.argv
@@ -3804,6 +3853,894 @@ def scenario_merge_stores_tool() -> None:
                 os.environ["CRM_STORES_CONFIG"] = prev_config
 
 
+def scenario_money() -> None:
+    """Заход 2 core: accounts and their balances, split payments, обмен,
+    перемещение with confirmation, shifts, cancel."""
+    print("scenario: деньги — счета, сплит-оплата, обмен, перемещение, смены")
+    with tempfile.TemporaryDirectory() as tmp, _separate_base(tmp, "money.sqlite3", ("Мастерская", "Магазин")) as db_path:
+        with get_conn(db_path) as conn:
+            owner = auth.create_staff(conn, "m-owner", "pass", "Виталий", "owner")
+            acc = {(a["location_id"], a["kind"], a["currency"]): a["id"] for a in accounts.list_accounts(conn)}
+            check("every точка starts with the default set of six accounts",
+                  len(acc) == 12 and [a["name"] for a in accounts.list_accounts(conn, 1)]
+                  == ["Наличные", "Наличные USD", "Наличные EUR", "Счёт ФОП", "Карта", "Криптокошелёк USDT"])
+            cash_uah, cash_usd, fop, card, usdt = (acc[(1, k, c)] for k, c in
+                                                   (("cash", "UAH"), ("cash", "USD"), ("fop", "UAH"), ("card", "UAH"), ("crypto", "USDT")))
+            check("parse_amount accepts what people type and refuses what isn't an amount",
+                  accounts.parse_amount("1 200") == 1200 and accounts.parse_amount("12,5") == 12.5
+                  and accounts.parse_amount("12.50") == 12.5 and isinstance(accounts.parse_amount("500.0"), int)
+                  and accounts.parse_amount("") is None and accounts.parse_amount("-5") is None
+                  and accounts.parse_amount("0") is None and accounts.parse_amount("abc") is None)
+
+            # ---- split payment of a sale (макет: нал 2000 + ФОП 1500 + карта 1000 + USDT 12.5 × 40 = 5000)
+            cell = inventory.create_cell(conn, "M-1", None, None, location_id=1)
+            phone = inventory.create_product(conn, "iPhone 13", "M-SKU", None, "шт", False, True, 0, 5000)
+            inventory.receive_stock(conn, phone, cell, 3, owner)
+            sale_id = sales.create_sale(
+                conn, None, "offline", owner, [(phone, 1, 5000)], location_id=1,
+                payments=[(cash_uah, "2000", None), (fop, "1500", None), (card, "1000", None), (usdt, "12,5", "40")],
+            )
+            check("each part landed on its own account, in that account's currency",
+                  accounts.balance(conn, cash_uah) == 2000 and accounts.balance(conn, fop) == 1500
+                  and accounts.balance(conn, card) == 1000 and accounts.balance(conn, usdt) == 12.5)
+            check("the sale is marked as paid into several accounts", sales.get_sale(conn, sale_id)["payment_method"] == "mixed")
+            paid = cash.payments_for(conn, "sales_order", sale_id)
+            check("the USDT part remembers its rate and its гривня value (12.5 × 40 = 500)",
+                  [(p["account_name"], p["amount"], p["amount_uah"]) for p in paid][-1] == ("Криптокошелёк USDT", 12.5, 500)
+                  and paid[-1]["rate"] == 40 and sum(p["amount_uah"] for p in paid) == 5000)
+            check("«наличные гривни» is only the cash-UAH account, never the other balances mixed in",
+                  cash.cash_balance(conn, 1) == 2000)
+
+            def _refused(payments, needle, label):
+                try:
+                    # Same connection on purpose: a refused payment is
+                    # raised before create_sale writes anything.
+                    sales.create_sale(conn, None, "offline", owner, [(phone, 1, 5000)], location_id=1, payments=payments)
+                    check(label, False)
+                except cash.PaymentError as exc:
+                    check(label, needle in str(exc))
+
+            _refused([(cash_uah, "3000", None)], "не хватает 2000", "an underpaid split is refused, saying how much is missing")
+            _refused([(cash_uah, "6000", None)], "лишние 1000", "an overpaid one too")
+            _refused([(usdt, "125", None)], "Укажите курс", "a foreign-currency part without a rate is refused")
+            _refused([(acc[(2, "cash", "UAH")], "5000", None)], "нет у этой точки", "another точка's account can't take this точка's sale")
+            _refused([(cash_uah, "abc", None)], "Проверьте сумму", "a garbage amount is refused")
+            check("none of the refused sales left anything behind (no order, no stock gone, no money)",
+                  len(sales.list_sales(conn, location_id=1)) == 1 and inventory.product_total_qty(conn, phone, 1) == 2
+                  and accounts.balance(conn, cash_uah) == 2000)
+            one_tap = sales.create_sale(conn, None, "offline", owner, [(phone, 1, 5000)], payment_method="card", location_id=1)
+            check("the one-tap «карта» path still works: whole total onto the точка's card account",
+                  accounts.balance(conn, card) == 6000 and sales.get_sale(conn, one_tap)["payment_method"] == "card")
+
+            # ---- обмен: −45 000 UAH, +1 000 USD по курсу 45
+            cash.record_adjustment(conn, 50000, "стартовый остаток", owner, location_id=1)
+            exchange_id = money_ops.exchange(conn, cash_uah, cash_usd, "45000", "1000", owner)
+            check("an exchange moves both balances", accounts.balance(conn, cash_uah) == 7000 and accounts.balance(conn, cash_usd) == 1000)
+            ex_doc = documents.get_for(conn, "exchange", exchange_id)
+            check("it is a document (ОБ) with the derived rate in its title",
+                  documents.doc_label(ex_doc).startswith("ОБ-") and "курс 45" in ex_doc["title"])
+            today = timefmt.kyiv_today()
+            utc_start, utc_end = timefmt.kyiv_date_range_utc(today, today)
+            summary = cash.period_summary(conn, utc_start, utc_end, 1)
+            check("an exchange is neither income nor expense in the period summary (деньги ≠ прибыль)",
+                  summary["income_total"] == 60000 and summary["expense_total"] == 0)
+            check("the summary splits наличные vs безнал in гривня: 52 000 cash, 8 000 non-cash (incl. 500 грн of USDT)",
+                  summary["income_cash"] == 52000 and summary["income_card"] == 8000)
+            for args, needle, label in (
+                ((cash_uah, cash_usd, "999999", "100"), "только", "an exchange can't take more than the account holds"),
+                ((cash_uah, fop, "100", "100"), "одна валюта", "same-currency accounts are a перемещение, not an exchange"),
+                ((cash_uah, acc[(2, "cash", "USD")], "100", "2"), "одной точки", "an exchange across точки is refused"),
+                ((cash_uah, cash_uah, "100", "100"), "разными", "an account can't be exchanged into itself"),
+                ((cash_uah, cash_usd, "", "5"), "сколько отдали", "missing amounts are refused"),
+            ):
+                try:
+                    money_ops.exchange(conn, *args, owner)
+                    check(label, False)
+                except accounts.AccountError as exc:
+                    check(label, needle in str(exc))
+
+            # ---- перемещение между точками: Отправил → В пути → Принял
+            usd_2 = acc[(2, "cash", "USD")]
+            transfer_id = money_ops.send_transfer(conn, cash_usd, usd_2, "400", owner, "в магазин")
+            check("sent money leaves the source at once and is NOT yet on the destination",
+                  accounts.balance(conn, cash_usd) == 600 and accounts.balance(conn, usd_2) == 0)
+            check("it is «в пути»: incoming for точка 2, outgoing for точка 1",
+                  [t["id"] for t in money_ops.list_in_transit(conn, 2, "incoming")] == [transfer_id]
+                  and [t["id"] for t in money_ops.list_in_transit(conn, 1, "outgoing")] == [transfer_id]
+                  and money_ops.list_in_transit(conn, 1, "incoming") == [])
+            try:
+                money_ops.receive_transfer(conn, transfer_id, owner, "390")
+                check("receiving a different amount without saying why is refused", False)
+            except accounts.AccountError:
+                check("receiving a different amount without saying why is refused", True)
+            money_ops.receive_transfer(conn, transfer_id, owner, "390", "одной купюры не хватило")
+            received = money_ops.get_transfer(conn, transfer_id)
+            check("the destination gets what was actually counted; the difference stays on record",
+                  accounts.balance(conn, usd_2) == 390 and received["status"] == "received"
+                  and received["discrepancy_note"] == "одной купюры не хватило"
+                  and [t["id"] for t in money_ops.list_discrepancies(conn)] == [transfer_id])
+            tr_doc = documents.get_for(conn, "money_transfer", transfer_id)
+            check("the document's trail shows the discrepancy",
+                  [e["event"] for e in documents.get_events(conn, tr_doc["id"])] == ["created", "discrepancy"])
+            try:
+                money_ops.receive_transfer(conn, transfer_id, owner)
+                check("a transfer can't be received twice", False)
+            except accounts.AccountError:
+                check("a transfer can't be received twice", True)
+            inside = money_ops.send_transfer(conn, cash_uah, fop, "1000", owner)
+            check("a перемещение inside one точка needs no confirmation — it arrives immediately",
+                  money_ops.get_transfer(conn, inside)["status"] == "received"
+                  and accounts.balance(conn, cash_uah) == 6000 and accounts.balance(conn, fop) == 2500)
+            try:
+                money_ops.send_transfer(conn, cash_uah, cash_usd, "10", owner)
+                check("a перемещение between different currencies is refused (that's an обмен)", False)
+            except accounts.AccountError:
+                check("a перемещение between different currencies is refused (that's an обмен)", True)
+            summary = cash.period_summary(conn, utc_start, utc_end)
+            check("transfers don't inflate the business-wide summary either", summary["income_total"] == 60000 and summary["expense_total"] == 0)
+
+            # ---- отмена
+            pending = money_ops.send_transfer(conn, cash_uah, acc[(2, "cash", "UAH")], "500", owner)
+            doc_cancel.cancel_document(conn, documents.get_for(conn, "money_transfer", pending)["id"], owner, "не тот счёт")
+            check("cancelling a transfer still «в пути» returns the money and it can no longer be received",
+                  accounts.balance(conn, cash_uah) == 6000 and money_ops.get_transfer(conn, pending)["status"] == "cancelled"
+                  and money_ops.list_in_transit(conn, 2, "incoming") == [])
+            doc_cancel.cancel_document(conn, ex_doc["id"], owner, "не тот курс")
+            check("cancelling an exchange puts both sides back",
+                  accounts.balance(conn, cash_uah) == 51000 and accounts.balance(conn, cash_usd) == -400)
+            doc_cancel.cancel_document(conn, documents.get_for(conn, "sale", sale_id)["id"], owner, "возврат")
+            check("cancelling a split-paid sale takes the money back out of EVERY account it went into",
+                  accounts.balance(conn, usdt) == 0 and accounts.balance(conn, card) == 5000
+                  and accounts.balance(conn, fop) == 1000 and accounts.balance(conn, cash_uah) == 49000)
+
+            # ---- счета точки
+            try:
+                accounts.set_active(conn, card, False)
+                check("an account that still holds money can't be switched off", False)
+            except accounts.AccountError:
+                check("an account that still holds money can't be switched off", True)
+            eur = acc[(1, "cash", "EUR")]
+            accounts.set_active(conn, eur, False)
+            check("a switched-off empty account disappears from pickers and from the balances list",
+                  eur not in [a["id"] for a in accounts.list_accounts(conn, 1)]
+                  and eur not in [a["id"] for a in accounts.balances(conn, 1)])
+            mono = accounts.create_account(conn, 1, "card", "UAH", "  Монобанк  ")
+            check("a new account can be added and renamed",
+                  accounts.get_account(conn, mono)["name"] == "Монобанк" and accounts.balance(conn, mono) == 0)
+            for bad in (("nope", "UAH", "X"), ("card", "RUB", "X"), ("card", "UAH", "  ")):
+                try:
+                    accounts.create_account(conn, 1, *bad)
+                    check(f"a bad account {bad} is refused", False)
+                except accounts.AccountError:
+                    check(f"a bad account {bad} is refused", True)
+
+            # ---- смены
+            check("no shift is open at first", shifts.current_shift(conn, owner, 1) is None)
+            snap = shifts.snapshot(conn, 1)
+            check("«сверить остатки» lists the точка's accounts with balances, and goods across the whole business",
+                  {a["name"]: a["balance"] for a in snap["accounts"]}["Наличные"] == 49000 and snap["stock_value"] == 0)
+            shift_id = shifts.open_shift(conn, owner, 1)
+            check("opening a shift makes it current; a second open is the same shift, not a new one",
+                  shifts.current_shift(conn, owner, 1)["id"] == shift_id and shifts.open_shift(conn, owner, 1) == shift_id)
+            check("a shift belongs to its точка — none is open at the other one", shifts.current_shift(conn, owner, 2) is None)
+            conn.execute("UPDATE shifts SET opened_at = datetime('now', '-2 days') WHERE id = ?", (shift_id,))
+            check("yesterday's shift doesn't count as open today", shifts.current_shift(conn, owner, 1) is None)
+            new_shift = shifts.open_shift(conn, owner, 1, "в кассе на 100 грн больше")
+            check("opening today's shift closes the stale one and records the discrepancy",
+                  new_shift != shift_id
+                  and conn.execute("SELECT closed_at FROM shifts WHERE id = ?", (shift_id,)).fetchone()["closed_at"] is not None
+                  and [s["id"] for s in shifts.list_discrepancies(conn)] == [new_shift])
+            shifts.close_shift(conn, new_shift, owner)
+            check("a closed shift is no longer current", shifts.current_shift(conn, owner, 1) is None)
+
+        # ---- a base from before accounts: rows knew only cash/card
+        with get_conn(db_path) as conn:
+            conn.execute("DELETE FROM cash_transactions")
+            conn.execute(
+                "INSERT INTO cash_transactions (kind, method, amount, staff_id, location_id) VALUES ('income', 'cash', 700, ?, 2)", (owner,))
+            conn.execute(
+                "INSERT INTO cash_transactions (kind, method, amount, staff_id, location_id) VALUES ('income', 'card', 300, ?, 2)", (owner,))
+        init_db(db_path)
+        with get_conn(db_path) as conn:
+            check("init_db puts pre-accounts rows onto their точка's default cash / card accounts, worth their own amount",
+                  accounts.balance(conn, acc[(2, "cash", "UAH")]) == 700 and accounts.balance(conn, acc[(2, "card", "UAH")]) == 300
+                  and conn.execute("SELECT COUNT(*) AS n FROM cash_transactions WHERE amount_uah IS NULL").fetchone()["n"] == 0)
+
+
+def scenario_money_http() -> None:
+    print("scenario: деньги over HTTP — касса, сплит-оплата продажи и ремонта, обмен, перемещение, смена, счета")
+    with tempfile.TemporaryDirectory() as tmp, _separate_base(tmp, "money-http.sqlite3", ("Мастерская", "Магазин")) as db_path:
+        with get_conn(db_path) as conn:
+            owner = auth.create_staff(conn, "mh-owner", "pass", "Владелец Денег", "owner")
+            keeper = auth.create_staff(conn, "mh-keeper", "pass", "Кладовщик Первой", "storekeeper", location_id=1)
+            keeper_2 = auth.create_staff(conn, "mh-keeper2", "pass", "Кладовщик Второй", "storekeeper", location_id=2)
+            master = auth.create_staff(conn, "mh-master", "pass", "Мастер", "master")
+            acc = {(a["location_id"], a["kind"], a["currency"]): a["id"] for a in accounts.list_accounts(conn)}
+            cell = inventory.create_cell(conn, "MH-1", None, None, location_id=1)
+            product = inventory.create_product(conn, "Кабель", "MH-SKU", None, "шт", False, True, 0, 400)
+            inventory.receive_stock(conn, product, cell, 10, owner)
+            client_id = clients.get_or_create_by_phone(conn, "Клиент Ремонта", "+380501117700", source="offline")
+            repair_id = repairs.create_repair(conn, client_id, "Смартфон", None, "A54", None, "экран", "offline", None, 3000, owner, location_id=1)
+            repairs.set_price(conn, repair_id, 3000, 3000)
+        cash_uah, fop, usd, usdt = acc[(1, "cash", "UAH")], acc[(1, "fop", "UAH")], acc[(1, "cash", "USD")], acc[(1, "crypto", "USDT")]
+        token, token_2 = make_token(owner, "1"), make_token(owner, "2")
+        keeper_token, keeper2_token, master_token = make_token(keeper, "1"), make_token(keeper_2, "2"), make_token(master, "1")
+
+        import webapp.main
+
+        with TestClient(webapp.main.app) as client:
+            # ---- продажа: наличные 500 + ФОП 700 = 1200 (макет «Клиент и оплата»)
+            sales_page = client.get(f"/sales?t={token}").text
+            check("the sale form has an amount field per account of the точка, and a rate field for foreign ones",
+                  f'name="pay_{cash_uah}"' in sales_page and f'name="pay_{fop}"' in sales_page
+                  and f'name="rate_{usdt}"' in sales_page and f'name="rate_{cash_uah}"' not in sales_page)
+            check("and no field for another точка's accounts", f'name="pay_{acc[(2, "cash", "UAH")]}"' not in sales_page)
+            sale_form = {"row_count": "1", "product_id_0": str(product), "product_name_0": "Кабель", "qty_0": "3", "price_0": "400",
+                         "channel": "offline", f"pay_{cash_uah}": "500", f"pay_{fop}": "700"}
+            done = client.post(f"/sales?t={token}", data=sale_form, follow_redirects=False)
+            check("a sale split across two accounts goes through", done.status_code == 303)
+            with get_conn(db_path) as conn:
+                check("500 landed in наличные, 700 on ФОП",
+                      accounts.balance(conn, cash_uah) == 500 and accounts.balance(conn, fop) == 700)
+            sale_page = client.get(done.headers["location"]).text
+            check("the sale's page shows how it was paid, account by account",
+                  "Счёт ФОП" in sale_page and "700" in sale_page and "Несколько счетов" in sale_page)
+            wrong = client.post(f"/sales?t={token}", data=dict(sale_form, **{f"pay_{fop}": "600"}))
+            check("a split that doesn't add up is a friendly error, not a 500", wrong.status_code == 200 and "не сходится" in wrong.text)
+            with get_conn(db_path) as conn:
+                check("and wrote nothing (stock still 10 − 3)", inventory.product_total_qty(conn, product, 1) == 7)
+            client.post(f"/sales?t={token}", data={"row_count": "1", "product_id_0": str(product), "product_name_0": "Кабель",
+                                                    "qty_0": "1", "price_0": "400", "channel": "offline"})
+            with get_conn(db_path) as conn:
+                check("with no payment fields filled the whole total goes to наличные (one tap)", accounts.balance(conn, cash_uah) == 900)
+
+            # ---- ремонт: выдача с оплатой частично в USD
+            repair_page = client.get(f"/repairs/{repair_id}?t={token_2}").text
+            check("the repair card offers the accounts of the точка that TOOK the repair, even opened from another",
+                  f'name="pay_{cash_uah}"' in repair_page and f'name="pay_{acc[(2, "cash", "UAH")]}"' not in repair_page)
+            no_pay = client.post(f"/repairs/{repair_id}/status?t={token}", data={"status": "issued"})
+            check("marking «Выдан» with a price and no payment is still refused", "Укажите способ оплаты" in no_pay.text)
+            short = client.post(f"/repairs/{repair_id}/status?t={token}", data={"status": "issued", f"pay_{cash_uah}": "1000"})
+            check("an underpaid выдача is refused with the missing amount", "не хватает 2000" in short.text)
+            with get_conn(db_path) as conn:
+                check("the repair is still not issued", repairs.get_repair(conn, repair_id)["status"] != "issued")
+            issued = client.post(f"/repairs/{repair_id}/status?t={token}", data={
+                "status": "issued", f"pay_{cash_uah}": "1360", f"pay_{usd}": "40", f"rate_{usd}": "41"}, follow_redirects=False)
+            check("1360 грн + 40 USD × 41 = 3000 goes through", issued.status_code == 303)
+            with get_conn(db_path) as conn:
+                check("the repair is issued, 40 USD sit on the USD account",
+                      repairs.get_repair(conn, repair_id)["status"] == "issued" and accounts.balance(conn, usd) == 40
+                      and accounts.balance(conn, cash_uah) == 2260)
+            check("the repair card now shows how it was paid instead of the payment fields",
+                  "Наличные USD" in client.get(f"/repairs/{repair_id}?t={token}").text
+                  and f'name="pay_{cash_uah}"' not in client.get(f"/repairs/{repair_id}?t={token}").text)
+            client.post(f"/repairs/{repair_id}/status?t={token}", data={"status": "issued", "comment": "повторно"})
+            with get_conn(db_path) as conn:
+                check("re-saving an already issued repair takes no money twice", accounts.balance(conn, cash_uah) == 2260)
+
+            # ---- касса: страница
+            cash_page = client.get(f"/cash?t={token}").text
+            check("Касса lists every account with its balance",
+                  all(name in cash_page for name in ("Наличные USD", "Счёт ФОП", "Криптокошелёк USDT")) and "2260" in cash_page)
+            check("a storekeeper sees Касса but not the «корректировка» form or the accounts link",
+                  "/cash/adjustment" not in client.get(f"/cash?t={keeper_token}").text
+                  and "/cash/accounts" not in client.get(f"/cash?t={keeper_token}").text
+                  and "/cash/adjustment" in cash_page)
+            check("a storekeeper can't post a correction (403) — only owner/admin",
+                  client.post(f"/cash/adjustment?t={keeper_token}", data={"amount": "100", "direction": "in"}).status_code == 403)
+            check("a master can't open Касса at all (403)", client.get(f"/cash?t={master_token}").status_code == 403)
+            client.post(f"/cash/expense?t={keeper_token}", data={"amount": "150,50", "category": "other", "account_id": str(fop), "comment": "канцтовары"})
+            with get_conn(db_path) as conn:
+                check("an expense can be taken from a chosen account, with kopecks", accounts.balance(conn, fop) == 549.5)
+            foreign = client.post(f"/cash/expense?t={token}", data={"amount": "10", "account_id": str(acc[(2, "cash", "UAH")])})
+            check("an expense from another точка's account is refused", "Выберите счёт этой точки" in foreign.text)
+
+            # ---- обмен
+            bad_ex = client.post(f"/cash/exchange?t={token}", data={"from_account_id": str(cash_uah), "to_account_id": str(usd), "amount_from": "999999", "amount_to": "5"})
+            check("an exchange beyond the balance is a friendly error", bad_ex.status_code == 200 and "только" in bad_ex.text)
+            client.post(f"/cash/exchange?t={token}", data={"from_account_id": str(cash_uah), "to_account_id": str(usd), "amount_from": "2050", "amount_to": "50"})
+            with get_conn(db_path) as conn:
+                check("2050 грн → 50 USD: both balances moved", accounts.balance(conn, cash_uah) == 210 and accounts.balance(conn, usd) == 90)
+
+            # ---- перемещение на другую точку
+            usd_2 = acc[(2, "cash", "USD")]
+            client.post(f"/cash/transfer?t={token}", data={"from_account_id": str(usd), "to_account_id": str(usd_2), "amount": "60", "comment": "инкассация"})
+            with get_conn(db_path) as conn:
+                transfer = money_ops.list_in_transit(conn, 2, "incoming")[0]
+                check("the money left точка 1 and is in transit", accounts.balance(conn, usd) == 30 and accounts.balance(conn, usd_2) == 0)
+            check("точка 1 shows it as sent and waiting", "ждёт подтверждения" in client.get(f"/cash?t={token}").text)
+            check("точка 2's Касса asks to confirm it", f"/cash/transfer/{transfer['id']}/receive" in client.get(f"/cash?t={keeper2_token}").text)
+            stranger = client.post(f"/cash/transfer/{transfer['id']}/receive?t={keeper_token}", data={"received_amount": "60"})
+            check("someone from the SENDING точка can't confirm receipt for the destination", "другой точке" in stranger.text)
+            client.post(f"/cash/transfer/{transfer['id']}/receive?t={keeper2_token}", data={"received_amount": "60"})
+            with get_conn(db_path) as conn:
+                check("the destination's own storekeeper confirms — the money is now there", accounts.balance(conn, usd_2) == 60)
+            check("and nothing is left to confirm", "/receive" not in client.get(f"/cash?t={keeper2_token}").text)
+
+            # ---- журнал: новые типы и отмена обмена
+            journal = client.get(f"/journal?t={token}").text
+            check("the journal shows the exchange, the transfer and the opening balances' documents",
+                  "ОБ-001" in journal and "ДП-001" in journal and "Обмен валют" in journal)
+            with get_conn(db_path) as conn:
+                ex_doc = documents.list_journal(conn, doc_type="exchange")[0]
+            client.post(f"/journal/{ex_doc['id']}/cancel?t={token}", data={"reason": "ошибка курса"})
+            with get_conn(db_path) as conn:
+                check("cancelling the exchange from the journal restores both accounts", accounts.balance(conn, cash_uah) == 2260 and accounts.balance(conn, usd) == -20)
+
+            # ---- смена
+            check("the dashboard invites to open the shift while none is open", "/cash/shift" in client.get(f"/?t={master_token}").text)
+            shift_page = client.get(f"/cash/shift?t={master_token}").text
+            check("any employee (a master too) sees «сверить остатки» with the точка's balances",
+                  "Сверить остатки" in shift_page and "Наличные" in shift_page and "В товаре по всему бизнесу" in shift_page)
+            empty_note = client.post(f"/cash/shift/open?t={master_token}", data={"mismatch": "1", "note": "  "})
+            check("«есть расхождение» without saying what is a friendly error", "что именно не сходится" in empty_note.text)
+            client.post(f"/cash/shift/open?t={master_token}", data={"mismatch": "1", "note": "не хватает 50 грн"})
+            with get_conn(db_path) as conn:
+                shift = shifts.current_shift(conn, master, 1)
+                check("the shift opens with the discrepancy on record", shift is not None and shift["discrepancy_note"] == "не хватает 50 грн")
+            check("the dashboard stops asking once the shift is open", "/cash/shift" not in client.get(f"/?t={master_token}").text)
+            check("the owner's own shift is separate — still not open", "/cash/shift" in client.get(f"/?t={token}").text)
+            client.post(f"/cash/shift/open?t={token}", data={})
+            client.post(f"/cash/shift/close?t={token}", data={})
+            with get_conn(db_path) as conn:
+                check("«всё совпадает» opens it, «закрыть смену» closes it", shifts.current_shift(conn, owner, 1) is None
+                      and conn.execute("SELECT COUNT(*) AS n FROM shifts WHERE staff_id = ? AND closed_at IS NOT NULL", (owner,)).fetchone()["n"] == 1)
+
+            # ---- счета точки
+            check("the accounts page is owner/admin only", client.get(f"/cash/accounts?t={keeper_token}").status_code == 403)
+            client.post(f"/cash/accounts?t={token}", data={"name": "Монобанк", "kind": "card", "currency": "UAH"})
+            with get_conn(db_path) as conn:
+                mono = [a for a in accounts.list_accounts(conn, 1) if a["name"] == "Монобанк"]
+            check("a new account appears in the точка's list and in the sale form",
+                  len(mono) == 1 and f'name="pay_{mono[0]["id"]}"' in client.get(f"/sales?t={token}").text)
+            client.post(f"/cash/accounts/{mono[0]['id']}?t={token}", data={"action": "rename", "name": "Моно ФОП"})
+            client.post(f"/cash/accounts/{mono[0]['id']}?t={token}", data={"action": "off"})
+            with get_conn(db_path) as conn:
+                row = accounts.get_account(conn, mono[0]["id"])
+            check("it can be renamed and switched off; switched off it leaves the sale form",
+                  row["name"] == "Моно ФОП" and not row["active"] and f'name="pay_{mono[0]["id"]}"' not in client.get(f"/sales?t={token}").text)
+            busy = client.post(f"/cash/accounts/{cash_uah}?t={token}", data={"action": "off"})
+            check("switching off an account that holds money is a friendly error", "есть остаток" in busy.text)
+            other = client.post(f"/cash/accounts/{acc[(2, 'cash', 'UAH')]}?t={token}", data={"action": "rename", "name": "Чужой"})
+            check("another точка's account can't be edited from here", "не найден у этой точки" in other.text)
+
+
+def _stock_is_consistent(conn) -> bool:
+    """The Заход 3 invariant: every cell's total equals the sum of its партии."""
+    rows = conn.execute(
+        """SELECT stock.qty AS total,
+                  COALESCE((SELECT SUM(bs.qty) FROM batch_stock bs JOIN batches b ON b.id = bs.batch_id
+                            WHERE b.product_id = stock.product_id AND bs.cell_id = stock.cell_id), 0) AS by_batch
+           FROM stock"""
+    ).fetchall()
+    return all(r["total"] == r["by_batch"] for r in rows)
+
+
+def scenario_stock() -> None:
+    """Заход 3 core: партии (origin + cost travel with the goods), FIFO,
+    serial units by IMEI, склады мастеров, перемещение «Отправил → В пути →
+    Принял» with a shortfall, cancelling stock documents."""
+    print("scenario: склад — партии, IMEI, склады мастеров, перемещения, отмена складских документов")
+    from core import stock_transfers, warehouses
+
+    with tempfile.TemporaryDirectory() as tmp, _separate_base(tmp, "stock.sqlite3", ("Мастерская", "Магазин")) as db_path:
+        with get_conn(db_path) as conn:
+            owner = auth.create_staff(conn, "s-owner", "pass", "Владелец", "owner")
+            keeper_2 = auth.create_staff(conn, "s-keeper2", "pass", "Кладовщик Магазина", "storekeeper", location_id=2)
+            master = auth.create_master(conn, "Сергей", None, "percent", 33)
+            master_row = auth.get_master(conn, master)
+            keeper_2_row = auth.get_staff_by_id(conn, keeper_2)
+            owner_row = auth.get_staff_by_id(conn, owner)
+            sup_a = purchases.create_supplier(conn, "Поставщик А", None)
+            sup_b = purchases.create_supplier(conn, "Поставщик Б", None)
+            c1 = inventory.create_cell(conn, "ST-1", None, None, location_id=1)
+            c2 = inventory.create_cell(conn, "ST-2", None, None, location_id=2)
+            display = inventory.create_product(conn, "Дисплей iPhone 13", "ST-DSP", None, "шт", True, True, 0, 3500)
+
+            # ---- один SKU — много партий
+            r1 = purchases.create_receipt(conn, sup_a, "125", owner, [(display, c1, 2, 2000)], location_id=1)
+            r2 = purchases.create_receipt(conn, sup_b, "138", owner, [(display, c1, 1, 2200)], location_id=1)
+            batches = {b["supplier_name"]: b for b in inventory.list_batches(conn, display)}
+            batch_a, batch_b = batches["Поставщик А"]["id"], batches["Поставщик Б"]["id"]
+            check("each приход line became its own партия: supplier, receipt, cost, quantity left",
+                  len(batches) == 2 and batches["Поставщик А"]["qty_left"] == 2 and batches["Поставщик А"]["unit_cost_uah"] == 2000
+                  and batches["Поставщик Б"]["receipt_id"] == r2 and batches["Поставщик Б"]["unit_cost_uah"] == 2200)
+            check("«в товаре» is exact by партия: 2 × 2000 + 1 × 2200", inventory.stock_value(conn) == 6200 and inventory.stock_value(conn, 2) == 0)
+
+            ret = purchases.create_supplier_return(conn, display, sup_b, r2, c1, 1, "брак", owner)
+            moved = conn.execute("SELECT * FROM stock_movements WHERE ref_type = 'supplier_return' AND ref_id = ?", (ret,)).fetchone()
+            check("a return to supplier Б comes out of supplier Б's партия, not just the oldest one", moved["batch_id"] == batch_b)
+            used = inventory.record_movement(conn, display, 1, "repair_use", owner, from_cell_id=c1, ref_type="repair_order", ref_id=1)
+            row = conn.execute("SELECT * FROM stock_movements WHERE id = ?", (used,)).fetchone()
+            check("with no партия named, stock leaves oldest-first and snapshots THAT партия's cost", row["batch_id"] == batch_a and row["unit_cost"] == 2000)
+            try:
+                inventory.record_movement(conn, display, 1, "repair_use", owner, from_cell_id=c1, batch_id=batch_b)
+                check("taking from a named партия that is empty is refused", False)
+            except inventory.InsufficientStockError:
+                check("taking from a named партия that is empty is refused", True)
+            check("and the refusal changed nothing (1 left, in партия А)",
+                  inventory.product_total_qty(conn, display) == 1 and _stock_is_consistent(conn))
+
+            # ---- приход в валюте
+            cable = inventory.create_product(conn, "Кабель", "ST-CBL", None, "шт", False, True, 0, 300)
+            usd_receipt = purchases.create_receipt(conn, sup_a, None, owner, [(cable, c1, 10, 3)], location_id=1, currency="USD", rate=41.5)
+            usd_batch = purchases.get_receipt_batches(conn, usd_receipt)[0]
+            check("a USD приход keeps the price in USD, the rate, and the гривня cost (3 × 41.5)",
+                  usd_batch["unit_cost"] == 3 and usd_batch["currency"] == "USD" and usd_batch["rate"] == 41.5 and usd_batch["unit_cost_uah"] == 124.5)
+            check("its document's amount is in гривня (10 × 124.5)", documents.get_for(conn, "receipt", usd_receipt)["amount"] == 1245)
+            purchases.create_receipt(conn, sup_b, None, owner, [(cable, c1, 5, 100)], location_id=1)
+            sale_id = sales.create_sale(conn, None, "offline", owner, [(cable, 12, 300)], location_id=1)
+            item = sales.get_sale_items(conn, sale_id)[0]
+            check("a sale spanning two партии remembers its real blended cost: (10 × 124.5 + 2 × 100) / 12",
+                  item["unit_cost"] == 120.42)
+            check("…written as one movement per партия",
+                  [(m["qty"], m["unit_cost"]) for m in conn.execute(
+                      "SELECT qty, unit_cost FROM stock_movements WHERE ref_type = 'sales_order' AND ref_id = ? ORDER BY id", (sale_id,))]
+                  == [(10, 124.5), (2, 100)])
+
+            # ---- серийный товар
+            phone = inventory.create_product(conn, "iPhone 13 128GB", None, None, "шт", False, True, 0, 12000, is_serial=True)
+            receipts_before = len(purchases.list_receipts(conn))
+            for bad_imeis, needle, label in (
+                (["356000000000001"], "нужно 2 IMEI", "a serial line with fewer IMEIs than units is refused"),
+                (["356000000000001", "356 000 000 000 001"], "дважды", "the same IMEI twice in one приход is refused"),
+            ):
+                try:
+                    purchases.create_receipt(conn, sup_a, None, owner, [(phone, c1, 2, 8000, bad_imeis)], location_id=1)
+                    check(label, False)
+                except purchases.ReceiptError as exc:
+                    check(label, needle in str(exc))
+            check("the refused приходы wrote nothing", len(purchases.list_receipts(conn)) == receipts_before)
+            purchases.create_receipt(conn, sup_a, None, owner, [(phone, c1, 2, 8000, ["356 000 000 000 001", "356000000000002"])], location_id=1)
+            unit_1 = inventory.find_unit_by_imei(conn, "356000000000001")
+            unit_2 = inventory.find_unit_by_imei(conn, " 356000000000002 ")
+            check("each phone is its own партия of one unit, found by IMEI in any spacing",
+                  unit_1 is not None and unit_2 is not None and unit_1["id"] != unit_2["id"] and unit_1["qty"] == 1 and unit_1["cell_id"] == c1)
+            try:
+                purchases.create_receipt(conn, sup_b, None, owner, [(phone, c1, 1, 7000, ["356000000000001"])], location_id=1)
+                check("an IMEI already in stock can't be received again", False)
+            except purchases.ReceiptError:
+                check("an IMEI already in stock can't be received again", True)
+            try:
+                sales.create_sale(conn, None, "offline", owner, [(phone, 1, 12000)], location_id=1)
+                check("a serial product can't be sold without saying which unit", False)
+            except sales.SaleError as exc:
+                check("a serial product can't be sold without saying which unit", "выберите IMEI" in str(exc))
+            phone_sale = sales.create_sale(conn, None, "offline", owner, [(phone, 1, 12000, unit_1["id"])], location_id=1)
+            phone_item = sales.get_sale_items(conn, phone_sale)[0]
+            check("the sale line carries the unit's IMEI, its supplier and its exact cost",
+                  phone_item["imei"] == "356000000000001" and phone_item["unit_cost"] == 8000 and phone_item["supplier_name"] == "Поставщик А")
+            check("the sold unit is gone from stock", inventory.find_unit_by_imei(conn, "356000000000001") is None)
+            doc_cancel.cancel_document(conn, documents.get_for(conn, "sale", phone_sale)["id"], owner, "возврат")
+            back = inventory.find_unit_by_imei(conn, "356000000000001")
+            check("cancelling the sale puts the SAME unit back — same партия, same cost", back is not None and back["id"] == unit_1["id"])
+
+            # ---- склады
+            master_wh = warehouses.master_warehouse(conn, master)
+            point_1, point_2 = warehouses.point_warehouse(conn, 1), warehouses.point_warehouse(conn, 2)
+            check("a master gets his own склад the moment he is added",
+                  master_wh is not None and warehouses.display_name(master_wh) == "Мастер: Сергей" and len(warehouses.cells(conn, master_wh["id"])) == 1)
+            check("склады overview: both точки, the master, «В пути»",
+                  [w["kind"] for w in warehouses.summary(conn)] == ["point", "point", "master", "transit"])
+            check("who sends from where: master — his own, a storekeeper — their точка's, owner — any but «В пути»",
+                  [w["id"] for w in warehouses.sendable_from(conn, master_row, 1)] == [master_wh["id"]]
+                  and [w["id"] for w in warehouses.sendable_from(conn, keeper_2_row, 2)] == [point_2["id"]]
+                  and len(warehouses.sendable_from(conn, owner_row, 1)) == 3)
+
+            # ---- перемещение точка → мастер, с недостачей
+            lines = {(l["product_id"], l["imei"]): l for l in inventory.stock_lines(conn, warehouse_id=point_1["id"])}
+            cable_line, phone_line = lines[(cable, None)], lines[(phone, "356000000000002")]
+            for bad, needle, label in (
+                ((point_1["id"], master_wh["id"], [(cable_line["batch_id"], cable_line["cell_id"], 99)]), "нельзя отправить", "sending more than the партия holds is refused"),
+                ((point_1["id"], point_1["id"], [(cable_line["batch_id"], cable_line["cell_id"], 1)]), "должен быть другим", "sending to the same склад is refused"),
+                ((point_1["id"], master_wh["id"], []), "хотя бы одну", "an empty transfer is refused"),
+            ):
+                try:
+                    stock_transfers.send(conn, *bad, owner)
+                    check(label, False)
+                except stock_transfers.TransferError as exc:
+                    check(label, needle in str(exc))
+            transfer_id = stock_transfers.send(
+                conn, point_1["id"], master_wh["id"],
+                [(cable_line["batch_id"], cable_line["cell_id"], 2), (phone_line["batch_id"], phone_line["cell_id"], 1)], owner,
+            )
+            check("sent goods leave the точка at once and are «в пути», not yet the master's",
+                  inventory.product_total_qty(conn, cable, 1) == 1 and inventory.product_total_qty(conn, phone, 1) == 1
+                  and warehouses.total_qty(conn, master_wh["id"]) == 0
+                  and len(inventory.stock_lines(conn, warehouse_id=warehouses.list_warehouses(conn)[-1]["id"])) == 2)
+            try:
+                sales.create_sale(conn, None, "offline", owner, [(phone, 1, 12000, unit_2["id"])], location_id=1)
+                check("a unit that is «в пути» can't be sold", False)
+            except inventory.InsufficientStockError:
+                check("a unit that is «в пути» can't be sold", True)
+            transfer_doc = stock_transfers.document(conn, transfer_id)
+            check("the transfer is a document (ПМ) with its route",
+                  documents.doc_label(transfer_doc).startswith("ПМ-") and "Мастерская → Мастер: Сергей" in transfer_doc["title"]
+                  and documents.source_path(transfer_doc) == f"/transfers/{transfer_id}")
+            target = warehouses.get_warehouse(conn, master_wh["id"])
+            check("only the master (or an owner) may say «Принял» for his склад — not another точка's storekeeper",
+                  warehouses.may_receive(conn, master_row, target, set()) and warehouses.may_receive(conn, owner_row, target, {1, 2})
+                  and not warehouses.may_receive(conn, keeper_2_row, target, {2}))
+            items = {i["product_id"]: i for i in stock_transfers.get_items(conn, transfer_id)}
+            try:
+                stock_transfers.receive(conn, transfer_id, master, {items[cable]["id"]: 1})
+                check("receiving less than was sent without a note is refused", False)
+            except stock_transfers.TransferError:
+                check("receiving less than was sent without a note is refused", True)
+            stock_transfers.receive(conn, transfer_id, master, {items[cable]["id"]: 1}, note="одного кабеля нет в пакете")
+            check("what arrived is the master's responsibility now: 1 cable + the phone",
+                  warehouses.total_qty(conn, master_wh["id"]) == 2
+                  and inventory.find_unit_by_imei(conn, "356000000000002")["cell_id"] == warehouses.cells(conn, master_wh["id"])[0]["id"])
+            check("the missing cable is still «в пути», flagged on the transfer",
+                  [(i["product_id"], i["qty"] - i["received_qty"]) for i in stock_transfers.shortage(conn, transfer_id)] == [(cable, 1)]
+                  and [t["id"] for t in stock_transfers.list_discrepancies(conn)] == [transfer_id]
+                  and [e["event"] for e in documents.get_events(conn, transfer_doc["id"])] == ["created", "discrepancy"])
+            try:
+                stock_transfers.receive(conn, transfer_id, master)
+                check("a transfer can't be received twice", False)
+            except stock_transfers.TransferError:
+                check("a transfer can't be received twice", True)
+            writeoffs_before = len(documents.list_journal(conn, doc_type="writeoff"))
+            stock_transfers.write_off_shortage(conn, transfer_id, owner, "утеряно при передаче")
+            check("the owner settles the недостача: written off from «В пути» by a списание document",
+                  stock_transfers.shortage(conn, transfer_id) == []
+                  and len(documents.list_journal(conn, doc_type="writeoff")) == writeoffs_before + 1
+                  and inventory.product_total_qty(conn, cable) == 2)
+
+            # ---- мастер → другая точка (готовый аппарат возвращается на витрину)
+            master_line = next(l for l in inventory.stock_lines(conn, warehouse_id=master_wh["id"]) if l["imei"])
+            back_id = stock_transfers.send(conn, master_wh["id"], point_2["id"], [(master_line["batch_id"], master_line["cell_id"], 1)], master)
+            stock_transfers.receive(conn, back_id, keeper_2)
+            check("received with no cell named, it lands in the destination's cell; origin and cost came along",
+                  inventory.find_unit_by_imei(conn, "356000000000002")["cell_id"] == c2
+                  and inventory.product_total_qty(conn, phone, 2) == 1 and inventory.get_batch(conn, unit_2["id"])["unit_cost_uah"] == 8000)
+            sold_at_2 = sales.create_sale(conn, None, "offline", keeper_2, [(phone, 1, 12500, unit_2["id"])], location_id=2)
+            check("and can be sold there, at its original cost", sales.get_sale_items(conn, sold_at_2)[0]["unit_cost"] == 8000)
+
+            # ---- отмена складских документов
+            last_cable = next(l for l in inventory.stock_lines(conn, warehouse_id=point_1["id"]) if l["product_id"] == cable)
+            pending = stock_transfers.send(conn, point_1["id"], point_2["id"], [(last_cable["batch_id"], last_cable["cell_id"], 1)], owner)
+            doc_cancel.cancel_document(conn, stock_transfers.document(conn, pending)["id"], owner, "передумали")
+            check("cancelling a transfer still «в пути» returns the goods to the cell they left",
+                  inventory.product_total_qty(conn, cable, 1) == 1 and stock_transfers.get_transfer(conn, pending)["status"] == "cancelled")
+            try:
+                doc_cancel.cancel_document(conn, transfer_doc["id"], owner, "поздно")
+                check("a transfer already received can't be cancelled", False)
+            except documents.DocumentError:
+                check("a transfer already received can't be cancelled", True)
+
+            glass = inventory.create_product(conn, "Стекло", "ST-GLS", None, "шт", True, True, 0, 200)
+            fresh = purchases.create_receipt(conn, sup_a, None, owner, [(glass, c1, 5, 50)], location_id=1)
+            doc_cancel.cancel_document(conn, documents.get_for(conn, "receipt", fresh)["id"], owner, "не тот поставщик")
+            check("an untouched приход can be cancelled: its goods leave again", inventory.product_total_qty(conn, glass) == 0)
+            touched = purchases.create_receipt(conn, sup_a, None, owner, [(glass, c1, 5, 50)], location_id=1)
+            sales.create_sale(conn, None, "offline", owner, [(glass, 1, 200)], location_id=1)
+            try:
+                doc_cancel.cancel_document(conn, documents.get_for(conn, "receipt", touched)["id"], owner, "поздно")
+                check("a приход whose goods were partly sold can't be cancelled", False)
+            except documents.DocumentError as exc:
+                check("a приход whose goods were partly sold can't be cancelled", "уже частично" in str(exc))
+            check("and the refusal moved nothing", inventory.product_total_qty(conn, glass) == 4)
+            inventory.receive_stock(conn, glass, c1, 3, owner, key="st-in")
+            doc_cancel.cancel_document(conn, documents.find_by_key(conn, "st-in")["id"], owner, "пересчитали")
+            inventory.write_off_stock(conn, glass, c1, 2, owner, comment="бой", key="st-out")
+            doc_cancel.cancel_document(conn, documents.find_by_key(conn, "st-out")["id"], owner, "нашлись")
+            check("a manual оприходование and a списание can both be cancelled (4 + 3 − 3 − 2 + 2)",
+                  inventory.product_total_qty(conn, glass) == 4)
+            try:
+                inventory.receive_stock(conn, phone, c1, 1, owner)
+                check("a serial product can't be оприходован without an IMEI", False)
+            except inventory.SerialUnitError:
+                check("a serial product can't be оприходован without an IMEI", True)
+            check("after all of the above every cell's total still equals the sum of its партии", _stock_is_consistent(conn))
+
+            # ---- остаток, попавший мимо партий
+            orphan = inventory.create_product(conn, "Старый остаток", "ST-OLD", None, "шт", False, True, 0, 10)
+            conn.execute("INSERT INTO stock (product_id, cell_id, qty) VALUES (?, ?, 3)", (orphan, c1))
+            inventory.record_movement(conn, orphan, 2, "adjustment", owner, from_cell_id=c1, comment="тест")
+            check("stock with no партия behind it heals itself on first use (a 'legacy' партия)",
+                  _stock_is_consistent(conn) and inventory.list_batches(conn, orphan)[0]["source"] == "legacy")
+            conn.execute("INSERT INTO stock (product_id, cell_id, qty) VALUES (?, ?, 6)", (orphan, c2))
+        init_db(db_path)
+        with get_conn(db_path) as conn:
+            check("and init_db covers whatever is left uncovered at startup", _stock_is_consistent(conn))
+
+
+def scenario_stock_http() -> None:
+    print("scenario: склад over HTTP — серийный товар, приход с IMEI и валютой, продажа по IMEI, склады, перемещение")
+    from core import stock_transfers, warehouses
+
+    with tempfile.TemporaryDirectory() as tmp, _separate_base(tmp, "stock-http.sqlite3", ("Мастерская", "Магазин")) as db_path:
+        with get_conn(db_path) as conn:
+            owner = auth.create_staff(conn, "sh-owner", "pass", "Владелец", "owner")
+            keeper = auth.create_staff(conn, "sh-keeper", "pass", "Кладовщик", "storekeeper", location_id=1)
+            keeper_2 = auth.create_staff(conn, "sh-keeper2", "pass", "Кладовщик Второй", "storekeeper", location_id=2)
+            master = auth.create_master(conn, "Мастер Аутсорс", None, None, None)
+            supplier = purchases.create_supplier(conn, "Поставщик HTTP", None)
+            cell = inventory.create_cell(conn, "SH-1", None, None, location_id=1)
+            cell_2 = inventory.create_cell(conn, "SH-2", None, None, location_id=2)
+            part = inventory.create_product(conn, "АКБ iPhone 13", "SH-AKB", None, "шт", True, True, 0, 900)
+            master_wh = warehouses.master_warehouse(conn, master)["id"]
+            point_1 = warehouses.point_warehouse(conn, 1)["id"]
+        token, keeper_token, keeper2_token = make_token(owner, "1"), make_token(keeper, "1"), make_token(keeper_2, "2")
+        master_token = make_token(master, "1")
+
+        import webapp.main
+
+        with TestClient(webapp.main.app) as client:
+            created = client.post(f"/inventory/products?t={token}", data={
+                "name": "iPhone 13 Black", "sku": "", "unit": "шт", "price": "15000", "is_sellable": "on", "is_serial": "on"},
+                follow_redirects=False)
+            phone = int(created.headers["location"].split("/")[-1].split("?")[0])
+            with get_conn(db_path) as conn:
+                check("a product can be marked серийный on creation", inventory.get_product(conn, phone)["is_serial"] == 1)
+            check("its card asks for an IMEI when adding stock by hand", 'name="imei"' in client.get(f"/inventory/products/{phone}?t={token}").text)
+            no_imei = client.post(f"/inventory/products/{phone}/receive?t={token}", data={"cell_id": str(cell), "qty": "1"})
+            check("adding a serial unit without an IMEI is a friendly error", no_imei.status_code == 200 and "с IMEI" in no_imei.text)
+
+            page = client.get(f"/purchases?t={token}").text
+            check("the приход form has the invoice currency, a rate field and IMEI rows wired for serial products",
+                  'name="currency"' in page and 'name="rate"' in page and 'name="imeis_0"' in page and f"[{phone}]" in page.replace(" ", ""))
+            base = {"supplier_id": str(supplier), "row_count": "2",
+                    "product_id_0": str(phone), "product_name_0": "iPhone 13 Black", "cell_id_0": str(cell), "qty_0": "2", "unit_cost_0": "200",
+                    "product_id_1": str(part), "product_name_1": "АКБ iPhone 13", "cell_id_1": str(cell), "qty_1": "4", "unit_cost_1": "12,5"}
+            no_rate = client.post(f"/purchases?t={token}", data=dict(base, currency="USD", imeis_0="111111111111111\n222222222222222"))
+            check("a USD накладная without a rate is refused", "Укажите курс" in no_rate.text)
+            short = client.post(f"/purchases?t={token}", data=dict(base, currency="USD", rate="41", imeis_0="111111111111111"))
+            check("fewer IMEIs than phones is refused, naming the product", "нужно 2 IMEI" in short.text and "iPhone 13 Black" in short.text)
+            with get_conn(db_path) as conn:
+                check("neither refused приход left anything", len(purchases.list_receipts(conn)) == 0 and inventory.product_total_qty(conn, part) == 0)
+            ok = client.post(f"/purchases?t={token}", data=dict(base, currency="USD", rate="41", imeis_0="111111111111111, 222222222222222"),
+                             follow_redirects=False)
+            check("a correct one goes through", ok.status_code == 303)
+            with get_conn(db_path) as conn:
+                receipt_id = purchases.list_receipts(conn)[0]["id"]
+                unit = inventory.find_unit_by_imei(conn, "111111111111111")
+                check("phones came in as two units costing 200 USD × 41 = 8200 грн each; parts as one партия at 12.5 × 41",
+                      unit is not None and unit["unit_cost_uah"] == 8200 and inventory.product_total_qty(conn, phone, 1) == 2
+                      and inventory.list_batches(conn, part)[0]["unit_cost_uah"] == 512.5)
+            receipt_page = client.get(f"/purchases/{receipt_id}?t={token}").text
+            check("the приход's page lists its партии with IMEIs and the currency", "IMEI 111111111111111" in receipt_page and "USD" in receipt_page)
+            card = client.get(f"/inventory/products/{phone}?t={token}").text
+            check("the product card shows its партии: IMEI, supplier, cost, where", "IMEI 222222222222222" in card and "Поставщик HTTP" in card and "SH-1" in card)
+            found = client.get(f"/warehouse/find?t={token}&code=222222222222222", follow_redirects=False)
+            check("scanning a phone's IMEI on «Склад» opens its product card",
+                  found.status_code == 303 and f"/inventory/products/{phone}" in found.headers["location"])
+
+            # ---- продажа серийного
+            sales_page = client.get(f"/sales?t={token}").text
+            check("the sale form knows this точка's serial units and has an IMEI field per row",
+                  "111111111111111" in sales_page and 'name="imei_0"' in sales_page)
+            sale = {"row_count": "1", "product_id_0": str(phone), "product_name_0": "iPhone 13 Black", "qty_0": "1", "price_0": "15000", "channel": "offline"}
+            check("selling a serial product with no IMEI is refused", "выберите IMEI" in client.post(f"/sales?t={token}", data=sale).text)
+            check("…and with an IMEI that isn't in stock too", "не найден на остатке" in client.post(f"/sales?t={token}", data=dict(sale, imei_0="999")).text)
+            sold = client.post(f"/sales?t={token}", data=dict(sale, imei_0="111 111 111 111 111"), follow_redirects=False)
+            check("with the right IMEI (typed with spaces) it sells", sold.status_code == 303)
+            check("the sale's page names the IMEI", "IMEI 111111111111111" in client.get(sold.headers["location"]).text)
+            check("the sold IMEI is no longer offered", "111111111111111" not in client.get(f"/sales?t={token}").text)
+
+            # ---- склады
+            overview = client.get(f"/inventory/warehouses?t={keeper_token}").text
+            check("«Склады» lists both точки, the master's склад and «В пути»",
+                  all(x in overview for x in ("Мастерская", "Магазин", "Мастер: Мастер Аутсорс", "В пути")))
+            check("a склад's page lists what it holds, by партия",
+                  "IMEI 222222222222222" in client.get(f"/inventory/warehouses/{point_1}?t={keeper_token}").text)
+            check("the Склад hub links to Перемещение and Склады",
+                  "/transfers" in client.get(f"/warehouse?t={token}").text and "/inventory/warehouses" in client.get(f"/warehouse?t={token}").text)
+
+            # ---- перемещение точка → мастер
+            form_page = client.get(f"/transfers?t={keeper_token}").text
+            check("the transfer form offers this точка's stock lines and the other склады as destinations",
+                  # (line labels sit in a JSON blob, Cyrillic escaped — match the ASCII cell code and qty)
+                  "SH-1 \\u00b7 4" in form_page and "Мастер: Мастер Аутсорс" in form_page and "transferForm" in form_page)
+            with get_conn(db_path) as conn:
+                lines = {l["product_id"]: l for l in inventory.stock_lines(conn, warehouse_id=point_1)}
+            part_line = f"{lines[part]['batch_id']}:{lines[part]['cell_id']}"
+            phone_line = f"{lines[phone]['batch_id']}:{lines[phone]['cell_id']}"
+            send = {"from_warehouse_id": str(point_1), "to_warehouse_id": str(master_wh), "row_count": "2",
+                    "line_0": "АКБ", "line_id_0": part_line, "qty_0": "3", "line_1": "iPhone", "line_id_1": phone_line, "qty_1": "1"}
+            foreign = client.post(f"/transfers?t={keeper2_token}", data=send)
+            check("a storekeeper of another точка can't send from this точка's склад", "отправлять не можете" in foreign.text)
+            too_many = client.post(f"/transfers?t={keeper_token}", data=dict(send, qty_0="40"))
+            check("sending more than there is is a friendly error", too_many.status_code == 200 and "нельзя отправить" in too_many.text)
+            unpicked = client.post(f"/transfers?t={keeper_token}", data=dict(send, line_id_1=""))
+            check("a typed line that wasn't picked from the list is reported, not skipped", "выберите позицию из списка" in unpicked.text)
+            sent = client.post(f"/transfers?t={keeper_token}", data=send, follow_redirects=False)
+            check("a valid transfer is sent and opens its own page", sent.status_code == 303 and "/transfers/" in sent.headers["location"])
+            transfer_id = int(sent.headers["location"].split("/transfers/")[1].split("?")[0])
+            with get_conn(db_path) as conn:
+                check("the goods left the точка (1 part and no phone remain here)",
+                      inventory.product_total_qty(conn, part, 1) == 1 and inventory.product_total_qty(conn, phone, 1) == 0)
+            detail_sender = client.get(f"/transfers/{transfer_id}?t={keeper_token}").text
+            check("the sender sees it «в пути», with no receive form (not theirs to accept)",
+                  "В пути" in detail_sender and f"/transfers/{transfer_id}/receive" not in detail_sender)
+            check("and can't force the receive either",
+                  "отвечает за склад-получатель" in client.post(f"/transfers/{transfer_id}/receive?t={keeper_token}", data={}).text)
+            check("the master's Склад hub and transfer list show it waiting for him",
+                  "Перемещение · 1" in client.get(f"/warehouse?t={master_token}").text
+                  and f"/transfers/{transfer_id}" in client.get(f"/transfers?t={master_token}").text)
+            detail_master = client.get(f"/transfers/{transfer_id}?t={master_token}").text
+            check("the master's view of it has the receive form", f"/transfers/{transfer_id}/receive" in detail_master)
+            with get_conn(db_path) as conn:
+                items = {i["product_id"]: i["id"] for i in stock_transfers.get_items(conn, transfer_id)}
+            short_recv = client.post(f"/transfers/{transfer_id}/receive?t={master_token}", data={f"recv_{items[part]}": "2", f"recv_{items[phone]}": "1"})
+            check("accepting fewer than sent without a note is a friendly error", "напишите, чего не хватает" in short_recv.text)
+            client.post(f"/transfers/{transfer_id}/receive?t={master_token}",
+                        data={f"recv_{items[part]}": "2", f"recv_{items[phone]}": "1", "note": "одной АКБ нет"})
+            with get_conn(db_path) as conn:
+                check("the master now holds 2 parts and the phone", warehouses.total_qty(conn, master_wh) == 3)
+            detail_after = client.get(f"/transfers/{transfer_id}?t={token}").text
+            check("the transfer's page shows the недостача and offers the owner to write it off",
+                  "одной АКБ нет" in detail_after and f"/transfers/{transfer_id}/shortage" in detail_after)
+            check("a storekeeper is not offered (and can't post) the write-off",
+                  f"/transfers/{transfer_id}/shortage" not in client.get(f"/transfers/{transfer_id}?t={keeper_token}").text
+                  and "только владелец" in client.post(f"/transfers/{transfer_id}/shortage?t={keeper_token}", data={"reason": "x"}).text)
+            client.post(f"/transfers/{transfer_id}/shortage?t={token}", data={"reason": "утеряна"})
+            with get_conn(db_path) as conn:
+                check("after the owner's write-off nothing is left «в пути»", stock_transfers.shortage(conn, transfer_id) == []
+                      and inventory.product_total_qty(conn, part) == 3)
+            journal = client.get(f"/journal?t={token}").text
+            check("the journal shows the transfer (ПМ) and links it to its page",
+                  "ПМ-" in journal and "Мастерская → Мастер: Мастер Аутсорс" in journal)
+            card = client.get(f"/inventory/products/{phone}?t={token}").text
+            check("the phone's product card now says it is with the master", "Мастер Аутсорс" in card)
+
+
+def scenario_transfer_chat() -> None:
+    """«🔁 Перемещение» in the bot, end to end: a storekeeper sends a part
+    and a phone to a master, the master gets a DM and presses «Принял всё»."""
+    print("scenario: перемещение в боте — отправка кладовщиком, уведомление и приём мастером")
+    import asyncio
+    from types import SimpleNamespace
+
+    from aiogram.fsm.context import FSMContext
+    from aiogram.fsm.storage.base import StorageKey
+    from aiogram.fsm.storage.memory import MemoryStorage
+
+    from bot import quick_actions as qa
+    from bot import transfer_flow as tf
+    from core import stock_transfers, warehouses
+
+    KEEPER_TG, MASTER_TG, CHAT_ID = 881001, 881002, 881001
+
+    with tempfile.TemporaryDirectory() as tmp, _separate_base(tmp, "transfer-chat.sqlite3", ("Мастерская",)) as db_path:
+        with get_conn(db_path) as conn:
+            owner = auth.create_staff(conn, "tc-owner", "pass", "Владелец", "owner")
+            keeper = auth.create_staff(conn, "tc-keeper", "pass", "Виталий", "storekeeper", location_id=1)
+            auth.link_staff_telegram(conn, "tc-keeper", KEEPER_TG)
+            master = auth.create_master(conn, "Сергей", MASTER_TG, None, None)
+            cell = inventory.create_cell(conn, "TC-1", None, None, location_id=1)
+            part = inventory.create_product(conn, "Дисплей iPhone 13", "TC-DSP", None, "шт", True, True, 0, 3000)
+            phone = inventory.create_product(conn, "iPhone 13", None, None, "шт", False, True, 0, 12000, is_serial=True)
+            purchases.create_receipt(conn, None, None, owner, [(part, cell, 5, 2000), (phone, cell, 1, 8000, ["356000000000777"])], location_id=1)
+            shifts.open_shift(conn, keeper, 1)
+            master_wh = warehouses.master_warehouse(conn, master)["id"]
+
+        sent_dms: list[dict] = []
+
+        class _Chat:
+            def __init__(self):
+                self.log, self._next = [], 100
+
+            def add(self, author, text, markup=None):
+                self._next += 1
+                self.log.append({"id": self._next, "author": author, "text": text, "markup": markup})
+                return self._next
+
+            def delete(self, message_id):
+                self.log = [m for m in self.log if m["id"] != message_id]
+
+            def edit(self, message_id, text, markup):
+                for m in self.log:
+                    if m["id"] == message_id:
+                        m["text"], m["markup"] = text, markup
+
+        class _Bot:
+            def __init__(self, chat):
+                self.chat = chat
+
+            async def delete_message(self, chat_id, message_id):
+                self.chat.delete(message_id)
+
+            async def delete_messages(self, chat_id, message_ids):
+                for mid in message_ids:
+                    self.chat.delete(mid)
+
+            async def edit_message_text(self, chat_id, message_id, text, reply_markup=None):
+                self.chat.edit(message_id, text, reply_markup)
+
+            async def send_message(self, chat_id, text, reply_markup=None, **kwargs):
+                sent_dms.append({"to": chat_id, "text": text, "markup": reply_markup})
+
+        class _Msg:
+            def __init__(self, chat, bot, text):
+                self._log, self.bot, self.text = chat, bot, text
+                self.chat = SimpleNamespace(id=CHAT_ID, type="private")
+                self.from_user = SimpleNamespace(id=KEEPER_TG, full_name="Виталий")
+                self.message_id = chat.add("staff", text)
+
+            async def answer(self, text, reply_markup=None):
+                return SimpleNamespace(message_id=self._log.add("bot", text, reply_markup))
+
+        class _Cb:
+            def __init__(self, chat, bot, data, message_id, user_id=KEEPER_TG):
+                self.data, self.bot = data, bot
+                self.from_user = SimpleNamespace(id=user_id)
+                self.message = SimpleNamespace(chat=SimpleNamespace(id=CHAT_ID, type="private"), message_id=message_id)
+                self.answered = []
+
+            async def answer(self, text=None, show_alert=False):
+                self.answered.append((text, show_alert))
+
+        def _buttons(markup) -> list[str]:
+            return [b.callback_data for row in markup.inline_keyboard for b in row if b.callback_data] if markup else []
+
+        async def run() -> None:
+            chat = _Chat()
+            bot = _Bot(chat)
+            state = FSMContext(storage=MemoryStorage(), key=StorageKey(bot_id=1, chat_id=CHAT_ID, user_id=KEEPER_TG))
+            say = lambda text: _Msg(chat, bot, text)
+            tap = lambda data, user=KEEPER_TG: _Cb(chat, bot, data, chat.log[-1]["id"], user)
+            screen = lambda: [m for m in chat.log if m["author"] == "bot"][-1]
+
+            await tf.transfer_start(say(qa.BTN_TRANSFER), state)
+            check("«Перемещение» names the sender's склад and offers the other склады as destinations",
+                  "Со склада: Мастерская" in screen()["text"] and f"tr_to:{master_wh}" in _buttons(screen()["markup"]))
+            await tf.transfer_pick_target(tap(f"tr_to:{master_wh}"), state)
+            check("then asks what to move", "Мастерская → Мастер: Сергей" in screen()["text"] and "IMEI" in screen()["text"])
+
+            await tf.transfer_search(say("ничего такого"), state)
+            check("an unknown item keeps the question up with a warning", "не нашёл" in screen()["text"] and "Что перемещаем" in screen()["text"])
+            await tf.transfer_search(say("дисплей"), state)
+            check("a non-serial item found by part of its name asks how many, showing what is available",
+                  "Сколько перемещаем" in screen()["text"] and "На складе: 5" in screen()["text"])
+            await tf.transfer_got_qty(say("9"), state)
+            check("more than available is refused", "не больше 5" in screen()["text"])
+            await tf.transfer_got_qty(say("2"), state)
+            check("a valid quantity lands on the review screen with send / add-more buttons",
+                  "Дисплей iPhone 13" in screen()["text"] and "— 2 шт" in screen()["text"]
+                  and {"tr_more", "tr_send", "tr_cancel"} <= set(_buttons(screen()["markup"])))
+            await tf.transfer_more(tap("tr_more"), state)
+            await tf.transfer_search(say("356000000000777"), state)
+            check("a scanned IMEI adds that exact phone straight away (no quantity question)",
+                  "IMEI 356000000000777" in screen()["text"] and "— 1 шт" in screen()["text"] and "Сколько" not in screen()["text"])
+            check("the chat holds exactly one bot screen and none of the employee's messages (Clean Chat)",
+                  [m["author"] for m in chat.log] == ["bot"])
+
+            send_tap = tap("tr_send")
+            await tf.transfer_send(send_tap, state)
+            check("sending confirms with the document number and says the goods are in transit",
+                  "ПМ-" in screen()["text"] and "отправлено" in screen()["text"] and "в пути" in screen()["text"].lower())
+            with get_conn(db_path) as conn:
+                transfer = stock_transfers.list_transfers(conn, status="sent")[0]
+                check("the transfer exists, from the точка to the master, with both lines",
+                      transfer["to_warehouse_id"] == master_wh and len(stock_transfers.get_items(conn, transfer["id"])) == 2
+                      and inventory.product_total_qty(conn, part, 1) == 3 and warehouses.total_qty(conn, master_wh) == 0)
+            to_master = [d for d in sent_dms if d["to"] == MASTER_TG]
+            check("the master gets a DM listing the items, with a «Принял всё» button; the sender gets none",
+                  len(to_master) == 1 and "IMEI 356000000000777" in to_master[0]["text"]
+                  and f"tr_recv:{transfer['id']}" in _buttons(to_master[0]["markup"])
+                  and KEEPER_TG not in [d["to"] for d in sent_dms])
+            await tf.transfer_send(_Cb(chat, bot, "tr_send", send_tap.message.message_id), state)
+            with get_conn(db_path) as conn:
+                check("a second tap on «Отправить» creates no second transfer", len(stock_transfers.list_transfers(conn)) == 1)
+
+            stranger = _Cb(chat, bot, f"tr_recv:{transfer['id']}", 1, KEEPER_TG)
+            await tf.transfer_receive(stranger)
+            check("the sender can't press «Принял» for the master",
+                  stranger.answered and stranger.answered[-1][1] is True and "отвечает за склад" in stranger.answered[-1][0])
+            notice_id = chat.add("bot", to_master[0]["text"], to_master[0]["markup"])
+            await tf.transfer_receive(_Cb(chat, bot, f"tr_recv:{transfer['id']}", notice_id, MASTER_TG))
+            with get_conn(db_path) as conn:
+                check("the master's «Принял всё» puts everything on his склад",
+                      stock_transfers.get_transfer(conn, transfer["id"])["status"] == "received"
+                      and warehouses.total_qty(conn, master_wh) == 3 and _stock_is_consistent(conn))
+            check("and his notification turns into a receipt confirmation with no buttons",
+                  "Принято" in chat.log[-1]["text"] and not chat.log[-1]["markup"])
+
+        asyncio.run(run())
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         db_path = os.path.join(tmp, "test.sqlite3")
@@ -3850,6 +4787,11 @@ def main() -> None:
     scenario_documents_journal()
     scenario_journal_http()
     scenario_merge_stores_tool()
+    scenario_money()
+    scenario_money_http()
+    scenario_stock()
+    scenario_stock_http()
+    scenario_transfer_chat()
     if os.path.exists(_WEBAPP_TEST_DB):
         os.remove(_WEBAPP_TEST_DB)
 

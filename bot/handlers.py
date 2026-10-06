@@ -18,7 +18,7 @@ from aiogram.types import (
 )
 
 from bot.miniapp_links import crm_link
-from bot.quick_actions import QUICK_ACTIONS_KEYBOARD
+from bot.quick_actions import QUICK_ACTIONS_KEYBOARD, _resolve_staff_for_dm, _shift_is_open
 from core import auth as core_auth
 from core import clients as core_clients
 from core import qr as core_qr
@@ -69,6 +69,18 @@ async def start(message: Message) -> None:
         # App directly, so a staff member always has that regardless of
         # /start. Straight to the quick-action buttons.
         await message.answer("Быстрые действия:", reply_markup=QUICK_ACTIONS_KEYBOARD)
+        # The day starts with opening the shift (Заход 2) — offer it right
+        # here; the write actions would ask for it anyway (see
+        # bot.quick_actions._shift_gate).
+        resolved = _resolve_staff_for_dm(message.from_user.id)
+        if resolved and not _shift_is_open(*resolved):
+            store, staff = resolved
+            await message.answer(
+                f"Привет, {html.escape(staff['name'])}! 👋\nТочка: {html.escape(store.name)}. Чтобы начать работу, откройте смену.",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(text="💼 Открыть смену", callback_data="shift_begin", style="success"),
+                ]]),
+            )
         return
 
     if client:

@@ -16,6 +16,33 @@
 (function () {
   var productPicker = window.SALE_PRODUCTS || [];
   var defaultPriceByProduct = window.SALE_DEFAULT_PRICE_BY_PRODUCT || {};
+  /* Серийный товар: {product_id: [imei, ...]} — units on hand at this
+     точка. A row for such a product asks WHICH unit is being sold. */
+  var serialUnits = window.SALE_SERIAL_UNITS || {};
+  var imeiToProduct = {};
+  Object.keys(serialUnits).forEach(function (pid) {
+    serialUnits[pid].forEach(function (imei) { imeiToProduct[imei] = parseInt(pid, 10); });
+  });
+
+  function syncImeiField(row, productId) {
+    var imeiInput = row.querySelector(".sale-imei");
+    if (!imeiInput) return;
+    var units = productId ? serialUnits[productId] : null;
+    if (!units) { imeiInput.style.display = "none"; imeiInput.value = ""; return; }
+    imeiInput.style.display = "block";
+    var list = imeiInput.list;
+    if (list) {
+      list.innerHTML = "";
+      units.forEach(function (imei) {
+        var opt = document.createElement("option");
+        opt.value = imei;
+        list.appendChild(opt);
+      });
+    }
+    var qtyInput = row.querySelector('[name^="qty_"]');
+    qtyInput.value = 1;
+    if (units.length === 1 && !imeiInput.value) imeiInput.value = units[0];
+  }
 
   var labelToId = {};
   var idToLabel = {};
@@ -47,6 +74,7 @@
     var label = searchInput.value.trim();
     var matchedId = labelToId[label];
 
+    syncImeiField(row, matchedId);
     if (matchedId) {
       hiddenId.value = matchedId;
       hint.style.display = "none";
@@ -203,6 +231,18 @@
 
   function handleBarcodeScan(code) {
     var productId = skuToId[code];
+    /* A phone's own IMEI barcode: one unit, one row, that exact IMEI. */
+    var imeiProduct = imeiToProduct[code.replace(/\s/g, "").toUpperCase()];
+    if (!productId && imeiProduct) {
+      var unitRow = findFirstEmptyRow() || addRow();
+      var unitSearch = unitRow.querySelector(".product-search");
+      unitSearch.value = idToLabel[imeiProduct];
+      resolveRow(unitSearch);
+      unitRow.querySelector(".sale-imei").value = code.replace(/\s/g, "").toUpperCase();
+      flashRow(unitRow);
+      showScanToast("✅ " + idToLabel[imeiProduct] + " · IMEI " + code);
+      return;
+    }
     if (!productId) {
       showScanToast("⚠️ Штрих-код не найден: " + code, true);
       return;

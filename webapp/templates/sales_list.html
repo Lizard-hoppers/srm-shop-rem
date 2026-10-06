@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "_payments.html" as pay %}
 {% block title %}{{ t('nav_sales') }}{% endblock %}
 {% block content %}
 {% if error %}<div class="flash flash-error">{{ error }}</div>{% endif %}
@@ -40,6 +41,8 @@
       <button type="button" class="secondary sale-scan-btn" style="flex:0 0 auto;">📷</button>
       <input type="number" name="qty_{{ i }}" placeholder="{{ t('qty_col') }}" style="width:80px;">
       <input type="number" name="price_{{ i }}" placeholder="{{ t('sales_price_placeholder') }}" style="width:110px;">
+      <input type="text" name="imei_{{ i }}" class="sale-imei" list="saleImeiList_{{ i }}" placeholder="{{ t('sale_imei_placeholder') }}" autocomplete="off" style="display:none; flex-basis:100%;">
+      <datalist id="saleImeiList_{{ i }}"></datalist>
       <div class="sale-row-hint meta" style="display:none; flex-basis:100%;"></div>
     </div>
     {% endfor %}
@@ -52,12 +55,9 @@
       <option value="online">{{ t('channel_online') }}</option>
     </select>
   </label>
-  <label>{{ t('payment_method_label') }}
-    <select name="payment_method">
-      <option value="cash">{{ t('payment_method_cash') }}</option>
-      <option value="card">{{ t('payment_method_card') }}</option>
-    </select>
-  </label>
+  <h3>{{ t('pay_section_title') }}</h3>
+  {{ pay.rows(accounts, t) }}
+  <p class="meta" id="salePayTotals">{{ t('pay_sale_hint') }}</p>
   <label>{{ t('sales_warranty_optional_label') }}<input type="date" name="warranty_until"></label>
   </div>
 
@@ -79,6 +79,8 @@
     <button type="button" class="secondary sale-scan-btn" style="flex:0 0 auto;">📷</button>
     <input type="number" name="qty___IDX__" placeholder="{{ t('qty_col') }}" style="width:80px;">
     <input type="number" name="price___IDX__" placeholder="{{ t('sales_price_placeholder') }}" style="width:110px;">
+      <input type="text" name="imei___IDX__" class="sale-imei" list="saleImeiList___IDX__" placeholder="{{ t('sale_imei_placeholder') }}" autocomplete="off" style="display:none; flex-basis:100%;">
+      <datalist id="saleImeiList___IDX__"></datalist>
     <div class="sale-row-hint meta" style="display:none; flex-basis:100%;"></div>
   </div>
 </template>
@@ -86,6 +88,41 @@
 <script>
   window.SALE_PRODUCTS = {{ products_for_picker | tojson }};
   window.SALE_DEFAULT_PRICE_BY_PRODUCT = {{ default_price_by_product | tojson }};
+  window.SALE_SERIAL_UNITS = {{ serial_units | tojson }};
+</script>
+<script>
+/* «Итого к оплате / внесено» under the payment rows — a running check the
+   cashier can see before submitting; the server does the real validation
+   (core.cash.resolve_payments). */
+(function () {
+  var form = document.getElementById("saleForm");
+  var out = document.getElementById("salePayTotals");
+  var hint = out.textContent;
+  function num(v) { var n = parseFloat(String(v || "").replace(/\s/g, "").replace(",", ".")); return isNaN(n) ? 0 : n; }
+  function recalc() {
+    var total = 0, paid = 0, any = false;
+    form.querySelectorAll(".sale-row").forEach(function (row) {
+      total += num(row.querySelector('[name^="qty_"]').value) * num(row.querySelector('[name^="price_"]').value);
+    });
+    form.querySelectorAll(".pay-amount").forEach(function (input) {
+      var amount = num(input.value);
+      if (!amount) return;
+      any = true;
+      var rateInput = input.parentNode.querySelector(".pay-rate");
+      paid += amount * (rateInput ? num(rateInput.value) : 1);
+    });
+    if (!total && !any) { out.textContent = hint; return; }
+    var text = "{{ t('pay_total_label') }}: " + Math.round(total * 100) / 100 + " грн";
+    if (any) {
+      var left = Math.round((total - paid) * 100) / 100;
+      text += " · {{ t('pay_paid_label') }}: " + Math.round(paid * 100) / 100 + " грн · {{ t('pay_left_label') }}: " + left + " грн";
+    } else {
+      text += " · " + hint;
+    }
+    out.textContent = text;
+  }
+  form.addEventListener("input", recalc);
+})();
 </script>
 <script src="/static/keyboard-scanner.js?v={{ asset_version }}"></script>
 <script src="/static/sale-rows.js?v={{ asset_version }}"></script>

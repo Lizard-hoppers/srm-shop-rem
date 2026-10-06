@@ -37,6 +37,7 @@ from aiogram.types import (
 )
 
 from bot.miniapp_links import crm_link
+from core import accounts as core_accounts
 from core import auth as core_auth
 from core import buyback as core_buyback
 from core import cash as core_cash
@@ -45,6 +46,7 @@ from core import documents as core_documents
 from core import inventory as core_inventory
 from core import repairs as core_repairs
 from core import sales as core_sales
+from core import shifts as core_shifts
 from core import store_access
 from core.storage import get_conn
 from core.stores import StoreConfig, get_store
@@ -63,6 +65,9 @@ _BUYBACK_ROLES = ("owner", "admin", "storekeeper")
 _PURCHASE_ROLES = ("owner", "admin", "storekeeper")
 # Mirrors webapp.routers.cash._CASH_ROLES.
 _CASH_ROLES = ("owner", "admin", "storekeeper")
+# «Видят все, корректируют только владельцы» — внести/снять is a correction
+# of a balance (mirrors webapp.routers.cash._OWNER_ROLES).
+_ADJUST_ROLES = ("owner", "admin")
 
 # Real button colors: `style` isn't a typed aiogram field (not in
 # KeyboardButton.model_fields), but the Pydantic model has extra="allow"
@@ -78,7 +83,9 @@ BTN_BUYBACK = "💰 Скупка"
 BTN_PURCHASE = "📦 Приход"
 BTN_SUMMARY = "📊 Сводка"
 BTN_CASH = "💵 Касса"
+BTN_TRANSFER = "🔁 Перемещение"
 BTN_CANCEL = "❌ Отмена"
+_ENTRY_BUTTONS = {BTN_REPAIR, BTN_CLIENT, BTN_BUYBACK, BTN_PURCHASE, BTN_SUMMARY, BTN_CASH, BTN_TRANSFER, BTN_CANCEL}
 
 # Один словарь на оба места, где способ оплаты показывается сотруднику
 # (шапка экрана и карточка подтверждения) — раньше метки были продублированы
@@ -100,7 +107,7 @@ QUICK_ACTIONS_KEYBOARD = ReplyKeyboardMarkup(
         [KeyboardButton(text=BTN_REPAIR), KeyboardButton(text=BTN_CLIENT, style="primary")],
         [KeyboardButton(text=BTN_BUYBACK, style="success"), KeyboardButton(text=BTN_PURCHASE)],
         [KeyboardButton(text=BTN_SUMMARY), KeyboardButton(text=BTN_CASH)],
-        [KeyboardButton(text=BTN_CANCEL, style="danger")],
+        [KeyboardButton(text=BTN_TRANSFER), KeyboardButton(text=BTN_CANCEL, style="danger")],
     ],
     resize_keyboard=True,
     is_persistent=True,
@@ -159,6 +166,20 @@ class CashAdjustment(StatesGroup):
     confirm = State()
 
 
+class TransferFlow(StatesGroup):
+    """«🔁 Перемещение» — handlers live in bot/transfer_flow.py; the
+    states are declared here so the shared cancel/fallback handlers at the
+    bottom of this module cover them like every other flow."""
+    search = State()
+    qty = State()
+    review = State()
+
+
+class ShiftOpen(StatesGroup):
+    """«Есть расхождение» — one text step: what exactly doesn't match."""
+    note = State()
+
+
 class ClientSearch(StatesGroup):
     """One text step (phone or name), then either the match is shown
     directly (exactly one hit) or a picker of callback buttons (several
@@ -196,6 +217,168 @@ def _resolve_staff_for_dm(telegram_id: int) -> tuple[StoreConfig, object] | None
     if not staff:
         return None
     return store, staff
+
+
+# --- Смена (Заход 2): before the first operation of the day the employee
+# looks at the точка's balances and opens their shift — «всё совпадает» or
+# «есть расхождение» (core.shifts). Every entry point that WRITES something
+# (ремонт, скупка, приход, касса) goes through _shift_gate; looking things
+# up (клиент, сводка) doesn't need a shift. ---
+
+def _shift_is_open(store: StoreConfig, staff) -> bool:
+    with get_conn(store.db_path) as conn:
+        return core_shifts.current_shift(conn, staff["id"], store.location_id) is not None
+
+
+def _shift_screen(store: StoreConfig, staff) -> tuple[str, InlineKeyboardMarkup]:
+    with get_conn(store.db_path) as conn:
+        snap = core_shifts.snapshot(conn, store.location_id)
+    lines = [f"<b>{html.escape(staff['name'])} · {html.escape(store.name)}</b>", "Сверьте остатки:", ""]
+    for account in snap["accounts"]:
+        lines.append(f"{html.escape(account['name'])}: {account['balance']} {account['currency_label']}")
+    lines.append(f"В товаре по всему бизнесу: {snap['stock_value']} грн")
+    lines += ["", "<i>Видят все. Корректируют только владельцы.</i>"]
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✓ Всё совпадает — открыть смену", callback_data="shift_open_ok", style="success")],
+        [InlineKeyboardButton(text="⚠ Есть расхождение", callback_data="shift_open_mismatch")],
+    ])
+    return "\n".join(lines), keyboard
+
+
+async def _shift_gate(message: Message, state: FSMContext, store: StoreConfig, staff) -> bool:
+    """True if today's shift is open. Otherwise the tap is swallowed and
+    the «сверить остатки» screen takes its place — after opening, the
+    employee taps the action again."""
+    if _shift_is_open(store, staff):
+        return True
+    await _reset(message, state)
+    await state.update_data(store_id=store.id)
+    await _consume(state, message)
+    text, keyboard = _shift_screen(store, staff)
+    await _repost(message, state, text, keyboard)
+    return False
+
+
+async def _resolve_shift_actor(callback: CallbackQuery, state: FSMContext):
+    """(store, staff) for whoever tapped a shift button, or None (having
+    answered the callback). The store comes from the FSM data when the
+    screen was put up by _shift_gate, and is re-resolved from the tapper's
+    identity when it was the standalone «Открыть смену» button from /start
+    (no FSM data behind that one)."""
+    data = await state.get_data()
+    store = None
+    if data.get("store_id"):
+        try:
+            store = get_store(data["store_id"])
+        except KeyError:
+            store = None
+    if store is None:
+        resolved = _resolve_staff_for_dm(callback.from_user.id)
+        if not resolved:
+            await callback.answer("Вы не подключены как сотрудник в CRM.", show_alert=True)
+            return None
+        store = resolved[0]
+    with get_conn(store.db_path) as conn:
+        staff = core_auth.get_staff_by_telegram_id(conn, callback.from_user.id)
+    if not staff:
+        await callback.answer("Вы не подключены как сотрудник в CRM.", show_alert=True)
+        return None
+    return store, staff
+
+
+_SHIFT_OPENED_TEXT = "✅ <b>Смена открыта!</b>\nТеперь можно оформлять покупки и вести обычную работу."
+
+
+@router.callback_query(F.data == "shift_begin")
+async def shift_begin(callback: CallbackQuery, state: FSMContext) -> None:
+    """«💼 Открыть смену» under the /start greeting."""
+    actor = await _resolve_shift_actor(callback, state)
+    if not actor:
+        return
+    store, staff = actor
+    if _shift_is_open(store, staff):
+        await _safe_edit(callback.bot, callback.message.chat.id, callback.message.message_id, _SHIFT_OPENED_TEXT)
+        await callback.answer()
+        return
+    await state.update_data(store_id=store.id, prompt_message_id=callback.message.message_id)
+    text, keyboard = _shift_screen(store, staff)
+    await _safe_edit(callback.bot, callback.message.chat.id, callback.message.message_id, text, keyboard)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "shift_open_ok")
+async def shift_open_ok(callback: CallbackQuery, state: FSMContext) -> None:
+    actor = await _resolve_shift_actor(callback, state)
+    if not actor:
+        return
+    store, staff = actor
+    with get_conn(store.db_path) as conn:
+        core_shifts.open_shift(conn, staff["id"], store.location_id)
+    await state.clear()
+    await _safe_edit(callback.bot, callback.message.chat.id, callback.message.message_id, _SHIFT_OPENED_TEXT)
+    await callback.answer("Смена открыта")
+
+
+@router.callback_query(F.data == "shift_open_mismatch")
+async def shift_open_mismatch(callback: CallbackQuery, state: FSMContext) -> None:
+    actor = await _resolve_shift_actor(callback, state)
+    if not actor:
+        return
+    store, _staff = actor
+    await state.set_state(ShiftOpen.note)
+    await state.update_data(store_id=store.id, prompt_message_id=callback.message.message_id)
+    question = "⚠ Напишите, что именно не сходится (например: «наличных на 200 грн меньше»):"
+    await _safe_edit(callback.bot, callback.message.chat.id, callback.message.message_id, question)
+    await state.update_data(prompt_text=question, prompt_markup=None)
+    await callback.answer()
+
+
+# ~in_(_ENTRY_BUTTONS): this handler sits above the entry points and the
+# ❌ Отмена handler in this router, so without the exclusion a tap on any
+# keyboard button while the note is awaited would be read as the note's
+# text instead of doing what the button says.
+@router.message(ShiftOpen.note, F.text, ~F.text.in_(_ENTRY_BUTTONS))
+async def shift_got_note(message: Message, state: FSMContext) -> None:
+    note = message.text.strip()
+    if not note:
+        await _nudge(message, state, "Опишите расхождение текстом.")
+        return
+    data = await state.get_data()
+    resolved = _resolve_staff_for_dm(message.from_user.id)
+    try:
+        store = get_store(data["store_id"])
+    except KeyError:
+        store = None
+    if not resolved or store is None:
+        await _consume(state, message)
+        await state.clear()
+        return
+    staff = resolved[1]
+    with get_conn(store.db_path) as conn:
+        core_shifts.open_shift(conn, staff["id"], store.location_id, discrepancy_note=note)
+        owners = [
+            row["telegram_id"] for row in core_auth.list_staff(conn)
+            if row["role"] in _ADJUST_ROLES and row["telegram_id"] and row["telegram_id"] != message.from_user.id
+        ]
+    await _consume(state, message)
+    await _repost(
+        message, state,
+        f"{_SHIFT_OPENED_TEXT}\n\nРасхождение записано и передано владельцу: {html.escape(note)}",
+    )
+    await state.clear()
+    # The discrepancy is a signal for whoever is allowed to correct a
+    # balance — tell them now rather than waiting for them to open the
+    # journal. Best effort: an owner who never started the bot in DM
+    # simply doesn't get it (the shift document still carries the note).
+    alert = (
+        f"⚠ <b>Расхождение при открытии смены</b>\n"
+        f"{html.escape(staff['name'])} · {html.escape(store.name)}\n{html.escape(note)}"
+    )
+    for telegram_id in owners:
+        try:
+            await message.bot.send_message(telegram_id, alert)
+        except TelegramAPIError:
+            pass
 
 
 # --- Clean Chat helpers (манифест §2). Инвариант: у диалога ровно ОДНО
@@ -478,6 +661,8 @@ async def repair_start(message: Message, state: FSMContext) -> None:
         await message.answer("Недостаточно прав для приёма ремонта.")
         return
 
+    if not await _shift_gate(message, state, store, staff):
+        return
     await _reset(message, state)
     await state.set_state(RepairIntake.photo)
     await state.update_data(store_id=store.id)
@@ -556,6 +741,8 @@ async def buyback_start(message: Message, state: FSMContext) -> None:
         await message.answer("Недостаточно прав для скупки.")
         return
 
+    if not await _shift_gate(message, state, store, staff):
+        return
     await _reset(message, state)
     await state.set_state(BuybackIntake.name)
     await state.update_data(store_id=store.id)
@@ -577,11 +764,13 @@ async def purchase_start(message: Message, state: FSMContext) -> None:
     resolved = _resolve_staff_for_dm(message.from_user.id)
     if not resolved:
         return
-    _store, staff = resolved
+    store, staff = resolved
     if staff["role"] not in _PURCHASE_ROLES:
         await message.answer("Недостаточно прав для приёма накладной.")
         return
 
+    if not await _shift_gate(message, state, store, staff):
+        return
     await _reset(message, state)
     await _consume(state, message)
     await message.answer("📦 Пришлите фото накладной — распознаю позиции и предложу оприходовать.")
@@ -648,19 +837,27 @@ async def cash_start(message: Message, state: FSMContext) -> None:
         await message.answer("Недостаточно прав для операций с кассой.")
         return
 
+    if not await _shift_gate(message, state, store, staff):
+        return
     await _reset(message, state)
     await state.update_data(store_id=store.id)
     await _consume(state, message)
     with get_conn(store.db_path) as conn:
         balance = core_cash.cash_balance(conn, store.location_id)
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➖ Расход", callback_data="cash_menu_expense")],
-        [
+        other_accounts = [
+            a for a in core_accounts.balances(conn, store.location_id)
+            if a["balance"] != 0 and not (a["kind"] == "cash" and a["currency"] == "UAH")
+        ]
+    rows = [[InlineKeyboardButton(text="➖ Расход", callback_data="cash_menu_expense")]]
+    if staff["role"] in _ADJUST_ROLES:
+        rows.append([
             InlineKeyboardButton(text="➕ Внести", callback_data="cash_menu_in", style="success"),
             InlineKeyboardButton(text="➖ Снять", callback_data="cash_menu_out"),
-        ],
-    ])
-    await _repost(message, state, f"💵 <b>Касса</b>\nБаланс: {balance} грн", keyboard)
+        ])
+    rows.append([InlineKeyboardButton(text="🔒 Закрыть смену", callback_data="shift_close")])
+    lines = ["💵 <b>Касса</b>", f"Баланс: {balance} грн"]
+    lines += [f"{html.escape(a['name'])}: {a['balance']} {a['currency_label']}" for a in other_accounts]
+    await _repost(message, state, "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows))
 
 
 async def _resolve_cash_actor(callback: CallbackQuery, state: FSMContext):
@@ -693,9 +890,35 @@ async def cash_menu_expense(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
+@router.callback_query(F.data == "shift_close")
+async def shift_close(callback: CallbackQuery, state: FSMContext) -> None:
+    actor = await _resolve_shift_actor(callback, state)
+    if not actor:
+        return
+    store, staff = actor
+    with get_conn(store.db_path) as conn:
+        shift = core_shifts.current_shift(conn, staff["id"], store.location_id)
+        if shift:
+            core_shifts.close_shift(conn, shift["id"], staff["id"])
+    await state.clear()
+    await _safe_edit(
+        callback.bot, callback.message.chat.id, callback.message.message_id,
+        "🔒 Смена закрыта. Чтобы продолжить работу, откройте новую.",
+    )
+    await callback.answer("Смена закрыта")
+
+
+def _may_adjust(staff) -> bool:
+    return staff["role"] in _ADJUST_ROLES
+
+
 @router.callback_query(F.data == "cash_menu_in")
 async def cash_menu_in(callback: CallbackQuery, state: FSMContext) -> None:
-    if not await _resolve_cash_actor(callback, state):
+    staff = await _resolve_cash_actor(callback, state)
+    if not staff:
+        return
+    if not _may_adjust(staff):
+        await callback.answer("Корректировать остаток может только владелец.", show_alert=True)
         return
     await state.set_state(CashAdjustment.amount)
     await state.update_data(direction="in")
@@ -705,7 +928,11 @@ async def cash_menu_in(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(F.data == "cash_menu_out")
 async def cash_menu_out(callback: CallbackQuery, state: FSMContext) -> None:
-    if not await _resolve_cash_actor(callback, state):
+    staff = await _resolve_cash_actor(callback, state)
+    if not staff:
+        return
+    if not _may_adjust(staff):
+        await callback.answer("Корректировать остаток может только владелец.", show_alert=True)
         return
     await state.set_state(CashAdjustment.amount)
     await state.update_data(direction="out")
@@ -877,7 +1104,7 @@ async def cash_adjustment_confirm(callback: CallbackQuery, state: FSMContext) ->
     signed_amount = data["amount"] if data.get("direction") == "in" else -data["amount"]
     with get_conn(store.db_path) as conn:
         staff = core_auth.get_staff_by_telegram_id(conn, callback.from_user.id)
-        if not staff or staff["role"] not in _CASH_ROLES:
+        if not staff or staff["role"] not in _ADJUST_ROLES:
             await state.clear()
             await callback.answer("Недостаточно прав.", show_alert=True)
             return
@@ -1000,7 +1227,7 @@ async def client_search_pick(callback: CallbackQuery, state: FSMContext) -> None
     await callback.answer()
 
 
-@router.message(F.text == BTN_CANCEL, StateFilter(RepairIntake, QuickContact, BuybackIntake, CashExpense, CashAdjustment, ClientSearch))
+@router.message(F.text == BTN_CANCEL, StateFilter(RepairIntake, QuickContact, BuybackIntake, CashExpense, CashAdjustment, ClientSearch, ShiftOpen, TransferFlow))
 async def cancel_flow(message: Message, state: FSMContext) -> None:
     """Deletes EVERYTHING from this flow attempt — the bot's own tracked
     message, every reply the staff member typed along the way (name,
@@ -1469,7 +1696,7 @@ async def contact_confirm(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer("Готово")
 
 
-@router.callback_query(F.data.in_({"quick_repair_cancel", "quick_contact_cancel", "quick_buyback_cancel", "cash_cancel"}))
+@router.callback_query(F.data.in_({"quick_repair_cancel", "quick_contact_cancel", "quick_buyback_cancel", "cash_cancel", "tr_cancel"}))
 async def quick_cancel_callback(callback: CallbackQuery, state: FSMContext) -> None:
     """Inline ❌ Отмена on the confirm card — same full cleanup as
     cancel_flow, minus the entry-tap-of-cancel (a button tap doesn't
@@ -1487,6 +1714,6 @@ async def quick_cancel_callback(callback: CallbackQuery, state: FSMContext) -> N
 # message while waiting on inline-button confirm) gets a nudge instead of
 # silence ---
 
-@router.message(StateFilter(RepairIntake, QuickContact, BuybackIntake, CashExpense, CashAdjustment, ClientSearch))
+@router.message(StateFilter(RepairIntake, QuickContact, BuybackIntake, CashExpense, CashAdjustment, ClientSearch, ShiftOpen, TransferFlow))
 async def quick_flow_fallback(message: Message, state: FSMContext) -> None:
     await _nudge(message, state, "Не понял ответ. Следуйте подсказке выше, либо ❌ Отмена.")

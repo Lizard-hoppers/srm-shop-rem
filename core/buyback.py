@@ -155,7 +155,7 @@ def create_buyback_intake(
         name = f"{device_label} (Б/У)".strip()
         product_id = _inventory.create_product(
             conn, name=name, sku=None, category="Скупка", unit="шт",
-            is_repair_part=False, is_sellable=True, min_qty=0, price=resale_price,
+            is_repair_part=False, is_sellable=True, min_qty=0, price=resale_price, is_serial=True,
         )
         if photo_filename:
             _inventory.set_product_photo(conn, product_id, photo_filename)
@@ -163,9 +163,14 @@ def create_buyback_intake(
         # record_movement directly, tagged with this покупка — not
         # receive_stock, which is the MANUAL «оприходование» and would
         # put a second, separate document into the journal for it.
+        # One device = one партия of one unit: what we paid for it is its
+        # cost, its serial/IMEI (when given) is its identity.
+        batch_id = _inventory.create_batch(
+            conn, product_id, source="buyback", unit_cost=purchase_price, imei=serial_number,
+        )
         _inventory.record_movement(
             conn, product_id, 1, "receipt", staff_id, to_cell_id=cell_id,
-            ref_type="buyback_order", ref_id=order_id, comment=f"Скупка №{order_id}",
+            ref_type="buyback_order", ref_id=order_id, comment=f"Скупка №{order_id}", batch_id=batch_id,
         )
         conn.execute("UPDATE buyback_orders SET product_id = ? WHERE id = ?", (product_id, order_id))
 

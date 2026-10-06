@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% import "_icons.html" as icons %}
+{% block title %}{{ t('accounts_title') }}{% endblock %}
+{% block content %}
+<a class="back-link" href="{{ link('/cash') }}">{{ icons.icon('back', 16) }} {{ t('nav_cash') }}</a>
+{% if error %}<div class="flash flash-error">{{ error }}</div>{% endif %}
+<p class="meta">{{ t('accounts_manage_hint') }}</p>
+
+{% for a in accounts %}
+<div class="panel-box" style="margin-bottom: 12px;">
+  <p style="margin:0;"><b>{{ a.balance | money }}</b> {{ a.currency_label }} · {{ t('account_kind_' ~ a.kind) }}{% if not a.active %} <span class="pill pill-cancelled">{{ t('account_off') }}</span>{% endif %}</p>
+  <form method="post" action="{{ link('/cash/accounts/' ~ a.id) }}" class="edit-form" style="margin-top: 8px;">
+    <input type="hidden" name="action" value="rename">
+    <label>{{ t('account_name_label') }}<input type="text" name="name" value="{{ a.name }}" required></label>
+    <button type="submit" class="secondary">{{ t('save_btn') }}</button>
+  </form>
+  <form method="post" action="{{ link('/cash/accounts/' ~ a.id) }}" style="margin-top: 8px;">
+    <input type="hidden" name="action" value="{{ 'off' if a.active else 'on' }}">
+    <button type="submit" class="secondary">{{ t('account_switch_off_btn') if a.active else t('account_switch_on_btn') }}</button>
+  </form>
+</div>
+{% endfor %}
+
+<h2>{{ t('account_add_title') }}</h2>
+<form method="post" action="{{ link('/cash/accounts') }}" class="edit-form">
+  <label>{{ t('account_name_label') }}<input type="text" name="name" required></label>
+  <label>{{ t('account_kind_label') }}
+    <select name="kind">
+      {% for key in kinds %}<option value="{{ key }}">{{ t('account_kind_' ~ key) }}</option>{% endfor %}
+    </select>
+  </label>
+  <label>{{ t('account_currency_label') }}
+    <select name="currency">
+      {% for c in currencies %}<option value="{{ c }}">{{ c }}</option>{% endfor %}
+    </select>
+  </label>
+  <button type="submit">{{ t('add_btn') }}</button>
+</form>
+{% endblock %}

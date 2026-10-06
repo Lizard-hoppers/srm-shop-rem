@@ -50,6 +50,22 @@
     </div>
     <div class="chevron">{{ icons.icon('chevron', 18) }}</div>
   </a>
+  <a class="card nav-card" href="{{ link('/transfers') }}">
+    <div class="card-icon">{{ icons.icon('truck', 18) }}</div>
+    <div class="nav-card-body">
+      <div class="nav-card-title">{{ t('transfers_title') }}{% if pending_transfers %} · {{ pending_transfers }}{% endif %}</div>
+      <div class="nav-card-sub">{{ t('transfers_sub') }}</div>
+    </div>
+    <div class="chevron">{{ icons.icon('chevron', 18) }}</div>
+  </a>
+  <a class="card nav-card" href="{{ link('/inventory/warehouses') }}">
+    <div class="card-icon">{{ icons.icon('archive', 18) }}</div>
+    <div class="nav-card-body">
+      <div class="nav-card-title">{{ t('warehouses_title') }}</div>
+      <div class="nav-card-sub">{{ t('warehouses_sub') }}</div>
+    </div>
+    <div class="chevron">{{ icons.icon('chevron', 18) }}</div>
+  </a>
   <a class="card nav-card" href="{{ link('/inventory/movements') }}">
     <div class="card-icon">{{ icons.icon('repeat', 18) }}</div>
     <div class="nav-card-body">

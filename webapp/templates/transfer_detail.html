@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% import "_icons.html" as icons %}
+{% block title %}{{ t('transfers_title') }} №{{ transfer.id }}{% endblock %}
+{% block content %}
+<a class="back-link" href="{{ link('/transfers') }}">{{ icons.icon('back', 16) }} {{ t('transfers_title') }}</a>
+{% if error %}<div class="flash flash-error">{{ error }}</div>{% endif %}
+
+<div class="panel-box">
+  <h3 style="margin:0;">{{ transfer.route }}</h3>
+  <p class="meta" style="margin:6px 0 0;">
+    <span class="pill {{ 'pill-cancelled' if transfer.status == 'cancelled' else ('pill-in_progress' if transfer.status == 'sent' else 'pill-ready') }}">{{ t('transfer_status_' ~ transfer.status) }}</span>{% if document_label %} · {{ document_label }}{% endif %}
+  </p>
+  <p class="meta" style="margin:6px 0 0;">{{ t('transfer_sent_label') }}: {{ transfer.sent_by_name or '—' }} · {{ transfer.sent_at | kyiv }}</p>
+  {% if transfer.received_at %}<p class="meta" style="margin:4px 0 0;">{{ t('transfer_received_label') }}: {{ transfer.received_by_name or '—' }} · {{ transfer.received_at | kyiv }}</p>{% endif %}
+  {% if transfer.comment %}<p class="meta" style="margin:4px 0 0;">{{ transfer.comment }}</p>{% endif %}
+  {% if transfer.discrepancy_note %}<p style="margin:8px 0 0;"><span class="pill pill-new">{{ t('transfer_shortage_pill') }}</span> {{ transfer.discrepancy_note }}</p>{% endif %}
+</div>
+
+{% if can_receive %}
+<form method="post" action="{{ link('/transfers/' ~ transfer.id ~ '/receive') }}" class="edit-form" style="margin-top: 16px;">
+{% endif %}
+<h2>{{ t('transfer_items_title') }}</h2>
+<div class="table-scroll">
+<table class="table">
+  <thead><tr><th>{{ t('col_product') }}</th><th>{{ t('transfer_sent_qty_col') }}</th><th>{{ t('transfer_received_qty_col') }}</th></tr></thead>
+  <tbody>
+    {% for i in items %}
+    <tr>
+      <td>{{ i.product_name }}{% if i.imei %}<div class="meta">IMEI {{ i.imei }}</div>{% endif %}<div class="meta">{{ t('batch_col') }} №{{ i.batch_id }}{% if i.supplier_name %} · {{ i.supplier_name }}{% endif %}</div></td>
+      <td>{{ i.qty }} {{ i.unit }}</td>
+      <td>
+        {% if can_receive %}<input type="number" name="recv_{{ i.id }}" value="{{ i.qty }}" min="0" max="{{ i.qty }}" style="width:90px;">
+        {% elif i.received_qty is not none %}{{ i.received_qty }} {{ i.unit }}
+        {% else %}—{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+{% if can_receive %}
+  {% if target_cells %}
+  <label>{{ t('transfer_target_cell_label') }}
+    <select name="cell_id">
+      <option value="">{{ t('transfer_target_cell_auto') }}</option>
+      {% for c in target_cells %}<option value="{{ c.id }}">{{ c.code }}</option>{% endfor %}
+    </select>
+  </label>
+  {% endif %}
+  <label>{{ t('transfer_note_label') }}<input type="text" name="note"></label>
+  <button type="submit">{{ t('transit_receive_btn') }}</button>
+</form>
+{% elif transfer.status == 'sent' %}
+<p class="meta">{{ t('transfer_waiting_hint') }}</p>
+{% endif %}
+
+{% if shortage %}
+<h2>{{ t('transfer_shortage_title') }}</h2>
+<p class="meta">{{ t('transfer_shortage_hint') }}</p>
+<ul class="timeline">
+  {% for i in shortage %}<li>{{ i.product_name }}{% if i.imei %} · IMEI {{ i.imei }}{% endif %} — {{ i.qty - i.received_qty }} {{ i.unit }}</li>{% endfor %}
+</ul>
+{% if can_settle %}
+<form method="post" action="{{ link('/transfers/' ~ transfer.id ~ '/shortage') }}" class="edit-form">
+  <label>{{ t('doc_cancel_reason_label') }}<span class="required-mark">*</span><input type="text" name="reason" required></label>
+  <button type="submit" class="danger">{{ t('transfer_shortage_writeoff_btn') }}</button>
+</form>
+{% endif %}
+{% endif %}
+
+{% if document and staff.role in ('owner', 'admin') %}
+<p class="meta" style="margin-top: 12px;"><a href="{{ link('/journal/' ~ document.id) }}">{{ t('more_journal') }} →</a></p>
+{% endif %}
+{% endblock %}

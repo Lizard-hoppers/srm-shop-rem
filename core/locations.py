@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import sqlite3
 
+from core import accounts as _accounts
+
 
 def list_locations(conn: sqlite3.Connection, include_inactive: bool = False) -> list[sqlite3.Row]:
     query = "SELECT * FROM locations"
@@ -35,11 +37,13 @@ def resolve(conn: sqlite3.Connection, location_id: int | None) -> int:
 
 
 def create_location(conn: sqlite3.Connection, name: str) -> int:
-    """A new точка, with its own 'point' склад from the start."""
+    """A new точка, with its own 'point' склад and its default set of
+    денежные счета from the start."""
     location_id = conn.execute("INSERT INTO locations (name) VALUES (?)", (name.strip(),)).lastrowid
     conn.execute(
         "INSERT INTO warehouses (kind, location_id, name) VALUES ('point', ?, 'Основной склад')", (location_id,)
     )
+    _accounts.ensure_for_location(conn, location_id)
     return location_id
 
 

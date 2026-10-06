@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from core import channel_posts
+from core import accounts as core_accounts
 from core import auth as core_auth
 from core import cash as core_cash
 from core import clients as core_clients
@@ -20,6 +21,7 @@ from core import vision_ocr
 from core.inventory import InsufficientStockError
 from core.storage import get_conn
 from webapp.deps import idem_key, link, loc, optional_int, require_role, require_staff
+from webapp.payments import payments_from_form
 from webapp.templating import render
 
 router = APIRouter(prefix="/repairs")
@@ -229,8 +231,13 @@ async def create_view(
 
 
 def _detail_context(conn, order_id: int, location_id: int | None = None) -> dict:
+    repair = core_repairs.get_repair(conn, order_id)
     return {
-        "repair": core_repairs.get_repair(conn, order_id),
+        "repair": repair,
+        # The repair is paid into the accounts of the точка that took it
+        # in, whichever точка the page happens to be opened from.
+        "accounts": core_accounts.list_accounts(conn, repair["location_id"]) if repair else [],
+        "payments": core_cash.payments_for(conn, "repair_order", order_id),
         "history": core_repairs.get_status_history(conn, order_id),
         "parts": core_repairs.get_used_parts(conn, order_id),
         "attachments": core_repairs.get_attachments(conn, order_id),
@@ -254,9 +261,8 @@ def detail_view(request: Request, order_id: int, staff=Depends(require_staff)):
 
 
 @router.post("/{order_id}/status")
-def status_view(
-    request: Request, background_tasks: BackgroundTasks, order_id: int, status: str = Form(...), comment: str = Form(""),
-    payment_method: str = Form(""),
+async def status_view(
+    request: Request, background_tasks: BackgroundTasks, order_id: int,
     staff=Depends(require_role(*_REPAIR_WRITE_ROLES)),
 ):
     """A repair transitioning INTO 'issued' (not already there — re-saving
@@ -264,36 +270,53 @@ def status_view(
     касса) with a price on it needs a payment method, and the price gets
     recorded as касса income right here — this is the one place a repair
     actually changes hands for money in this app's flow."""
+    # The form is read by hand (not typed Form params): the «Оплата» block
+    # has one field per account of the точка, a set no signature can list.
+    form = await request.form()
+    status = form.get("status") or ""
+    comment = form.get("comment") or ""
+    payment_method = form.get("payment_method") or ""
+    payments = payments_from_form(form)
+
     with get_conn() as conn:
         current = core_repairs.get_repair(conn, order_id)
+        if not current or status not in core_repairs.STATUS_LABELS:
+            return RedirectResponse(link(request, "/repairs"), status_code=303)
         becoming_issued = status == "issued" and current["status"] != "issued"
+        takes_money = becoming_issued and current["price_final"]
 
-        if becoming_issued and current["price_final"] and payment_method not in core_cash.METHODS:
-            ctx = _detail_context(conn, order_id, loc(request))
-            return render(
-                request, "repair_detail.html", staff=staff,
-                error="Укажите способ оплаты, чтобы отметить ремонт как «Выдан».", **ctx,
-            )
+        resolved = None
+        if takes_money:
+            # How it was paid has to be said explicitly — into which
+            # account(s) of the точка that took the repair in. (The old
+            # single «способ оплаты» field still works: cash / card.)
+            error = None
+            if not payments and payment_method not in core_cash.METHODS:
+                error = "Укажите способ оплаты, чтобы отметить ремонт как «Выдан»."
+            else:
+                try:
+                    resolved = core_cash.resolve_payments(
+                        conn, current["location_id"], current["price_final"], payments or None, payment_method,
+                    )
+                except core_cash.PaymentError as exc:
+                    error = str(exc)
+            if error:
+                ctx = _detail_context(conn, order_id, loc(request))
+                return render(request, "repair_detail.html", staff=staff, error=error, **ctx)
 
         core_repairs.update_status(conn, order_id, status, staff["id"], comment.strip() or None)
         repair = core_repairs.get_repair(conn, order_id)
 
-        if becoming_issued and current["price_final"]:
-            # Money lands in the касса of the точка that took the repair in,
-            # whichever точка the person pressing «Выдан» is looking at.
-            core_cash.record_income(
-                conn, payment_method, current["price_final"], "repair_order", order_id, staff["id"],
-                location_id=current["location_id"],
-            )
+        if resolved:
+            core_cash.record_payments(conn, "income", resolved, "repair_order", order_id, staff["id"])
 
         messages = core_repairs.get_order_messages(conn, order_id)
 
-    # Background, not awaited here: status_view is already a sync `def`
-    # route (FastAPI runs it in a threadpool on its own, so it never
-    # blocked anyone ELSE) — but Павел's own click still used to wait on
-    # 1-2 sequential Telegram edit calls before the redirect. sync_repair_cards
-    # needs no `conn` (messages/text/keyboard are already plain values), so
-    # it can go straight to add_task with no wrapper.
+    # Background, not awaited here: the 1-2 sequential Telegram edit calls
+    # are blocking httpx — in this async route they would hold the event
+    # loop, and Павел's own click would wait on them before the redirect.
+    # sync_repair_cards needs no `conn` (messages/text/keyboard are already
+    # plain values), so it goes straight to add_task with no wrapper.
     background_tasks.add_task(
         core_notify.sync_repair_cards,
         messages, core_repairs.render_card_text(repair), core_repairs.render_keyboard(order_id, repair["status"]),

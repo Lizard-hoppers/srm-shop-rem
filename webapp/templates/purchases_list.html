@@ -34,6 +34,12 @@
         </select>
       </label>
       <label>{{ t('invoice_no_label') }}<input type="text" name="invoice_no"></label>
+      <label>{{ t('purchase_currency_label') }}
+        <select name="currency" id="receiptCurrency">
+          {% for c in currencies %}<option value="{{ c }}">{{ c }}</option>{% endfor %}
+        </select>
+      </label>
+      <label id="receiptRateRow" style="display:none;">{{ t('purchase_rate_label') }}<input type="text" inputmode="decimal" name="rate" autocomplete="off"></label>
 
       <label>{{ t('paste_invoice_label') }}
         <textarea id="invoiceText" rows="3" placeholder="{{ t('paste_invoice_placeholder') }}"></textarea>
@@ -58,7 +64,8 @@
             {% for c in cells %}<option value="{{ c.id }}">{{ c.code }}</option>{% endfor %}
           </select>
           <input type="number" name="qty_{{ i }}" placeholder="{{ t('qty_col') }}" style="width:80px;">
-          <input type="number" name="unit_cost_{{ i }}" placeholder="{{ t('col_unit_cost') }}" style="width:110px;">
+          <input type="text" inputmode="decimal" name="unit_cost_{{ i }}" placeholder="{{ t('col_unit_cost') }}" style="width:110px;">
+          <textarea name="imeis_{{ i }}" class="imei-input" rows="2" placeholder="{{ t('purchase_imei_placeholder') }}" style="display:none; flex-basis:100%;"></textarea>
           <div class="new-product-hint" style="display:none; flex-basis:100%; color: var(--accent-2); font-size: 0.9em;">
             {{ t('new_product_hint') }}
           </div>
@@ -90,7 +97,8 @@
       {% for c in cells %}<option value="{{ c.id }}">{{ c.code }}</option>{% endfor %}
     </select>
     <input type="number" name="qty___IDX__" placeholder="{{ t('qty_col') }}" style="width:80px;">
-    <input type="number" name="unit_cost___IDX__" placeholder="{{ t('col_unit_cost') }}" style="width:110px;">
+    <input type="text" inputmode="decimal" name="unit_cost___IDX__" placeholder="{{ t('col_unit_cost') }}" style="width:110px;">
+          <textarea name="imeis___IDX__" class="imei-input" rows="2" placeholder="{{ t('purchase_imei_placeholder') }}" style="display:none; flex-basis:100%;"></textarea>
     <div class="new-product-hint" style="display:none; flex-basis:100%; color: var(--accent-2); font-size: 0.9em;">
       {{ t('new_product_hint') }}
     </div>
@@ -100,6 +108,7 @@
 <script>
   window.PURCHASE_PRODUCTS = {{ products_for_picker | tojson }};
   window.PURCHASE_DEFAULT_CELLS = {{ default_cell_by_product | tojson }};
+  window.PURCHASE_SERIAL_IDS = {{ serial_product_ids | tojson }};
 </script>
 <script src="/static/purchase-rows.js?v={{ asset_version }}"></script>
 {% endblock %}

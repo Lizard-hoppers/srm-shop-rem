@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import re
+
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, RedirectResponse
 
 from core import documents as core_documents
+from core import accounts as core_accounts
 from core import inventory as core_inventory
 from core import purchase_import as core_purchase_import
 from core import purchases as core_purchases
@@ -40,6 +43,9 @@ def _picker_context(conn, location_id: int) -> dict:
             for p in products
         ],
         "default_cell_by_product": core_inventory.default_cell_by_product(conn, location_id),
+        # Products tracked unit by unit — the row asks for their IMEIs.
+        "serial_product_ids": [p["id"] for p in products if p["is_serial"]],
+        "currencies": core_accounts.CURRENCIES,
     }
 
 
@@ -61,14 +67,30 @@ def _parse_receipt_form_items(conn, form, row_count: int) -> list[tuple[int, int
             product_id = core_inventory.create_product(
                 conn, name=product_name, sku=None, category=None, unit="шт",
                 is_repair_part=True, is_sellable=True, min_qty=0,
-                price=int(unit_cost_for_new) if unit_cost_for_new else None,
+                price=int(core_accounts.parse_amount(unit_cost_for_new) or 0) or None,
             )
 
         if not product_id or not cell_id or not qty:
             continue
-        unit_cost = form.get(f"unit_cost_{i}") or None
-        items.append((int(product_id), int(cell_id), int(qty), int(unit_cost) if unit_cost else None))
+        unit_cost = core_accounts.parse_amount(form.get(f"unit_cost_{i}"))
+        imeis = [x for x in re.split(r"[\s,;]+", form.get(f"imeis_{i}") or "") if x]
+        items.append((int(product_id), int(cell_id), int(qty), unit_cost, imeis))
     return items
+
+
+def _receipt_currency(form) -> tuple[str, float]:
+    """(currency, rate) of the накладная. A foreign currency needs its
+    rate — ReceiptError otherwise, since every партия's гривня cost hangs
+    on it."""
+    currency = (form.get("currency") or "UAH").strip().upper()
+    if currency not in core_accounts.CURRENCIES:
+        currency = "UAH"
+    if currency == "UAH":
+        return "UAH", 1
+    rate = core_accounts.parse_amount(form.get("rate"))
+    if not rate:
+        raise core_purchases.ReceiptError(f"Укажите курс: сколько гривен за 1 {currency}.")
+    return currency, float(rate)
 
 
 @router.get("")
@@ -101,15 +123,23 @@ async def create_receipt_view(request: Request, staff=Depends(require_role(*_PUR
     row_count = int(form.get("row_count") or ITEM_ROWS)
 
     key = idem_key("receipt", form.get("idem"))
-    with get_conn() as conn:
-        if core_documents.find_by_key(conn, key):
-            return RedirectResponse(link(request, "/purchases"), status_code=303)
-        items = _parse_receipt_form_items(conn, form, row_count)
-        if items:
-            core_purchases.create_receipt(
-                conn, int(supplier_id) if supplier_id else None, invoice_no.strip() or None, staff["id"], items,
-                location_id=loc(request), key=key,
-            )
+    try:
+        with get_conn() as conn:
+            if core_documents.find_by_key(conn, key):
+                return RedirectResponse(link(request, "/purchases"), status_code=303)
+            currency, rate = _receipt_currency(form)
+            items = _parse_receipt_form_items(conn, form, row_count)
+            if items:
+                core_purchases.create_receipt(
+                    conn, int(supplier_id) if supplier_id else None, invoice_no.strip() or None, staff["id"], items,
+                    location_id=loc(request), key=key, currency=currency, rate=rate,
+                )
+    except (core_purchases.ReceiptError, core_inventory.DuplicateImeiError) as exc:
+        # Out of the `with` by exception: products created on the fly for
+        # this receipt roll back together with it.
+        with get_conn() as conn:
+            ctx = _list_context(conn, loc(request))
+        return render(request, "purchases_list.html", staff=staff, error=str(exc), **ctx)
     return RedirectResponse(link(request, "/purchases"), status_code=303)
 
 
@@ -175,16 +205,28 @@ async def draft_submit_view(request: Request, draft_id: int, staff=Depends(requi
     invoice_no = form.get("invoice_no", "")
     row_count = int(form.get("row_count") or 0)
 
-    with get_conn() as conn:
-        draft = core_purchases.get_draft(conn, draft_id)
-        if draft and draft["status"] == "pending":
-            items = _parse_receipt_form_items(conn, form, row_count)
-            if items:
-                core_purchases.create_receipt(
-                    conn, int(supplier_id) if supplier_id else None, invoice_no.strip() or None, staff["id"], items,
-                    location_id=loc(request),
-                )
-                core_purchases.mark_draft_applied(conn, draft_id)
+    try:
+        with get_conn() as conn:
+            draft = core_purchases.get_draft(conn, draft_id)
+            if draft and draft["status"] == "pending":
+                currency, rate = _receipt_currency(form)
+                items = _parse_receipt_form_items(conn, form, row_count)
+                if items:
+                    core_purchases.create_receipt(
+                        conn, int(supplier_id) if supplier_id else None, invoice_no.strip() or None, staff["id"], items,
+                        location_id=loc(request), currency=currency, rate=rate,
+                    )
+                    core_purchases.mark_draft_applied(conn, draft_id)
+    except (core_purchases.ReceiptError, core_inventory.DuplicateImeiError) as exc:
+        with get_conn() as conn:
+            ctx = {
+                "draft": core_purchases.get_draft(conn, draft_id),
+                "draft_items": core_purchases.get_draft_items(conn, draft_id),
+                "suppliers": core_purchases.list_suppliers(conn),
+                "cells": core_inventory.list_cells(conn, loc(request)),
+                **_picker_context(conn, loc(request)),
+            }
+        return render(request, "purchase_draft.html", staff=staff, error=str(exc), **ctx)
     return RedirectResponse(link(request, "/purchases"), status_code=303)
 
 
@@ -195,4 +237,5 @@ def detail_view(request: Request, receipt_id: int, staff=Depends(require_role(*_
         if not receipt:
             return RedirectResponse(link(request, "/purchases"), status_code=303)
         items = core_purchases.get_receipt_items(conn, receipt_id)
-    return render(request, "purchase_detail.html", staff=staff, receipt=receipt, items=items)
+        batches = core_purchases.get_receipt_batches(conn, receipt_id)
+    return render(request, "purchase_detail.html", staff=staff, receipt=receipt, items=items, batches=batches)

@@ -15,7 +15,7 @@
   <tbody>
     {% for i in items %}
     <tr>
-      <td>{{ i.product_name }}</td>
+      <td>{{ i.product_name }}{% if i.imei %}<div class="meta">IMEI {{ i.imei }}</div>{% endif %}{% if i.supplier_name %}<div class="meta">{{ i.supplier_name }}</div>{% endif %}</td>
       <td>{{ i.qty }}</td>
       <td>{{ i.price }}</td>
       <td>{{ i.qty * i.price }}</td>
@@ -24,6 +24,21 @@
   </tbody>
 </table>
 </div>
+{% if payments %}
+<h2>{{ t('pay_section_title') }}</h2>
+<div class="table-scroll">
+<table class="table">
+  <tbody>
+    {% for p in payments %}
+    <tr>
+      <td>{{ p.account_name or t('payment_method_' ~ p.method) }}{% if p.cancelled_at %} <span class="pill pill-cancelled">{{ t('doc_cancelled') }}</span>{% endif %}</td>
+      <td>{{ p.amount | money }} {{ p.currency or '' }}{% if p.currency and p.currency != 'UAH' and p.amount_uah is not none %} <span class="meta">= {{ p.amount_uah | money }} грн · {{ t('pay_rate_placeholder') }} {{ p.rate | money }}</span>{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
 {% if document and staff.role in ('owner', 'admin') %}
 <p class="meta" style="margin-top: 12px;"><a href="{{ link('/journal/' ~ document.id) }}">{{ t('more_journal') }} →</a></p>
 {% endif %}

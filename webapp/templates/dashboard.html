@@ -2,6 +2,18 @@
 {% import "_icons.html" as icons %}
 {% block title %}{{ t('nav_home') }}{% endblock %}
 {% block content %}
+{% if not shift %}
+<div class="nav-list" style="margin-bottom: 14px;">
+  <a class="card nav-card" href="{{ link('/cash/shift') }}">
+    <div class="card-icon">{{ icons.icon('user', 18) }}</div>
+    <div class="nav-card-body">
+      <div class="nav-card-title">{{ t('shift_open_cta') }}</div>
+      <div class="nav-card-sub">{{ t('shift_open_cta_sub') }}</div>
+    </div>
+    <div class="chevron">{{ icons.icon('chevron', 18) }}</div>
+  </a>
+</div>
+{% endif %}
 <div class="cards">
   <a class="card" href="{{ link('/repairs') }}">
     <div class="card-icon">{{ icons.icon('tool', 18) }}</div>

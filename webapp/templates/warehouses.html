@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% import "_icons.html" as icons %}
+{% block title %}{{ t('warehouses_title') }}{% endblock %}
+{% block content %}
+<a class="back-link" href="{{ link('/warehouse') }}">{{ icons.icon('back', 16) }} {{ t('nav_warehouse') }}</a>
+<p class="meta">{{ t('warehouses_hint') }}</p>
+<div class="nav-list">
+  {% for w in warehouses %}
+  <a class="card nav-card" href="{{ link('/inventory/warehouses/' ~ w.id) }}">
+    <div class="card-icon">{{ icons.icon('user' if w.kind == 'master' else ('truck' if w.kind == 'transit' else 'box'), 18) }}</div>
+    <div class="nav-card-body">
+      <div class="nav-card-title">{{ w.display_name }}</div>
+      <div class="nav-card-sub">{{ w.products }} {{ t('warehouses_positions') }} · {{ w.qty }} {{ t('warehouses_units') }} · {{ w.value | money }} грн</div>
+    </div>
+    <div class="chevron">{{ icons.icon('chevron', 18) }}</div>
+  </a>
+  {% endfor %}
+</div>
+{% endblock %}
