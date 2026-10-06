@@ -41,13 +41,14 @@ DOC_TYPES: dict[str, tuple[str, str]] = {
     "exchange": ("ОБ", "Обмен валют"),
     "money_transfer": ("ДП", "Перемещение денег"),
     "shift": ("СМ", "Открытие смены"),
+    "production": ("ПР", "Производство"),
 }
 
 # Types whose number IS the id of the row they wrap (repair №44 has always
 # been called «№44» on its card and in the group chat — its document is
 # РК-44, not a second, different number). The rest count up on their own.
 _NUMBER_FROM_REF = {
-    "repair", "sale", "buyback", "receipt", "supplier_return", "exchange", "money_transfer", "shift",
+    "repair", "sale", "buyback", "receipt", "supplier_return", "exchange", "money_transfer", "shift", "production",
 }
 
 # Where «открыть документ» leads, by type. {id} is ref_id.
@@ -56,6 +57,7 @@ _SOURCE_PATHS = {
     "sale": "/sales/{id}",
     "buyback": "/buyback/{id}",
     "receipt": "/purchases/{id}",
+    "production": "/production/{id}",
 }
 
 
@@ -152,6 +154,14 @@ def get_for(conn: sqlite3.Connection, doc_type: str, ref_id: int) -> sqlite3.Row
     return conn.execute(
         _JOURNAL_SELECT + " WHERE documents.doc_type = ? AND documents.ref_id = ?", (doc_type, ref_id)
     ).fetchone()
+
+
+def set_profit(conn: sqlite3.Connection, doc_type: str, ref_id: int, profit) -> None:
+    """«Прибыль документа» — what the business kept from it after cost,
+    the master's share and other direct expenses. None clears it."""
+    conn.execute(
+        "UPDATE documents SET profit = ? WHERE doc_type = ? AND ref_id = ?", (profit, doc_type, ref_id)
+    )
 
 
 def update_for(conn: sqlite3.Connection, doc_type: str, ref_id: int, *, amount: int | None = None,

@@ -17,6 +17,7 @@ from core import buyback as core_buyback
 from core import cash as core_cash
 from core import documents as core_documents
 from core import inventory as core_inventory
+from core import production as core_production
 from core.storage import get_conn
 from webapp.deps import idem_key, link, loc, require_role, require_staff
 from webapp.payments import payments_from_form
@@ -125,6 +126,10 @@ def detail_view(request: Request, order_id: int, staff=Depends(require_staff)):
             "document_label": core_documents.doc_label(document) if document else None,
             # Where the phone is right now (None once sold / written off).
             "unit": core_inventory.find_unit_by_imei(conn, order["imei"]) if order["imei"] else None,
+            "production_order": (production_order := core_production.active_order_for_batch(conn, order["batch_id"])
+                                 if order["batch_id"] else None),
+            "production_label": core_documents.label("production", production_order["id"]) if production_order else None,
+            "can_produce": staff["role"] in _BUYBACK_ROLES,
             "where": next(
                 (b["where_text"] for b in core_inventory.list_batches(conn, order["product_id"])
                  if b["id"] == order["batch_id"]), None,

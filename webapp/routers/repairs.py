@@ -230,6 +230,22 @@ async def create_view(
     return RedirectResponse(link(request, f"/repairs/{last_order_id}"), status_code=303)
 
 
+def _parts_from(conn, repair) -> str | None:
+    from core import warehouses as core_warehouses
+
+    warehouse = core_repairs.parts_warehouse(conn, repair)
+    return core_warehouses.display_name(warehouse) if warehouse else None
+
+
+def _sync_cards(background_tasks: BackgroundTasks, conn, order_id: int) -> None:
+    """Queue the Telegram cards' refresh after anything that changes what
+    they show (status, the parts line)."""
+    text, keyboard = core_repairs.card(conn, order_id)
+    background_tasks.add_task(
+        core_notify.sync_repair_cards, core_repairs.get_order_messages(conn, order_id), text, keyboard,
+    )
+
+
 def _detail_context(conn, order_id: int, location_id: int | None = None) -> dict:
     repair = core_repairs.get_repair(conn, order_id)
     return {
@@ -238,6 +254,13 @@ def _detail_context(conn, order_id: int, location_id: int | None = None) -> dict
         # in, whichever точка the page happens to be opened from.
         "accounts": core_accounts.list_accounts(conn, repair["location_id"]) if repair else [],
         "payments": core_cash.payments_for(conn, "repair_order", order_id),
+        # Parts come from the склад of whoever does the repair (the
+        # master's own, see core.repairs.parts_warehouse) — one line per
+        # партия; and the repair's money for whoever may see it.
+        "part_lines": core_repairs.available_parts(conn, order_id) if repair else [],
+        "parts_from": _parts_from(conn, repair) if repair else None,
+        "finance": core_repairs.finance(conn, order_id) if repair else None,
+        "needs_part": core_repairs.needs_part(conn, repair) if repair else False,
         "history": core_repairs.get_status_history(conn, order_id),
         "parts": core_repairs.get_used_parts(conn, order_id),
         "attachments": core_repairs.get_attachments(conn, order_id),
@@ -310,17 +333,10 @@ async def status_view(
         if resolved:
             core_cash.record_payments(conn, "income", resolved, "repair_order", order_id, staff["id"])
 
-        messages = core_repairs.get_order_messages(conn, order_id)
-
-    # Background, not awaited here: the 1-2 sequential Telegram edit calls
-    # are blocking httpx — in this async route they would hold the event
-    # loop, and Павел's own click would wait on them before the redirect.
-    # sync_repair_cards needs no `conn` (messages/text/keyboard are already
-    # plain values), so it goes straight to add_task with no wrapper.
-    background_tasks.add_task(
-        core_notify.sync_repair_cards,
-        messages, core_repairs.render_card_text(repair), core_repairs.render_keyboard(order_id, repair["status"]),
-    )
+        # Background, not awaited here: the 1-2 sequential Telegram edit
+        # calls are blocking httpx — in this async route they would hold
+        # the event loop, and Павел's own click would wait on them.
+        _sync_cards(background_tasks, conn, order_id)
     return RedirectResponse(link(request, f"/repairs/{order_id}"), status_code=303)
 
 
@@ -383,12 +399,48 @@ def price_view(
     return RedirectResponse(link(request, f"/repairs/{order_id}"), status_code=303)
 
 
-@router.post("/{order_id}/parts")
-def add_part_view(
-    request: Request, order_id: int,
-    product_id: str = Form(""), cell_id: str = Form(""), qty: str = Form(""),
+@router.post("/{order_id}/no-parts")
+def no_parts_view(
+    request: Request, background_tasks: BackgroundTasks, order_id: int,
     staff=Depends(require_role(*_REPAIR_WRITE_ROLES)),
 ):
+    """«Без запчасти» — said explicitly, so an empty parts list never
+    reads as «forgot to say»."""
+    with get_conn() as conn:
+        if core_repairs.get_repair(conn, order_id):
+            core_repairs.declare_no_parts(conn, order_id)
+            _sync_cards(background_tasks, conn, order_id)
+    return RedirectResponse(link(request, f"/repairs/{order_id}"), status_code=303)
+
+
+@router.post("/{order_id}/parts")
+def add_part_view(
+    request: Request, background_tasks: BackgroundTasks, order_id: int,
+    product_id: str = Form(""), cell_id: str = Form(""), qty: str = Form(""), line: str = Form(""),
+    staff=Depends(require_role(*_REPAIR_WRITE_ROLES)),
+):
+    # `line` is "batch:cell" — a specific партия on the executor's склад
+    # (the form on repair_detail.html). The older product+cell fields
+    # below it are still accepted (oldest партия of that cell first).
+    batch_part, _, cell_part = line.partition(":")
+    if batch_part.isdigit() and cell_part.isdigit():
+        with get_conn() as conn:
+            try:
+                core_repairs.use_part(
+                    conn, order_id, int(batch_part), int(cell_part), optional_int(qty) or 1, staff["id"],
+                )
+            except (core_repairs.RepairPartError, InsufficientStockError) as exc:
+                ctx = _detail_context(conn, order_id, loc(request))
+                if not ctx["repair"]:
+                    return RedirectResponse(link(request, "/repairs"), status_code=303)
+                return render(request, "repair_detail.html", staff=staff, error=str(exc), **ctx)
+            product_id_used = conn.execute("SELECT product_id FROM batches WHERE id = ?", (int(batch_part),)).fetchone()
+            _sync_cards(background_tasks, conn, order_id)
+        store = request.state.store
+        if product_id_used:
+            channel_posts.sync_products([product_id_used["product_id"]], store.id, store.db_path)
+        return RedirectResponse(link(request, f"/repairs/{order_id}"), status_code=303)
+
     with get_conn() as conn:
         pid, cid, q = optional_int(product_id), optional_int(cell_id), optional_int(qty)
         if not pid or not cid or not q:

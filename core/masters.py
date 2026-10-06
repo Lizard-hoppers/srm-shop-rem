@@ -104,3 +104,70 @@ def master_summary(conn: sqlite3.Connection, master: sqlite3.Row) -> dict:
         stats["payout"] = payout(stats["profit"], stats["repairs_count"], master["pay_type"], master["pay_value"])
 
     return {"today": today_stats, "month": month_stats, "all_time": all_time_stats}
+
+
+# ---- начисления (Заход 5) ----
+#
+# period_stats()/payout() above compute a master's share on the fly for the
+# «Мастера» statistics. The rows below are the LEDGER of what the business
+# actually owes him: written once when a document earns it (a client
+# repair is выдан, a производство result is accepted), cancelled when that
+# document is undone. «Начислено − выплачено = мы должны мастеру».
+
+def repair_share(profit, pay_type: str | None, pay_value) -> float | int:
+    """A master's cut of ONE client repair: his percent of the repair's
+    profit base (price − parts), or his fixed rate per repair. Never
+    negative; 0 with no rate configured."""
+    if not pay_type or pay_value is None:
+        return 0
+    if pay_type == "percent":
+        return max(0, round(float(profit) * float(pay_value) / 100))
+    if pay_type == "fixed":
+        return pay_value
+    return 0
+
+
+def accrue(
+    conn: sqlite3.Connection, staff_id: int, kind: str, ref_type: str, ref_id: int, amount, comment: str | None = None,
+) -> int | None:
+    """Record what a document earned a master. Nothing is written for a
+    zero amount (a master with no rate, a job with no pay)."""
+    if not amount or amount <= 0:
+        return None
+    return conn.execute(
+        "INSERT INTO master_accruals (staff_id, kind, ref_type, ref_id, amount, comment) VALUES (?, ?, ?, ?, ?, ?)",
+        (staff_id, kind, ref_type, ref_id, amount, comment),
+    ).lastrowid
+
+
+def cancel_accruals(conn: sqlite3.Connection, ref_type: str, ref_id: int) -> None:
+    conn.execute(
+        "UPDATE master_accruals SET cancelled_at = datetime('now') WHERE ref_type = ? AND ref_id = ? AND cancelled_at IS NULL",
+        (ref_type, ref_id),
+    )
+
+
+def accrued_for(conn: sqlite3.Connection, ref_type: str, ref_id: int) -> float | int:
+    row = conn.execute(
+        "SELECT COALESCE(SUM(amount), 0) AS total FROM master_accruals WHERE ref_type = ? AND ref_id = ? AND cancelled_at IS NULL",
+        (ref_type, ref_id),
+    ).fetchone()
+    total = round(row["total"], 2)
+    return int(total) if total == int(total) else total
+
+
+def accrued_total(conn: sqlite3.Connection, staff_id: int) -> float | int:
+    """Everything earned and not cancelled — the «Начислено» line."""
+    row = conn.execute(
+        "SELECT COALESCE(SUM(amount), 0) AS total FROM master_accruals WHERE staff_id = ? AND cancelled_at IS NULL",
+        (staff_id,),
+    ).fetchone()
+    total = round(row["total"], 2)
+    return int(total) if total == int(total) else total
+
+
+def list_accruals(conn: sqlite3.Connection, staff_id: int, limit: int = 100) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM master_accruals WHERE staff_id = ? AND cancelled_at IS NULL ORDER BY id DESC LIMIT ?",
+        (staff_id, limit),
+    ).fetchall()

@@ -48,6 +48,24 @@
 </table>
 </div>
 
+<h2>{{ t('master_accruals_title') }}</h2>
+<div class="panel-box" style="margin-bottom: 12px;">
+  <div style="font-size: 24px; font-weight: 800;">{{ accrued | money }} грн</div>
+  <div class="stat-label">{{ t('master_accrued_label') }}</div>
+</div>
+{% if accruals %}
+<div class="table-scroll">
+<table class="table">
+  <thead><tr><th>{{ t('col_when') }}</th><th>{{ t('col_for_what') }}</th><th>{{ t('sales_col_amount') }}</th></tr></thead>
+  <tbody>
+    {% for a in accruals %}
+    <tr><td>{{ a.created_at | kyiv }}</td><td>{{ a.comment or a.kind }}</td><td>{{ a.amount | money }}</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+
 <h2>{{ t('master_data_title') }}</h2>
 <form method="post" action="{{ link('/masters/' ~ master.id ~ '/edit') }}" class="edit-form">
   <label>{{ t('name_placeholder') }}<input type="text" name="name" value="{{ master.name }}" required></label>
@@ -59,6 +77,12 @@
       {% for l in locations %}<option value="{{ l.id }}" {% if master.location_id == l.id %}selected{% endif %}>{{ l.name }}</option>{% endfor %}
     </select>
   </label>
+  <label>{{ t('master_kind_label') }}
+    <select name="master_kind">
+      {% for key in master_kinds %}<option value="{{ key }}" {% if (master.master_kind or 'staff') == key %}selected{% endif %}>{{ t('master_kind_' ~ key) }}</option>{% endfor %}
+    </select>
+  </label>
+  <label>{{ t('master_skills_label') }}<input type="text" name="skills" value="{{ master.skills or '' }}" placeholder="{{ t('master_skills_placeholder') }}"></label>
   <label>{{ t('pay_type_label') }}
     <select name="pay_type">
       <option value="" {% if not master.pay_type %}selected{% endif %}>{{ t('pay_type_none_option') }}</option>

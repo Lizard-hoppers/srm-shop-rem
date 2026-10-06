@@ -1,0 +1,144 @@
+{% extends "base.html" %}
+{% import "_icons.html" as icons %}
+{% block title %}{{ order.label }}{% endblock %}
+{% block content %}
+<a class="back-link" href="{{ link('/production') }}">{{ icons.icon('back', 16) }} {{ t('production_title') }}</a>
+{% if error %}<div class="flash flash-error">{{ error }}</div>{% endif %}
+
+<div class="panel-box">
+  <h3 style="margin:0;">{{ order.label }} · {{ order.product_name }}</h3>
+  <p class="meta" style="margin:6px 0 0;">
+    <span class="pill {{ 'pill-ready' if order.status == 'done' else ('pill-cancelled' if order.status == 'cancelled' else 'pill-in_progress') }}">{{ order.status_label }}</span>
+    · IMEI {{ order.imei }} · {{ order.location_name or '' }}
+  </p>
+  {% if order.task %}<p class="meta" style="margin:4px 0 0;">{{ t('production_task_label') }}: {{ order.task }}</p>{% endif %}
+  {% if order.master_name %}<p class="meta" style="margin:4px 0 0;">{{ t('master_label') }}: {{ order.master_name }} · {{ t('master_kind_' ~ (order.master_kind or 'staff')) }}{% if order.master_skills %} · {{ order.master_skills }}{% endif %}</p>{% endif %}
+  {% if order.buyback_order_id %}<p class="meta" style="margin:4px 0 0;"><a href="{{ link('/buyback/' ~ order.buyback_order_id) }}">{{ t('production_buyback_link') }} →</a></p>{% endif %}
+</div>
+
+{# ---------------- результат / себестоимость ---------------- #}
+<h2>{{ t('production_cost_title') if order.status == 'done' else t('production_cost_preview_title') }}</h2>
+<div class="table-scroll">
+<table class="table">
+  <tbody>
+    <tr><td>{{ t('production_cost_before') }}</td><td>{{ numbers.before | money }} грн</td></tr>
+    <tr><td>{{ t('production_cost_parts') }}</td><td>{{ numbers.parts | money }} грн</td></tr>
+    <tr><td>{{ t('production_cost_extras') }}</td><td>{{ numbers.extras | money }} грн</td></tr>
+    <tr><td>{{ t('production_cost_work') }}</td><td>{{ numbers.work | money }} грн</td></tr>
+    <tr><td><b>{{ t('production_cost_total') }}</b></td><td><b>{{ numbers.total | money }} грн</b></td></tr>
+    <tr><td>{{ t('production_to_master') }}</td><td>{{ numbers.to_master | money }} грн</td></tr>
+  </tbody>
+</table>
+</div>
+{% if order.status == 'done' %}
+<p class="meta">{{ t('production_done_hint') }}{% if order.return_transfer_id %} <a href="{{ link('/transfers/' ~ order.return_transfer_id) }}">{{ t('transfers_title') }} №{{ order.return_transfer_id }} →</a>{% endif %}</p>
+<p class="meta"><a href="{{ link('/inventory/products/' ~ order.product_id) }}">📦 {{ t('buyback_product_link') }}</a>{% if master_owed %} · {{ t('production_master_owed') }} {{ master_owed | money }} грн{% endif %}</p>
+{% endif %}
+
+{# ---------------- draft: детали, мастер, передача ---------------- #}
+{% if order.status == 'draft' %}
+<h2>{{ t('production_parts_title') }}</h2>
+<p class="meta">{{ t('production_parts_hint') }}</p>
+<form method="get" action="/production/{{ order.id }}" class="search-bar">
+  <input type="hidden" name="t" value="{{ token }}">
+  <input type="text" name="q" value="{{ search }}" placeholder="{{ t('production_parts_search') }}">
+  <button type="submit">{{ t('find_btn') }}</button>
+</form>
+{% if can_manage %}
+<form method="post" action="{{ link('/production/' ~ order.id ~ '/parts') }}" class="edit-form">
+  {% for p in hidden_picked %}<input type="hidden" name="qty_{{ p.batch_id }}_{{ p.cell_id }}" value="{{ p.qty }}">{% endfor %}
+  {% for l in available %}
+  <label>{{ l.product_name }} · {{ l.warehouse_display }} · {{ l.free }} {{ l.unit }}
+    <span class="meta">{{ l.supplier_name or '—' }}{% if l.receipt_id %} · {{ t('production_receipt_short') }} №{{ l.receipt_id }}{% endif %} · {{ t('batch_col') }} №{{ l.batch_id }} · {{ l.unit_cost_uah | money }} грн</span>
+    <input type="number" name="qty_{{ l.batch_id }}_{{ l.cell_id }}" min="0" max="{{ l.free }}" value="{{ l.picked or '' }}" placeholder="0">
+  </label>
+  {% else %}
+  <p class="meta">{{ t('production_parts_none') }}</p>
+  {% endfor %}
+  {% if hidden_picked %}<p class="meta">{{ t('production_parts_kept') }} {% for p in hidden_picked %}{{ p.product_name }} × {{ p.qty }}{% if not loop.last %}; {% endif %}{% endfor %}</p>{% endif %}
+  <button type="submit">{{ t('production_reserve_btn') }}</button>
+</form>
+{% endif %}
+
+<h2>{{ t('production_master_title') }}</h2>
+<div class="section-btns">
+  <a href="{{ link('/production/' ~ order.id) }}"><button type="button" class="secondary" {% if not kind %}style="border-color: var(--accent); color: var(--accent-2);"{% endif %}>{{ t('filter_all') }}</button></a>
+  {% for key in master_kinds %}
+  <a href="{{ link('/production/' ~ order.id ~ '?kind=' ~ key) }}"><button type="button" class="secondary" {% if kind == key %}style="border-color: var(--accent); color: var(--accent-2);"{% endif %}>{{ t('master_kind_' ~ key) }}</button></a>
+  {% endfor %}
+</div>
+{% if can_manage %}
+<form method="post" action="{{ link('/production/' ~ order.id ~ '/master') }}" class="edit-form">
+  <label>{{ t('master_label') }}
+    <select name="master_id">
+      <option value="">{{ t('master_unassigned') }}</option>
+      {% for m in masters %}<option value="{{ m.id }}" {% if order.master_id == m.id %}selected{% endif %}>{{ m.name }} · {{ t('master_kind_' ~ (m.master_kind or 'staff')) }}{% if m.skills %} · {{ m.skills }}{% endif %}</option>{% endfor %}
+    </select>
+  </label>
+  <label>{{ t('production_work_price_label') }}<input type="text" inputmode="decimal" name="work_price" value="{{ order.work_price | money if order.work_price is not none else '' }}"></label>
+  <button type="submit" class="secondary">{{ t('production_master_btn') }}</button>
+</form>
+
+<h2>{{ t('production_handover_title') }}</h2>
+<ul class="timeline">
+  <li>{{ order.product_name }} · IMEI {{ order.imei }} — 1 шт</li>
+  {% for p in parts %}<li>{{ p.product_name }} · {{ t('batch_col') }} №{{ p.batch_id }} — {{ p.qty }} {{ p.unit }}</li>{% endfor %}
+</ul>
+<p class="meta">{{ t('production_handover_hint') }}</p>
+<form method="post" action="{{ link('/production/' ~ order.id ~ '/handover') }}" class="edit-form">
+  <button type="submit">{{ t('production_handover_btn') }}</button>
+</form>
+<form method="post" action="{{ link('/production/' ~ order.id ~ '/cancel') }}" class="edit-form" style="margin-top: 12px;">
+  <button type="submit" class="danger">{{ t('production_cancel_btn') }}</button>
+</form>
+{% endif %}
+{% endif %}
+
+{# ---------------- in_work / reported: отчёт мастера ---------------- #}
+{% if order.status in ('in_work', 'reported') %}
+<h2>{{ t('production_report_title') }}</h2>
+{% if can_report %}
+<form method="post" action="{{ link('/production/' ~ order.id ~ '/report') }}" class="edit-form">
+  {% for p in parts %}
+  <label>{{ p.product_name }} · {{ t('batch_col') }} №{{ p.batch_id }} — {{ t('production_used_of') }} {{ p.qty }}
+    <input type="number" name="used_{{ p.id }}" min="0" max="{{ p.qty }}" value="{{ p.used_qty if p.used_qty is not none else p.qty }}">
+  </label>
+  {% endfor %}
+  <h3 style="margin-bottom:0;">{{ t('production_extras_title') }}</h3>
+  <p class="meta" style="margin:0;">{{ t('production_extras_hint') }}</p>
+  {% for i in extra_rows %}
+  <div style="display:flex; gap:6px;">
+    <input type="text" name="extra_title_{{ i }}" value="{{ extras[i].title if extras | length > i else '' }}" placeholder="{{ t('production_extra_title_ph') }}" style="flex:1; min-width:0;">
+    <input type="text" inputmode="decimal" name="extra_amount_{{ i }}" value="{{ extras[i].amount | money if extras | length > i else '' }}" placeholder="грн" style="width:100px; flex:0 0 auto;">
+  </div>
+  {% endfor %}
+  <label>{{ t('production_work_price_label') }}<input type="text" inputmode="decimal" name="work_price" value="{{ order.work_price | money if order.work_price is not none else '' }}"></label>
+  <label>{{ t('comment_label') }}<input type="text" name="note" value="{{ order.report_note or '' }}"></label>
+  <p class="meta">{{ t('production_report_hint') }}</p>
+  <button type="submit" class="secondary">{{ t('production_report_btn') }}</button>
+</form>
+{% else %}
+<p class="meta">{{ t('production_report_wait') }}</p>
+{% endif %}
+{% if order.status == 'reported' and can_manage %}
+<form method="post" action="{{ link('/production/' ~ order.id ~ '/accept') }}" class="edit-form" style="margin-top: 12px;">
+  <button type="submit">{{ t('production_accept_btn') }}</button>
+</form>
+{% endif %}
+{% endif %}
+
+{# ---------------- done: что пошло в телефон ---------------- #}
+{% if order.status == 'done' %}
+<h2>{{ t('production_report_title') }}</h2>
+<ul class="timeline">
+  {% for p in parts %}<li>{{ p.product_name }} · {{ t('batch_col') }} №{{ p.batch_id }}{% if p.supplier_name %} · {{ p.supplier_name }}{% endif %} — {{ t('production_used_short') }} {{ p.used_qty }} {{ t('production_used_of') }} {{ p.qty }}</li>{% endfor %}
+  {% for e in extras %}<li>{{ e.title }} — {{ e.amount | money }} грн ({{ t('production_extra_mark') }})</li>{% endfor %}
+  <li>{{ t('production_cost_work') }} — {{ numbers.work | money }} грн</li>
+</ul>
+{% if order.report_note %}<p class="meta">{{ order.report_note }}</p>{% endif %}
+{% endif %}
+
+{% if document and staff.role in ('owner', 'admin') %}
+<p class="meta" style="margin-top: 12px;"><a href="{{ link('/journal/' ~ document.id) }}">{{ t('more_journal') }} →</a></p>
+{% endif %}
+{% endblock %}

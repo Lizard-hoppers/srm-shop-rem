@@ -27,7 +27,13 @@ def _batch_cell(conn: sqlite3.Connection, batch_id: int, product_id: int, qty: i
             ORDER BY batch_stock.qty DESC LIMIT 1""",
         [batch_id, product_id, qty, *params],
     ).fetchone()
-    return row["cell_id"] if row else None
+    if not row:
+        return None
+    # Physically here, but held for another document (a производство
+    # order, a client's заказ) is not sellable either.
+    from core.inventory import available_qty
+
+    return row["cell_id"] if available_qty(conn, batch_id, row["cell_id"]) >= qty else None
 
 
 def create_sale(

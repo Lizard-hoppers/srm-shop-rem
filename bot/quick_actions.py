@@ -43,6 +43,7 @@ from core import cash as core_cash
 from core import clients as core_clients
 from core import documents as core_documents
 from core import inventory as core_inventory
+from core import production as core_production
 from core import repairs as core_repairs
 from core import sales as core_sales
 from core import shifts as core_shifts
@@ -76,7 +77,8 @@ _ADJUST_ROLES = ("owner", "admin")
 # "danger"/red), confirmed live against that bot 24.08. Leave the kwarg
 # off entirely for a plain/unstyled button — Приход stays plain, Павел's
 # call.
-BTN_REPAIR = "🔧 Ремонт"
+BTN_REPAIR = "🔧 Принять ремонт"
+BTN_OUR_REPAIR = "🛠 Наш ремонт"
 BTN_CLIENT = "👤 Клиент"
 BTN_BUYBACK = "🛒 Покупка"
 BTN_PURCHASE = "📦 Приход"
@@ -84,7 +86,9 @@ BTN_SUMMARY = "📊 Сводка"
 BTN_CASH = "💵 Касса"
 BTN_TRANSFER = "🔁 Перемещение"
 BTN_CANCEL = "❌ Отмена"
-_ENTRY_BUTTONS = {BTN_REPAIR, BTN_CLIENT, BTN_BUYBACK, BTN_PURCHASE, BTN_SUMMARY, BTN_CASH, BTN_TRANSFER, BTN_CANCEL}
+_ENTRY_BUTTONS = {
+    BTN_REPAIR, BTN_OUR_REPAIR, BTN_CLIENT, BTN_BUYBACK, BTN_PURCHASE, BTN_SUMMARY, BTN_CASH, BTN_TRANSFER, BTN_CANCEL,
+}
 
 
 # One single keyboard, always — Отмена lives on it permanently instead of
@@ -101,8 +105,9 @@ QUICK_ACTIONS_KEYBOARD = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text=BTN_REPAIR), KeyboardButton(text=BTN_CLIENT, style="primary")],
         [KeyboardButton(text=BTN_BUYBACK, style="success"), KeyboardButton(text=BTN_PURCHASE)],
+        [KeyboardButton(text=BTN_OUR_REPAIR), KeyboardButton(text=BTN_TRANSFER)],
         [KeyboardButton(text=BTN_SUMMARY), KeyboardButton(text=BTN_CASH)],
-        [KeyboardButton(text=BTN_TRANSFER), KeyboardButton(text=BTN_CANCEL, style="danger")],
+        [KeyboardButton(text=BTN_CANCEL, style="danger")],
     ],
     resize_keyboard=True,
     is_persistent=True,
@@ -761,6 +766,40 @@ async def purchase_start(message: Message, state: FSMContext) -> None:
     await message.answer("📦 Пришлите фото накладной — распознаю позиции и предложу оприходовать.")
 
 
+@router.message(F.text == BTN_OUR_REPAIR, F.chat.type == "private")
+async def our_repair_start(message: Message, state: FSMContext) -> None:
+    """«Наш ремонт» / производство: a phone the business owns goes to a
+    master with our parts and comes back worth more (core.production).
+    The steps are checklists — parts across every склад, the master, the
+    handover, his report — so they live on Mini App pages; this button is
+    the way in, plus what is waiting on this person right now."""
+    resolved = _resolve_staff_for_dm(message.from_user.id)
+    if not resolved:
+        return
+    store, staff = resolved
+    await _reset(message, state)
+    await _consume(state, message)
+    with get_conn(store.db_path) as conn:
+        mine = core_production.list_orders(
+            conn, master_id=staff["id"] if staff["role"] == "master" else None,
+            statuses=("in_work",) if staff["role"] == "master" else ("draft", "in_work", "reported"),
+        )
+    rows = [[InlineKeyboardButton(
+        text="🛠 Открыть наши ремонты",
+        web_app=WebAppInfo(url=crm_link("/production", staff["id"], store.id)),
+    )]]
+    for order in mine[:6]:
+        rows.append([InlineKeyboardButton(
+            text=f"{core_documents.label('production', order['id'])} · {order['product_name']}"[:60],
+            web_app=WebAppInfo(url=crm_link(f"/production/{order['id']}", staff["id"], store.id)),
+        )])
+    if staff["role"] == "master":
+        text = f"🛠 <b>Наши ремонты</b>\nУ вас в работе: {len(mine)}." + (" Откройте заказ, чтобы сдать отчёт." if mine else "")
+    else:
+        text = f"🛠 <b>Наши ремонты и производство</b>\nВ работе и ждут решения: {len(mine)}."
+    await _repost(message, state, text, InlineKeyboardMarkup(inline_keyboard=rows))
+
+
 @router.message(F.text == BTN_SUMMARY, F.chat.type == "private")
 async def summary_view(message: Message) -> None:
     """Read-only snapshot of the current store — the same numbers
@@ -1305,9 +1344,51 @@ async def repair_got_phone(message: Message, state: FSMContext) -> None:
     if not phone:
         await _nudge(message, state, "Не похоже на номер телефона. Например: 0501234567.")
         return
-    await state.update_data(client_phone=phone)
+    data = await state.update_data(client_phone=phone)
+    # A returning client is already on record under this number — no
+    # point asking their name again; straight to the card.
+    known_name = None
+    try:
+        store = get_store(data["store_id"])
+        with get_conn(store.db_path) as conn:
+            known = core_clients.get_by_phone(conn, phone)
+        known_name = known["name"] if known and known["name"] != phone else None
+    except KeyError:
+        pass
+    if known_name:
+        data = await state.update_data(client_name=known_name)
+        await _send_repair_confirm(message, state, data)
+        return
     await state.set_state(RepairIntake.name)
     await _advance(message, state, "Имя клиента:")
+
+
+def _repair_confirm_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Создать ремонт", callback_data="quick_repair_confirm", style="success")],
+        [
+            InlineKeyboardButton(text="👤 Мастер", callback_data="rm_menu"),
+            InlineKeyboardButton(text="❌ Отмена", callback_data="quick_repair_cancel", style="danger"),
+        ],
+    ])
+
+
+async def _send_repair_confirm(message: Message, state: FSMContext, data: dict) -> None:
+    """The «Проверьте данные» card. Not _advance: it is a PHOTO message
+    (Павел wants the actual device photo on the card, not a text line
+    saying it exists), and _repost/_advance only ever send plain text.
+    Same Clean-Chat shape by hand instead — consume the reply, send the
+    new screen, delete the previous one."""
+    await state.set_state(RepairIntake.confirm)
+    keyboard = _repair_confirm_keyboard()
+    caption = _repair_confirm_caption(data)
+    await _consume(state, message)
+    previous_id = data.get("prompt_message_id")
+    photo = BufferedInputFile(data["photo_bytes"], filename="device.jpg")
+    sent = await message.answer_photo(photo, caption=caption, reply_markup=keyboard)
+    await state.update_data(prompt_message_id=sent.message_id, prompt_text=caption, prompt_markup=keyboard)
+    if previous_id:
+        await _safe_delete_many(message.bot, message.chat.id, [previous_id])
 
 
 def _repair_confirm_caption(data: dict) -> str:
@@ -1325,6 +1406,7 @@ def _repair_confirm_caption(data: dict) -> str:
         f"Модель: {html.escape(data['model'])}",
         f"Неисправность: {html.escape(data['defect_description'])}",
         price_line,
+        f"Мастер: {html.escape(data['master_name']) if data.get('master_name') else 'не назначен'}",
         f"Телефон: {html.escape(data['client_phone'])}",
         f"Имя: {html.escape(data['client_name'])}",
     ]
@@ -1339,25 +1421,53 @@ async def repair_got_name(message: Message, state: FSMContext) -> None:
         await _nudge(message, state, "Имя не может быть пустым.")
         return
     data = await state.update_data(client_name=name)
-    await state.set_state(RepairIntake.confirm)
+    await _send_repair_confirm(message, state, data)
 
-    # Not _advance: the confirm screen is a PHOTO message (Павел wants the
-    # actual device photo on the card, not a text line saying it exists),
-    # and _repost/_advance only ever send plain text. Same Clean-Chat
-    # shape by hand instead — consume the reply, send the new screen,
-    # delete the previous one.
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="✅ Принять", callback_data="quick_repair_confirm", style="success"),
-        InlineKeyboardButton(text="❌ Отмена", callback_data="quick_repair_cancel", style="danger"),
-    ]])
-    caption = _repair_confirm_caption(data)
-    await _consume(state, message)
-    previous_id = data.get("prompt_message_id")
-    photo = BufferedInputFile(data["photo_bytes"], filename="device.jpg")
-    sent = await message.answer_photo(photo, caption=caption, reply_markup=keyboard)
-    await state.update_data(prompt_message_id=sent.message_id, prompt_text=caption, prompt_markup=keyboard)
-    if previous_id:
-        await _safe_delete_many(message.bot, message.chat.id, [previous_id])
+
+# «👤 Мастер» on the card: the buttons under the photo turn into the list
+# of masters, a pick turns them back and rewrites the «Мастер:» line. Done
+# on the card itself rather than as one more question in the dialog —
+# most repairs are taken in with no master chosen yet (whoever is free
+# presses «Взять в работу» in the group).
+
+@router.callback_query(F.data == "rm_menu", RepairIntake.confirm)
+async def repair_master_menu(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    try:
+        store = get_store(data["store_id"])
+    except KeyError:
+        await callback.answer("Магазин больше не настроен.", show_alert=True)
+        return
+    with get_conn(store.db_path) as conn:
+        masters = core_auth.list_masters(conn)
+    rows = [[InlineKeyboardButton(text=m["name"][:40], callback_data=f"rm_set:{m['id']}")] for m in masters]
+    rows.append([InlineKeyboardButton(text="Не назначать", callback_data="rm_set:0")])
+    await callback.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("rm_set:"), RepairIntake.confirm)
+async def repair_master_set(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    master_id = int(callback.data.split(":", 1)[1])
+    master_name = None
+    if master_id:
+        try:
+            store = get_store(data["store_id"])
+        except KeyError:
+            await callback.answer("Магазин больше не настроен.", show_alert=True)
+            return
+        with get_conn(store.db_path) as conn:
+            master = core_auth.get_master(conn, master_id)
+        if not master or not master["active"]:
+            await callback.answer("Этого мастера выбрать нельзя.", show_alert=True)
+            return
+        master_name = master["name"]
+    data = await state.update_data(master_id=master_id or None, master_name=master_name)
+    caption, keyboard = _repair_confirm_caption(data), _repair_confirm_keyboard()
+    await callback.message.edit_caption(caption=caption, reply_markup=keyboard)
+    await state.update_data(prompt_text=caption, prompt_markup=keyboard)
+    await callback.answer()
 
 
 @router.message(RepairIntake.confirm)
@@ -1400,7 +1510,7 @@ async def repair_confirm(callback: CallbackQuery, state: FSMContext) -> None:
             client_name=data["client_name"], client_phone=data["client_phone"],
             device_type="", brand=None, model=data["model"],
             serial_number=None, defect_description=data["defect_description"],
-            channel="offline", master_id=None, price_estimate=data.get("price_estimate"),
+            channel="offline", master_id=data.get("master_id"), price_estimate=data.get("price_estimate"),
             staff_id=staff["id"], photo=(data["photo_bytes"], ".jpg"),
             location_id=store.location_id, key=_tap_key(callback),
         )
@@ -1429,7 +1539,7 @@ async def repair_confirm(callback: CallbackQuery, state: FSMContext) -> None:
         ),
     ]])
     await callback.message.answer(
-        f"✅ Ремонт №{order_id} принят.\n\nЕсли нужно уточнить цену или назначить мастера — карточка ремонта:",
+        f"✅ {core_documents.label('repair', order_id)} создан.\n\nЕсли нужно уточнить цену или мастера — карточка ремонта:",
         reply_markup=open_keyboard,
     )
     await callback.answer("Готово")

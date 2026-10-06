@@ -23,17 +23,20 @@ opens that store's DB explicitly, never the process-wide default."""
 from __future__ import annotations
 
 import asyncio
+import html
 
 from aiogram import F, Router
-from aiogram.exceptions import TelegramForbiddenError
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 
 from bot.miniapp_links import crm_link
 from core import auth as core_auth
+from core import documents as core_documents
 from core import notify as core_notify
 from core import repairs as core_repairs
 from core.storage import get_conn
-from core.stores import store_for_chat_id
+from core.inventory import InsufficientStockError
+from core.stores import get_store, registry_db_path, store_for_chat_id
 
 router = Router()
 
@@ -87,11 +90,9 @@ def _sync_repair_cards_blocking(order_id: int, db_path: str) -> None:
     on purpose — see _sync_after_change below, it always runs off the
     event loop via asyncio.to_thread, never awaited directly."""
     with get_conn(db_path) as conn:
-        repair = core_repairs.get_repair(conn, order_id)
+        text, keyboard = core_repairs.card(conn, order_id)
         messages = core_repairs.get_order_messages(conn, order_id)
-    core_notify.sync_repair_cards(
-        messages, core_repairs.render_card_text(repair), core_repairs.render_keyboard(order_id, repair["status"])
-    )
+    core_notify.sync_repair_cards(messages, text, keyboard)
 
 
 def _sync_after_change(order_id: int, db_path: str) -> None:
@@ -142,6 +143,20 @@ async def repair_done(callback: CallbackQuery) -> None:
 
     override = staff["role"] in ("owner", "admin")
     with get_conn(store.db_path) as conn:
+        current = core_repairs.get_repair(conn, order_id)
+        missing_part = bool(current) and core_repairs.needs_part(conn, current)
+    if missing_part and current["status"] == "in_progress" and (override or current["master_id"] == staff["id"]):
+        # «Мастер нажал Готово → система предлагает выбрать установленную
+        # запчасть»: the repair isn't closed until he says what went in
+        # (or that nothing did). The picker goes to his DM.
+        sent = await _send_part_picker(callback, store, order_id, staff)
+        await callback.answer(
+            "Сначала укажите запчасть — отправил список в личные сообщения." if sent
+            else "Сначала укажите запчасть. Напишите боту в личку /start и нажмите ещё раз.",
+            show_alert=True,
+        )
+        return
+    with get_conn(store.db_path) as conn:
         ok = core_repairs.complete_repair(conn, order_id, staff["id"], override=override)
         repair = None if ok else core_repairs.get_repair(conn, order_id)
 
@@ -182,6 +197,180 @@ async def repair_cancel(callback: CallbackQuery) -> None:
 
     _sync_after_change(order_id, store.db_path)
     await callback.answer("Отмечено как не отремонтированное")
+
+
+# ---- «Указать запчасть» ----
+#
+# The card lives in a group; choosing a part is a small dialog, so it
+# happens in the presser's DM: a list of what is free on the склад the
+# repair's parts come from (the master's own — core.repairs.parts_warehouse),
+# one button per партия. Each tap installs one piece; «Без запчасти» says
+# there was none. Every step refreshes the group cards.
+
+_PART_PICK_LIMIT = 12
+
+
+def _part_picker(order_id: int, lines: list[dict], *, done_button: bool) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(
+            text=f"{line['product_name']} · партия {line['batch_id']} · {line['free']} шт"[:60],
+            callback_data=f"rp_pick:{order_id}:{line['batch_id']}:{line['cell_id']}",
+        )]
+        for line in lines[:_PART_PICK_LIMIT]
+    ]
+    last = [InlineKeyboardButton(text="Без запчасти", callback_data=f"rp_none:{order_id}")]
+    if done_button:
+        last.append(InlineKeyboardButton(text="✅ Готово", callback_data=f"rp_done:{order_id}", style="success"))
+    rows.append(last)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _part_screen(conn, order_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    repair = core_repairs.get_repair(conn, order_id)
+    used = core_repairs.get_used_parts(conn, order_id)
+    lines = core_repairs.available_parts(conn, order_id)
+    device = " ".join(x for x in (repair["device_type"], repair["brand"], repair["model"]) if x)
+    text = [f"⚙️ <b>{core_documents.label('repair', order_id)}</b> · {html.escape(device)}"]
+    if repair["defect_description"]:
+        text.append(f"Работа: {html.escape(repair['defect_description'])}")
+    if used:
+        text.append("Списано: " + "; ".join(
+            f"{html.escape(p['product_name'])} × {p['qty']} (партия {p['batch_id']})" for p in used
+        ))
+    elif repair["no_parts"]:
+        text.append("Отмечено: без запчасти")
+    text.append("")
+    text.append("Что установили? Одно нажатие — одна штука." if lines else "На вашем складе нет свободных деталей.")
+    done = repair["status"] == "in_progress" and (bool(used) or bool(repair["no_parts"]))
+    return "\n".join(text), _part_picker(order_id, lines, done_button=done)
+
+
+async def _send_part_picker(callback: CallbackQuery, store, order_id: int, staff) -> bool:
+    with get_conn(store.db_path) as conn:
+        text, keyboard = _part_screen(conn, order_id)
+    try:
+        await callback.bot.send_message(callback.from_user.id, text, reply_markup=keyboard)
+    except TelegramForbiddenError:
+        return False
+    return True
+
+
+def _may_touch_parts(repair, staff) -> bool:
+    return staff["role"] in ("owner", "admin") or repair["master_id"] == staff["id"]
+
+
+@router.callback_query(F.data.startswith("repair_part:"))
+async def repair_part(callback: CallbackQuery) -> None:
+    """«⚙️ Указать запчасть» on the group card."""
+    store = await _resolve_store(callback)
+    if not store:
+        return
+    order_id = _parse_order_id(callback.data)
+    staff = await _resolve_actor(callback, store.db_path)
+    if not staff:
+        return
+    with get_conn(store.db_path) as conn:
+        repair = core_repairs.get_repair(conn, order_id)
+    if not repair or repair["status"] not in ("in_progress", "ready"):
+        await callback.answer("Запчасть указывают, пока ремонт в работе или готов.", show_alert=True)
+        return
+    if not _may_touch_parts(repair, staff):
+        await callback.answer(f"Ремонт не за вами (мастер: {repair['master_name'] or '—'}).", show_alert=True)
+        return
+    if await _send_part_picker(callback, store, order_id, staff):
+        await callback.answer("Список деталей — в личных сообщениях с ботом")
+    else:
+        await callback.answer("Сначала напишите боту в личку /start, затем нажмите ещё раз.", show_alert=True)
+
+
+async def _dm_context(callback: CallbackQuery, order_id: int):
+    """(store, staff, repair) for a part-picker button pressed in DM — the
+    store comes from the repair itself (no group chat to read it from)."""
+    with get_conn(registry_db_path()) as conn:
+        repair = core_repairs.get_repair(conn, order_id)
+        staff = core_auth.get_staff_by_telegram_id(conn, callback.from_user.id)
+    if not repair or not staff or staff["role"] not in _ACTOR_ROLES:
+        await callback.answer("Ремонт не найден или у вас нет доступа.", show_alert=True)
+        return None
+    if not _may_touch_parts(repair, staff):
+        await callback.answer("Ремонт не за вами.", show_alert=True)
+        return None
+    try:
+        store = get_store(str(repair["location_id"]))
+    except KeyError:
+        await callback.answer("Точка ремонта больше не настроена.", show_alert=True)
+        return None
+    return store, staff, repair
+
+
+async def _refresh_picker(callback: CallbackQuery, store, order_id: int) -> None:
+    with get_conn(store.db_path) as conn:
+        text, keyboard = _part_screen(conn, order_id)
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard)
+    except TelegramBadRequest:
+        pass
+
+
+@router.callback_query(F.data.startswith("rp_pick:"))
+async def repair_part_pick(callback: CallbackQuery) -> None:
+    _, order_part, batch_part, cell_part = callback.data.split(":")
+    order_id = int(order_part)
+    ctx = await _dm_context(callback, order_id)
+    if not ctx:
+        return
+    store, staff, _repair = ctx
+    try:
+        with get_conn(store.db_path) as conn:
+            core_repairs.use_part(conn, order_id, int(batch_part), int(cell_part), 1, staff["id"])
+    except (core_repairs.RepairPartError, InsufficientStockError) as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    _sync_after_change(order_id, store.db_path)
+    await _refresh_picker(callback, store, order_id)
+    await callback.answer("Списано 1 шт")
+
+
+@router.callback_query(F.data.startswith("rp_none:"))
+async def repair_part_none(callback: CallbackQuery) -> None:
+    order_id = _parse_order_id(callback.data)
+    ctx = await _dm_context(callback, order_id)
+    if not ctx:
+        return
+    store, _staff, repair = ctx
+    if repair["status"] not in ("in_progress", "ready"):
+        await callback.answer("Ремонт уже закрыт.", show_alert=True)
+        return
+    with get_conn(store.db_path) as conn:
+        core_repairs.declare_no_parts(conn, order_id)
+    _sync_after_change(order_id, store.db_path)
+    await _refresh_picker(callback, store, order_id)
+    await callback.answer("Отмечено: без запчасти")
+
+
+@router.callback_query(F.data.startswith("rp_done:"))
+async def repair_part_done(callback: CallbackQuery) -> None:
+    """«✅ Готово» right from the picker — «Подтвердить и завершить»."""
+    order_id = _parse_order_id(callback.data)
+    ctx = await _dm_context(callback, order_id)
+    if not ctx:
+        return
+    store, staff, _repair = ctx
+    with get_conn(store.db_path) as conn:
+        if core_repairs.needs_part(conn, core_repairs.get_repair(conn, order_id)):
+            await callback.answer("Сначала укажите запчасть или «Без запчасти».", show_alert=True)
+            return
+        ok = core_repairs.complete_repair(conn, order_id, staff["id"], override=staff["role"] in ("owner", "admin"))
+        text, _keyboard = _part_screen(conn, order_id)
+    if not ok:
+        await callback.answer("Ремонт уже не в работе.", show_alert=True)
+        return
+    _sync_after_change(order_id, store.db_path)
+    try:
+        await callback.message.edit_text(text.rsplit("\n\n", 1)[0] + "\n\n✅ <b>Готов к выдаче.</b>")
+    except TelegramBadRequest:
+        pass
+    await callback.answer("Готов к выдаче ✅")
 
 
 @router.callback_query(F.data.startswith("open_crm:repair:"))

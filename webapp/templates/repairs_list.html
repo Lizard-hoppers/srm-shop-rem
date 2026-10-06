@@ -2,6 +2,7 @@
 {% import "_icons.html" as icons %}
 {% block title %}{{ t('nav_repairs') }}{% endblock %}
 {% block content %}
+{% set sc_tab = 'clients' %}{% include "_sc_tabs.html" %}
 <div class="repairs-layout">
 <div>
 <h2>{{ t('repairs_intake_title') }}</h2>

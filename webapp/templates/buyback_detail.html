@@ -57,6 +57,18 @@ document.getElementById("printBuybackLabelBtn").addEventListener("click", functi
 </script>
 {% endif %}
 
+{% if unit and can_produce %}
+{% if production_order %}
+<p style="margin-top: 12px;"><a href="{{ link('/production/' ~ production_order.id) }}">🛠 {{ t('production_open_order') }} {{ production_label }} →</a></p>
+{% else %}
+<form method="post" action="{{ link('/production') }}" class="edit-form" style="margin-top: 12px;">
+  <input type="hidden" name="idem" value="{{ idem }}">
+  <input type="hidden" name="imei" value="{{ order.imei }}">
+  <input type="hidden" name="task" value="{{ order.condition_note or '' }}">
+  <button type="submit">{{ t('production_pick_parts_btn') }}</button>
+</form>
+{% endif %}
+{% endif %}
 {% if order.product_id %}
 <p style="margin-top: 12px;"><a href="{{ link('/inventory/products/' ~ order.product_id) }}">📦 {{ t('buyback_product_link') }}</a></p>
 {% endif %}

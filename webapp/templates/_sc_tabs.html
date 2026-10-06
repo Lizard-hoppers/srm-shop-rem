@@ -1,0 +1,6 @@
+{# Сервисный центр: ремонты клиентов · наши ремонты (в работе) · готовые из производства. Set sc_tab before including. #}
+<div class="section-btns">
+  <a href="{{ link('/repairs') }}"><button type="button" class="secondary" {% if sc_tab == 'clients' %}style="border-color: var(--accent); color: var(--accent-2);"{% endif %}>{{ t('sc_tab_clients') }}</button></a>
+  <a href="{{ link('/production') }}"><button type="button" class="secondary" {% if sc_tab == 'ours' %}style="border-color: var(--accent); color: var(--accent-2);"{% endif %}>{{ t('sc_tab_ours') }}</button></a>
+  <a href="{{ link('/production?show=done') }}"><button type="button" class="secondary" {% if sc_tab == 'done' %}style="border-color: var(--accent); color: var(--accent-2);"{% endif %}>{{ t('sc_tab_done') }}</button></a>
+</div>

@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% import "_icons.html" as icons %}
+{% block title %}{{ t('production_title') }}{% endblock %}
+{% block content %}
+{% set sc_tab = 'done' if show == 'done' else 'ours' %}{% include "_sc_tabs.html" %}
+{% if error %}<div class="flash flash-error">{{ error }}</div>{% endif %}
+
+<div class="nav-list">
+  {% for o in orders %}
+  <a class="card nav-card" href="{{ link('/production/' ~ o.id) }}">
+    <div class="card-icon">{{ icons.icon('tool', 18) }}</div>
+    <div class="nav-card-body">
+      <div class="nav-card-title">{{ o.label }} · {{ o.product_name }}</div>
+      <div class="nav-card-sub">{{ o.status_label }}{% if o.master_name %} · {{ o.master_name }}{% endif %} · IMEI {{ o.imei }}</div>
+    </div>
+    <div class="chevron">{{ icons.icon('chevron', 18) }}</div>
+  </a>
+  {% else %}
+  <p class="meta">{{ t('production_empty') }}</p>
+  {% endfor %}
+</div>
+
+{% if can_manage and show != 'done' %}
+<h2>{{ t('production_new_title') }}</h2>
+<p class="meta">{{ t('production_new_hint') }}</p>
+<form method="post" action="{{ link('/production') }}" class="edit-form">
+  <input type="hidden" name="idem" value="{{ idem }}">
+  <label>IMEI<span class="required-mark">*</span>
+    <input type="text" name="imei" list="productionUnitList" autocomplete="off" required>
+    <datalist id="productionUnitList">{% for u in units %}<option value="{{ u.imei }}">{{ u.product_name }}</option>{% endfor %}</datalist>
+  </label>
+  <label>{{ t('production_task_label') }}<input type="text" name="task" placeholder="{{ t('production_task_placeholder') }}"></label>
+  <button type="submit">{{ t('production_new_btn') }}</button>
+</form>
+{% endif %}
+{% endblock %}

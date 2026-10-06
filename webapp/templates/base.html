@@ -32,7 +32,7 @@
   <a href="{{ link('/') }}" class="{{ 'active' if path == '/' else '' }}">
     {{ icons.icon('home') }}<span>{{ t('nav_home') }}</span>
   </a>
-  <a href="{{ link('/repairs') }}" class="{{ 'active' if path.startswith('/repairs') else '' }}">
+  <a href="{{ link('/repairs') }}" class="{{ 'active' if path.startswith('/repairs') or path.startswith('/production') else '' }}">
     {{ icons.icon('tool') }}<span>{{ t('nav_repairs') }}</span>
   </a>
   <a href="{{ link('/sales') }}" class="{{ 'active' if path.startswith('/sales') else '' }}">

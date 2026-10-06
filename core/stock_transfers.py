@@ -76,6 +76,7 @@ def get_items(conn: sqlite3.Connection, transfer_id: int) -> list[sqlite3.Row]:
 def send(
     conn: sqlite3.Connection, from_warehouse_id: int, to_warehouse_id: int,
     lines: list[tuple[int, int, int]], staff_id: int, comment: str | None = None, key: str | None = None,
+    reserved_for: tuple[str, int] | None = None,
 ) -> int:
     """`lines` is [(batch_id, from_cell_id, qty), …] — stock_lines() rows
     of the source склад. Refuses the whole transfer (nothing written) if
@@ -109,6 +110,11 @@ def send(
             raise TransferError("Одной из позиций уже нет на этом складе — обновите список.")
         if qty > line["qty"]:
             raise TransferError(f"«{line['product_name']}»: на складе {line['qty']}, нельзя отправить {qty}.")
+        free = _inventory.available_qty(conn, batch_id, cell_id, reserved_for)
+        if qty > free:
+            raise TransferError(
+                f"«{line['product_name']}»: свободно {max(free, 0)}, остальное в резерве под другой документ."
+            )
 
     transfer_id = conn.execute(
         "INSERT INTO stock_transfers (from_warehouse_id, to_warehouse_id, comment, sent_by) VALUES (?, ?, ?, ?)",
@@ -124,6 +130,7 @@ def send(
         _inventory.record_movement(
             conn, line["product_id"], qty, "transfer", staff_id, from_cell_id=cell_id, to_cell_id=transit_cell,
             ref_type="stock_transfer", ref_id=transfer_id, batch_id=batch_id, comment="Отправлено",
+            reserved_for=reserved_for,
         )
     transfer = get_transfer(conn, transfer_id)
     total = sum(wanted.values())

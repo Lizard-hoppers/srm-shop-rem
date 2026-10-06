@@ -463,6 +463,107 @@ CREATE TABLE IF NOT EXISTS batch_stock (
     PRIMARY KEY (batch_id, cell_id)
 );
 
+-- Резерв (Заход 5): «доступно = физический остаток − резерв». A quantity
+-- of a specific партия in a specific cell held for one document (a
+-- производство order's parts and phone now; a client's заказ in Заход 6).
+-- Reserved stock is still physically there and still counted in `stock`,
+-- but nothing except the document it is held for can take it
+-- (core.inventory.record_movement). A row stops holding when released_at
+-- is set or expires_at has passed.
+CREATE TABLE IF NOT EXISTS stock_reservations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id INTEGER NOT NULL REFERENCES batches(id),
+    cell_id INTEGER NOT NULL REFERENCES storage_cells(id),
+    qty INTEGER NOT NULL,
+    ref_type TEXT NOT NULL,
+    ref_id INTEGER NOT NULL,
+    staff_id INTEGER REFERENCES staff(id),
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at TEXT,
+    released_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_stock_reservations_batch ON stock_reservations(batch_id, cell_id);
+CREATE INDEX IF NOT EXISTS idx_stock_reservations_ref ON stock_reservations(ref_type, ref_id);
+
+-- Начисления мастерам (Заход 5): what the business owes a master for work
+-- done — his share of a client repair's profit, the fixed price of an
+-- internal job, parts he supplied himself. One row per document that
+-- earned it; «начислено − выплачено = мы должны мастеру» (payouts arrive
+-- in Заход 6). A row is cancelled, never deleted, when its document is
+-- undone.
+CREATE TABLE IF NOT EXISTS master_accruals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    staff_id INTEGER NOT NULL REFERENCES staff(id),
+    kind TEXT NOT NULL,
+    ref_type TEXT NOT NULL,
+    ref_id INTEGER NOT NULL,
+    amount REAL NOT NULL,
+    comment TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    cancelled_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_master_accruals_staff ON master_accruals(staff_id);
+CREATE INDEX IF NOT EXISTS idx_master_accruals_ref ON master_accruals(ref_type, ref_id);
+
+-- Производство / наш ремонт (Заход 5): a phone the business owns goes to
+-- a master with parts from our склады and comes back worth more — «не
+-- создаёт прибыль, формирует фактическую себестоимость готового товара».
+-- status: draft (детали подбираются и резервируются) → in_work (телефон и
+-- детали на складе мастера) → reported (мастер отчитался, что
+-- использовал и что добавил своего) → done (результат принят: расход
+-- деталей, новая себестоимость, начисление мастеру, возврат на точку) |
+-- cancelled. The cost_* columns are the «Результат» card, fixed at accept.
+CREATE TABLE IF NOT EXISTS production_orders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    location_id INTEGER NOT NULL REFERENCES locations(id),
+    product_id INTEGER NOT NULL REFERENCES products(id),
+    batch_id INTEGER NOT NULL REFERENCES batches(id),
+    buyback_order_id INTEGER REFERENCES buyback_orders(id),
+    master_id INTEGER REFERENCES staff(id),
+    status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft','in_work','reported','done','cancelled')),
+    task TEXT,
+    work_price REAL,
+    report_note TEXT,
+    cost_before REAL,
+    cost_parts REAL,
+    cost_extras REAL,
+    cost_work REAL,
+    cost_after REAL,
+    return_transfer_id INTEGER REFERENCES stock_transfers(id),
+    created_by INTEGER REFERENCES staff(id),
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    handed_at TEXT,
+    reported_at TEXT,
+    done_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_production_orders_status ON production_orders(status);
+CREATE INDEX IF NOT EXISTS idx_production_orders_batch ON production_orders(batch_id);
+
+-- Our parts picked for a производство order: a specific партия from a
+-- specific cell. cell_id follows the part (source cell while reserved,
+-- the master's cell after handover); used_qty is the master's report.
+CREATE TABLE IF NOT EXISTS production_parts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id INTEGER NOT NULL REFERENCES production_orders(id),
+    product_id INTEGER NOT NULL REFERENCES products(id),
+    batch_id INTEGER NOT NULL REFERENCES batches(id),
+    cell_id INTEGER NOT NULL REFERENCES storage_cells(id),
+    qty INTEGER NOT NULL,
+    used_qty INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_production_parts_order ON production_parts(order_id);
+
+-- What the master added of his own to a производство order — «Шлейф
+-- мастера — 400 грн», «Проклейка мастера — 100 грн»: goes into the
+-- phone's cost and into what we owe him.
+CREATE TABLE IF NOT EXISTS production_extras (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id INTEGER NOT NULL REFERENCES production_orders(id),
+    title TEXT NOT NULL,
+    amount REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_production_extras_order ON production_extras(order_id);
+
 -- Перемещение товара между складами: «Отправил → В пути → Принял». Sending
 -- moves the goods into the «В пути» склад at once (not sellable, nobody's
 -- yet); they reach the destination only when its keeper — the master
@@ -779,6 +880,11 @@ def init_db(db_path: str = DB_PATH) -> None:
         _ensure_column(conn, "buyback_orders", "purchase_price_uah", "purchase_price_uah REAL")
         _ensure_column(conn, "buyback_orders", "batch_id", "batch_id INTEGER REFERENCES batches(id)")
         _ensure_column(conn, "locations", "buyback_topic_id", "buyback_topic_id INTEGER")
+        # Заход 5: a master is штатный or аутсорс and has skills on record;
+        # a client repair remembers that its master said «без запчасти».
+        _ensure_column(conn, "staff", "master_kind", "master_kind TEXT NOT NULL DEFAULT 'staff'")
+        _ensure_column(conn, "staff", "skills", "skills TEXT")
+        _ensure_column(conn, "repair_orders", "no_parts", "no_parts INTEGER NOT NULL DEFAULT 0")
         try:
             # One phone = one контрагент. Partial: a walk-in with no phone
             # on record is fine, any number of them.

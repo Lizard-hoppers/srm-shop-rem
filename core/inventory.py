@@ -362,10 +362,120 @@ def _cover_gap(conn: sqlite3.Connection, product_id: int, cell_id: int) -> None:
         _apply_batch_delta(conn, batch_id, cell_id, gap)
 
 
-def _allocate(conn: sqlite3.Connection, product_id: int, cell_id: int, qty: int, batch_id: int | None) -> list[tuple[int, int]]:
-    """Which партии an outgoing quantity comes from: the named one, or
-    oldest-first (FIFO) across what the cell holds. [(batch_id, qty), …]."""
+# ---- резерв ----
+#
+# «Доступно = физический остаток − резерв.» A reservation holds a quantity
+# of one партия in one cell for one document (see stock_reservations).
+# Everything that takes stock out of a cell goes through record_movement,
+# which only lets a document take what is free — or what is held for IT
+# (its `reserved_for`).
+
+_ACTIVE_RESERVATION = "released_at IS NULL AND (expires_at IS NULL OR expires_at > datetime('now'))"
+
+
+def reserved_qty(
+    conn: sqlite3.Connection, batch_id: int, cell_id: int, exclude: tuple[str, int] | None = None,
+) -> int:
+    """How much of this партия in this cell is held — optionally not
+    counting what is held for `exclude` (ref_type, ref_id) itself."""
+    query = f"SELECT COALESCE(SUM(qty), 0) AS n FROM stock_reservations WHERE batch_id = ? AND cell_id = ? AND {_ACTIVE_RESERVATION}"
+    params: list = [batch_id, cell_id]
+    if exclude:
+        query += " AND NOT (ref_type = ? AND ref_id = ?)"
+        params += list(exclude)
+    return conn.execute(query, params).fetchone()["n"]
+
+
+def available_qty(
+    conn: sqlite3.Connection, batch_id: int, cell_id: int, reserved_for: tuple[str, int] | None = None,
+) -> int:
+    held = conn.execute(
+        "SELECT qty FROM batch_stock WHERE batch_id = ? AND cell_id = ?", (batch_id, cell_id)
+    ).fetchone()
+    return (held["qty"] if held else 0) - reserved_qty(conn, batch_id, cell_id, exclude=reserved_for)
+
+
+def reserve(
+    conn: sqlite3.Connection, batch_id: int, cell_id: int, qty: int, ref_type: str, ref_id: int,
+    staff_id: int | None = None, expires_at: str | None = None,
+) -> int:
+    """Hold `qty` of a партия in a cell for a document. Refused
+    (InsufficientStockError) if that much isn't free."""
+    if qty <= 0:
+        raise ValueError("qty должен быть положительным")
+    free = available_qty(conn, batch_id, cell_id)
+    if qty > free:
+        raise InsufficientStockError(f"Свободно только {max(free, 0)} — остальное уже в резерве или списано.")
+    return conn.execute(
+        """INSERT INTO stock_reservations (batch_id, cell_id, qty, ref_type, ref_id, staff_id, expires_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (batch_id, cell_id, qty, ref_type, ref_id, staff_id, expires_at),
+    ).lastrowid
+
+
+def release(
+    conn: sqlite3.Connection, ref_type: str, ref_id: int, batch_id: int | None = None, cell_id: int | None = None,
+) -> None:
+    """Let go of everything held for a document (or just one партия/cell of it)."""
+    query = "UPDATE stock_reservations SET released_at = datetime('now') WHERE ref_type = ? AND ref_id = ? AND released_at IS NULL"
+    params: list = [ref_type, ref_id]
     if batch_id is not None:
+        query += " AND batch_id = ?"
+        params.append(batch_id)
+    if cell_id is not None:
+        query += " AND cell_id = ?"
+        params.append(cell_id)
+    conn.execute(query, params)
+
+
+def _consume_reservation(conn: sqlite3.Connection, ref: tuple[str, int], batch_id: int, cell_id: int, qty: int) -> None:
+    """A document took `qty` of what was held for it — its hold shrinks by
+    that much (oldest rows first)."""
+    rows = conn.execute(
+        f"""SELECT id, qty FROM stock_reservations
+            WHERE ref_type = ? AND ref_id = ? AND batch_id = ? AND cell_id = ? AND {_ACTIVE_RESERVATION}
+            ORDER BY id""",
+        (ref[0], ref[1], batch_id, cell_id),
+    ).fetchall()
+    left = qty
+    for row in rows:
+        take = min(left, row["qty"])
+        if take == row["qty"]:
+            conn.execute("UPDATE stock_reservations SET released_at = datetime('now') WHERE id = ?", (row["id"],))
+        else:
+            conn.execute("UPDATE stock_reservations SET qty = qty - ? WHERE id = ?", (take, row["id"]))
+        left -= take
+        if left == 0:
+            break
+
+
+def _allocate(
+    conn: sqlite3.Connection, product_id: int, cell_id: int, qty: int, batch_id: int | None,
+    reserved_for: tuple[str, int] | None = None,
+) -> list[tuple[int, int]]:
+    """Which партии an outgoing quantity comes from: the named one, or
+    oldest-first (FIFO) across what the cell holds — only what is free (or
+    held for `reserved_for`). [(batch_id, qty), …]; raises
+    InsufficientStockError if that much isn't available, before anything
+    is written."""
+    physical = conn.execute(
+        "SELECT qty FROM stock WHERE product_id = ? AND cell_id = ?", (product_id, cell_id)
+    ).fetchone()
+    on_hand = physical["qty"] if physical else 0
+    if on_hand < qty:
+        # The wording staff have always seen for a plain shortage.
+        raise InsufficientStockError(f"Недостаточно товара на ячейке (есть {on_hand}, требуется списать {qty})")
+    if batch_id is not None:
+        held = conn.execute(
+            "SELECT qty FROM batch_stock WHERE batch_id = ? AND cell_id = ?", (batch_id, cell_id)
+        ).fetchone()
+        if not held or held["qty"] < qty:
+            raise InsufficientStockError(
+                f"В этой партии на ячейке только {held['qty'] if held else 0}, требуется списать {qty}"
+            )
+        free = available_qty(conn, batch_id, cell_id, reserved_for)
+        if free < qty:
+            raise InsufficientStockError(f"Эта партия в резерве: свободно {max(free, 0)}, требуется {qty}.")
         return [(batch_id, qty)]
     rows = conn.execute(
         """SELECT batch_stock.batch_id, batch_stock.qty FROM batch_stock
@@ -376,11 +486,17 @@ def _allocate(conn: sqlite3.Connection, product_id: int, cell_id: int, qty: int,
     ).fetchall()
     allocations, left = [], qty
     for row in rows:
-        take = min(left, row["qty"])
-        allocations.append((row["batch_id"], take))
-        left -= take
+        free = row["qty"] - reserved_qty(conn, row["batch_id"], cell_id, exclude=reserved_for)
+        take = min(left, max(free, 0))
+        if take:
+            allocations.append((row["batch_id"], take))
+            left -= take
         if left == 0:
             break
+    if left:
+        raise InsufficientStockError(
+            f"Недостаточно свободного товара на ячейке: есть {on_hand}, но {on_hand - (qty - left)} в резерве под другие документы."
+        )
     return allocations
 
 
@@ -396,6 +512,7 @@ def record_movement(
     ref_id: int | None = None,
     comment: str | None = None,
     batch_id: int | None = None,
+    reserved_for: tuple[str, int] | None = None,
 ) -> int:
     """Apply a stock movement and write the audit row(s). qty is always
     positive. The only writer of `stock`, `batch_stock` and
@@ -423,17 +540,10 @@ def record_movement(
         # `with get_conn()` block and render an error page, which commits
         # — a half-applied movement must never be what gets committed.
         _cover_gap(conn, product_id, from_cell_id)
-        if batch_id is not None:
-            held = conn.execute(
-                "SELECT qty FROM batch_stock WHERE batch_id = ? AND cell_id = ?", (batch_id, from_cell_id)
-            ).fetchone()
-            if not held or held["qty"] < qty:
-                raise InsufficientStockError(
-                    f"В этой партии на ячейке только {held['qty'] if held else 0}, требуется списать {qty}"
-                )
-        # The total: its «недостаточно товара» message is the one staff know.
+        # Only what is free may leave — or what is held for the very
+        # document doing the taking (`reserved_for`).
+        allocations = _allocate(conn, product_id, from_cell_id, qty, batch_id, reserved_for)
         _apply_stock_delta(conn, product_id, from_cell_id, -qty)
-        allocations = _allocate(conn, product_id, from_cell_id, qty, batch_id)
     else:
         if batch_id is None:
             batch_id = create_batch(conn, product_id, unit_cost=_latest_unit_cost(conn, product_id))
@@ -445,6 +555,8 @@ def record_movement(
     for allocated_batch, allocated_qty in allocations:
         if from_cell_id is not None:
             _apply_batch_delta(conn, allocated_batch, from_cell_id, -allocated_qty)
+            if reserved_for:
+                _consume_reservation(conn, reserved_for, allocated_batch, from_cell_id, allocated_qty)
         if to_cell_id is not None:
             _apply_batch_delta(conn, allocated_batch, to_cell_id, allocated_qty)
         batch = get_batch(conn, allocated_batch)
@@ -490,7 +602,12 @@ def stock_lines(
     anything that must name a specific партия/IMEI (перемещение, продажа
     of a serial unit) and the contents list of a склад."""
     query = """SELECT batch_stock.batch_id, batch_stock.cell_id, batch_stock.qty,
+                      COALESCE((SELECT SUM(r.qty) FROM stock_reservations r
+                                WHERE r.batch_id = batch_stock.batch_id AND r.cell_id = batch_stock.cell_id
+                                  AND r.released_at IS NULL
+                                  AND (r.expires_at IS NULL OR r.expires_at > datetime('now'))), 0) AS reserved,
                       batches.product_id, batches.imei, batches.unit_cost_uah, batches.receipt_id,
+                      products.is_repair_part,
                       products.name AS product_name, products.sku, products.unit, products.is_serial,
                       suppliers.name AS supplier_name, storage_cells.code AS cell_code,
                       warehouses.id AS warehouse_id, warehouses.name AS warehouse_name, warehouses.kind AS warehouse_kind,
@@ -585,8 +702,15 @@ def pick_cell_with_stock(
     quietly take stock that is physically at another."""
     clause, params = _locations.cells_clause(location_id, "stock.cell_id")
     row = conn.execute(
-        f"SELECT cell_id FROM stock WHERE product_id = ? AND qty >= ?{clause} ORDER BY qty DESC LIMIT 1",
-        [product_id, qty, *params],
+        f"""SELECT cell_id,
+                   qty - COALESCE((SELECT SUM(r.qty) FROM stock_reservations r
+                                   JOIN batches b ON b.id = r.batch_id
+                                   WHERE b.product_id = stock.product_id AND r.cell_id = stock.cell_id
+                                     AND r.released_at IS NULL
+                                     AND (r.expires_at IS NULL OR r.expires_at > datetime('now'))), 0) AS free
+            FROM stock WHERE product_id = ?{clause}
+            GROUP BY cell_id HAVING free >= ? ORDER BY free DESC LIMIT 1""",
+        [product_id, *params, qty],
     ).fetchone()
     return row["cell_id"] if row else None
 

@@ -747,7 +747,7 @@ def scenario_repair_card_notify(db_path: str) -> None:
     check("repair card escapes HTML in defect description", "&lt;включается&gt;" in text)
     check("repair card shows the device line", "Смартфон Apple iPhone 12" in text)
     check("repair card shows 'не назначен' when no master is assigned", "не назначен" in text)
-    check("repair card shows the order id", f"№{order_id}" in text)
+    check("repair card is headed with its document number (РК-NNN)", f"РК-{order_id:03d} •" in text)
     check("repair card header uses the status label", "Новый" in text)
 
     kb_new = repairs.render_keyboard(order_id, "new")
@@ -756,12 +756,17 @@ def scenario_repair_card_notify(db_path: str) -> None:
     check("keyboard for 'new' also offers Открыть в CRM",
           kb_new["inline_keyboard"][-1][0]["callback_data"] == f"open_crm:repair:{order_id}")
     kb_in_progress = repairs.render_keyboard(order_id, "in_progress")
-    check("keyboard for 'in_progress' offers done + release",
+    check("keyboard for 'in_progress' offers «указать запчасть» + «готово», and «не удалось починить» below",
           {b["callback_data"] for b in kb_in_progress["inline_keyboard"][0]}
-          == {f"repair_done:{order_id}", f"repair_release:{order_id}"})
+          == {f"repair_part:{order_id}", f"repair_done:{order_id}"}
+          and kb_in_progress["inline_keyboard"][1][0]["callback_data"] == f"repair_release:{order_id}")
     kb_ready = repairs.render_keyboard(order_id, "ready")
-    check("keyboard for 'ready' has nothing left to press but Открыть в CRM",
-          kb_ready["inline_keyboard"] == [[{"text": "🔗 Открыть в CRM", "callback_data": f"open_crm:repair:{order_id}"}]])
+    check("keyboard for 'ready' still lets the part be named, plus Открыть в CRM — no status buttons",
+          [row[0]["callback_data"] for row in kb_ready["inline_keyboard"]]
+          == [f"repair_part:{order_id}", f"open_crm:repair:{order_id}"])
+    kb_issued = repairs.render_keyboard(order_id, "issued")
+    check("keyboard for 'issued' has nothing left to press but Открыть в CRM",
+          kb_issued["inline_keyboard"] == [[{"text": "🔗 Открыть в CRM", "callback_data": f"open_crm:repair:{order_id}"}]])
 
     # No CRM_STAFF_GROUP_CHAT_ID in the test env — must no-op, never raise.
     raised = False
@@ -1622,6 +1627,9 @@ def scenario_quick_intake_chat() -> None:
     # read; the shift flow itself is covered in scenario_quick_cash_chat.
     original_shift_is_open = qa._shift_is_open
     qa._shift_is_open = lambda store, staff: True
+    # …nor a clients table for the «returning client» lookup on the phone step.
+    original_get_by_phone = clients.get_by_phone
+    clients.get_by_phone = lambda conn, phone: None
     # client_menu_add re-resolves the store/staff itself (get_store by id,
     # then a real DB lookup by telegram_id) rather than reusing
     # _resolve_staff_for_dm — ":memory:" has no schema/rows and "test-store"
@@ -1728,6 +1736,7 @@ def scenario_quick_intake_chat() -> None:
     finally:
         qa._resolve_staff_for_dm = original_resolve
         qa._shift_is_open = original_shift_is_open
+        clients.get_by_phone = original_get_by_phone
         qa.get_store = original_get_store
         auth.get_staff_by_telegram_id = original_get_staff
 
@@ -5071,6 +5080,681 @@ def scenario_transfer_chat() -> None:
         asyncio.run(run())
 
 
+def scenario_service_center() -> None:
+    """Заход 5 core: резерв, запчасть клиентского ремонта со склада
+    мастера, прибыль и начисление, производство по макету (5000 + 2700 +
+    500 + 1000 = 9200)."""
+    print("scenario: сервисный центр — резерв, запчасть со склада мастера, прибыль, производство")
+    from core import production, stock_transfers, warehouses
+
+    with tempfile.TemporaryDirectory() as tmp, _separate_base(tmp, "sc.sqlite3", ("Мастерская", "Магазин")) as db_path:
+        with get_conn(db_path) as conn:
+            owner = auth.create_staff(conn, "sc-owner", "pass", "Владелец", "owner")
+            edik = auth.create_master(conn, "Эдик", None, "percent", 33)
+            sergey = auth.create_master(conn, "Сергей", None, "fixed", 400, master_kind="outsource", skills="замена дисплея, АКБ")
+            check("a master's type and skills are on record",
+                  auth.get_master(conn, sergey)["master_kind"] == "outsource" and auth.get_master(conn, sergey)["skills"] == "замена дисплея, АКБ"
+                  and auth.get_master(conn, edik)["master_kind"] == "staff")
+            sup_a = purchases.create_supplier(conn, "Поставщик А", None)
+            sup_b = purchases.create_supplier(conn, "Поставщик Б", None)
+            sup_c = purchases.create_supplier(conn, "Поставщик В", None)
+            c1 = inventory.create_cell(conn, "SC-1", None, None, location_id=1)
+            c2 = inventory.create_cell(conn, "SC-2", None, None, location_id=2)
+            display = inventory.create_product(conn, "Дисплей iPhone 13", "SC-DSP", None, "шт", True, True, 0, 3500)
+            akb = inventory.create_product(conn, "АКБ iPhone 13", "SC-AKB", None, "шт", True, True, 0, 1200)
+            cable = inventory.create_product(conn, "Кабель", "SC-CBL", None, "шт", False, True, 0, 300)
+            r_a = purchases.create_receipt(conn, sup_a, "125", owner, [(display, c1, 4, 2000)], location_id=1)
+            purchases.create_receipt(conn, sup_b, "138", owner, [(display, c2, 1, 2200)], location_id=2)
+            purchases.create_receipt(conn, sup_c, "142", owner, [(akb, c1, 3, 700), (cable, c1, 5, 100)], location_id=1)
+            point_1 = warehouses.point_warehouse(conn, 1)["id"]
+            edik_wh = warehouses.master_warehouse(conn, edik)["id"]
+            sergey_wh = warehouses.master_warehouse(conn, sergey)["id"]
+            batch_a = purchases.get_receipt_batches(conn, r_a)[0]["id"]
+
+            # ---- резерв: доступно = остаток − резерв
+            hold = inventory.reserve(conn, batch_a, c1, 3, "test", 1)
+            check("a reservation doesn't change what is physically there, only what is free",
+                  inventory.product_total_qty(conn, display, 1) == 4 and inventory.available_qty(conn, batch_a, c1) == 1
+                  and inventory.reserved_qty(conn, batch_a, c1) == 3)
+            for attempt, label in (
+                (lambda: inventory.reserve(conn, batch_a, c1, 2, "test", 2), "reserving more than is free is refused"),
+                (lambda: inventory.record_movement(conn, display, 2, "adjustment", owner, from_cell_id=c1), "nothing else can take reserved stock (oldest-first)"),
+                (lambda: inventory.record_movement(conn, display, 2, "adjustment", owner, from_cell_id=c1, batch_id=batch_a), "…nor by naming the партия"),
+                (lambda: sales.create_sale(conn, None, "offline", owner, [(display, 2, 3500)], location_id=1), "a sale can't sell what is reserved"),
+            ):
+                try:
+                    attempt()
+                    check(label, False)
+                except inventory.InsufficientStockError:
+                    check(label, True)
+            check("none of the refusals moved anything", inventory.product_total_qty(conn, display, 1) == 4 and _stock_is_consistent(conn))
+            inventory.record_movement(conn, display, 1, "adjustment", owner, from_cell_id=c1, reserved_for=("test", 1), comment="из своего резерва")
+            check("the document a reservation is for CAN take it, and its hold shrinks by what it took",
+                  inventory.product_total_qty(conn, display, 1) == 3 and inventory.reserved_qty(conn, batch_a, c1) == 2)
+            inventory.release(conn, "test", 1)
+            check("releasing frees everything that was held", inventory.available_qty(conn, batch_a, c1) == 3)
+            conn.execute(
+                "INSERT INTO stock_reservations (batch_id, cell_id, qty, ref_type, ref_id, expires_at) VALUES (?, ?, 3, 'old', 9, datetime('now', '-1 hour'))",
+                (batch_a, c1))
+            check("an expired reservation holds nothing", inventory.available_qty(conn, batch_a, c1) == 3)
+
+            # ---- клиентский ремонт: запчасть только со склада мастера
+            sent = stock_transfers.send(conn, point_1, edik_wh, [(batch_a, c1, 1)], owner)
+            stock_transfers.receive(conn, sent, edik)
+            client_id = clients.get_or_create_by_phone(conn, "Клиент", "+380671234567", source="offline")
+            repair_id = repairs.create_repair(
+                conn, client_id, "Смартфон", "Apple", "iPhone 13", None, "Замена дисплея", "offline", edik, 3000, owner, location_id=1)
+            check("the master's own claim takes it into work", repairs.claim_repair(conn, repair_id, edik))
+            repair = repairs.get_repair(conn, repair_id)
+            text, keyboard = repairs.card(conn, repair_id)
+            check("the group card reads like the макет and flags the missing part",
+                  f"РК-{repair_id:03d} • В работе" in text and "Клиент: +380671234567" in text and "Работа: Замена дисплея" in text
+                  and "Ответственный: Эдик" in text and "Запчасть: <b>не указана</b>" in text and "Цена: 3000 грн" in text)
+            check("its buttons are «Указать запчасть» and «Готово»",
+                  [b["callback_data"] for b in keyboard["inline_keyboard"][0]] == [f"repair_part:{repair_id}", f"repair_done:{repair_id}"])
+            check("«нужна запчасть» while in work with nothing said", repairs.needs_part(conn, repair))
+            lines = repairs.available_parts(conn, repair_id)
+            check("the parts on offer are ONLY what is on the master's own склад (1 display), not the точка's",
+                  [(l["product_id"], l["warehouse_id"], l["free"]) for l in lines] == [(display, edik_wh, 1)])
+            for args, needle, label in (
+                ((batch_a, c1, 1), "нет на складе исполнителя", "a part lying at the точка can't be written off to the master's repair"),
+                ((lines[0]["batch_id"], lines[0]["cell_id"], 2), "свободно 1", "nor more than he holds"),
+            ):
+                try:
+                    repairs.use_part(conn, repair_id, *args, edik)
+                    check(label, False)
+                except repairs.RepairPartError as exc:
+                    check(label, needle in str(exc))
+            movement = repairs.use_part(conn, repair_id, lines[0]["batch_id"], lines[0]["cell_id"], 1, edik)
+            row = conn.execute("SELECT * FROM stock_movements WHERE id = ?", (movement,)).fetchone()
+            check("the part is written off from that exact партия, at that партия's cost",
+                  row["batch_id"] == batch_a and row["unit_cost"] == 2000 and row["reason"] == "repair_use"
+                  and warehouses.total_qty(conn, edik_wh) == 0)
+            text, _kb = repairs.card(conn, repair_id)
+            check("the card now names the part and its партия",
+                  f"Запчасть: Дисплей iPhone 13 × 1 (партия {batch_a})" in text and not repairs.needs_part(conn, repairs.get_repair(conn, repair_id)))
+
+            # ---- прибыль: 3000 − 2000 = 1000 → 33% = 330 → фирме 670
+            numbers = repairs.finance(conn, repair_id)
+            check("before a final price the estimate is used and marked as such",
+                  numbers["price"] == 3000 and not numbers["is_final"] and numbers["base"] == 1000)
+            repairs.set_price(conn, repair_id, 3000, 3200)
+            repairs.complete_repair(conn, repair_id, edik)
+            check("nothing is accrued until the repair is выдан", masters.accrued_total(conn, edik) == 0)
+            repairs.update_status(conn, repair_id, "issued", owner)
+            numbers = repairs.finance(conn, repair_id)
+            check("выдан: клиент 3200 − запчасть 2000 = база 1200 → мастеру 33% = 396 → фирме 804",
+                  (numbers["price"], numbers["parts_cost"], numbers["base"], numbers["master_share"], numbers["firm_profit"])
+                  == (3200, 2000, 1200, 396, 804))
+            check("the master's share is accrued once and the document carries the firm's profit",
+                  masters.accrued_total(conn, edik) == 396 and masters.accrued_for(conn, "repair_order", repair_id) == 396
+                  and documents.get_for(conn, "repair", repair_id)["profit"] == 804)
+            repairs.update_status(conn, repair_id, "ready", owner)
+            check("taking it back out of «Выдан» undoes both", masters.accrued_total(conn, edik) == 0
+                  and documents.get_for(conn, "repair", repair_id)["profit"] is None)
+            repairs.update_status(conn, repair_id, "issued", owner)
+            repairs.update_status(conn, repair_id, "issued", owner, "повторно")
+            check("re-issuing accrues it again — exactly once", masters.accrued_total(conn, edik) == 396
+                  and len(masters.list_accruals(conn, edik)) == 1)
+            try:
+                repairs.use_part(conn, repair_id, batch_a, c1, 1, edik)
+                check("a closed repair takes no more parts", False)
+            except repairs.RepairPartError:
+                check("a closed repair takes no more parts", True)
+
+            cleaning = repairs.create_repair(conn, client_id, "Смартфон", None, "A54", None, "Чистка", "offline", sergey, 500, owner, location_id=1)
+            repairs.claim_repair(conn, cleaning, sergey)
+            repairs.declare_no_parts(conn, cleaning)
+            check("«без запчасти» is a statement, not an omission",
+                  "Запчасть: без запчасти" in repairs.card(conn, cleaning)[0] and not repairs.needs_part(conn, repairs.get_repair(conn, cleaning)))
+            repairs.set_price(conn, cleaning, 500, 500)
+            repairs.update_status(conn, cleaning, "issued", owner)
+            check("a fixed-rate master gets his rate per repair (400), the firm the rest (100)",
+                  masters.accrued_total(conn, sergey) == 400 and documents.get_for(conn, "repair", cleaning)["profit"] == 100)
+            counter = repairs.create_repair(conn, client_id, "Смартфон", None, "A12", None, "Стекло", "offline", owner, 300, owner, location_id=1)
+            check("a repair done by a non-master takes parts from the точка's склад",
+                  repairs.parts_warehouse(conn, repairs.get_repair(conn, counter))["id"] == point_1
+                  and {l["product_id"] for l in repairs.available_parts(conn, counter)} == {display, akb})
+
+            # ---- производство: макет «Карточка и производство»
+            cash.record_adjustment(conn, 20000, "старт", owner, location_id=1)
+            purchase = buyback.create_purchase(
+                conn, seller_phone="0970073090", model="iPhone 13 · 128 GB · Black", imei="356000000000001",
+                comment="дисплей, АКБ, зарядка", price="5000", staff_id=owner, location_id=1)
+            unit = inventory.find_unit_by_imei(conn, "356000000000001")
+            for imei, needle, label in (("999000", "не числится", "an IMEI we don't have can't start an order"),):
+                try:
+                    production.create_order(conn, imei=imei, staff_id=owner, location_id=1)
+                    check(label, False)
+                except production.ProductionError as exc:
+                    check(label, needle in str(exc))
+            order_id = production.create_order(conn, imei="356 000 000 000 001", staff_id=owner, location_id=1, task="дисплей, АКБ")
+            order = production.get_order(conn, order_id)
+            check("the order starts as a draft tied to the phone and its покупка, at its purchase cost",
+                  order["status"] == "draft" and order["batch_id"] == unit["id"] and order["buyback_order_id"] == purchase
+                  and order["cost_before"] == 5000 and documents.doc_label(documents.get_for(conn, "production", order_id)) == f"ПР-{order_id:03d}")
+            try:
+                production.create_order(conn, imei="356000000000001", staff_id=owner, location_id=1)
+                check("the same phone can't be in two orders", False)
+            except production.ProductionError as exc:
+                check("the same phone can't be in two orders", f"ПР-{order_id:03d}" in str(exc))
+            try:
+                sales.create_sale(conn, None, "offline", owner, [(unit["product_id"], 1, 9000, unit["id"])], location_id=1)
+                check("a phone held for производство can't be sold", False)
+            except inventory.InsufficientStockError:
+                check("a phone held for производство can't be sold", True)
+
+            picks = production.available_parts(conn, order_id)
+            check("«детали со всех складов»: both точки, each line with supplier, приход and cost; non-parts are not offered",
+                  {(l["product_name"], l["supplier_name"], l["location_id"], l["free"], l["unit_cost_uah"]) for l in picks}
+                  == {("Дисплей iPhone 13", "Поставщик А", 1, 2, 2000), ("Дисплей iPhone 13", "Поставщик Б", 2, 1, 2200),
+                      ("АКБ iPhone 13", "Поставщик В", 1, 3, 700)})
+            check("the list can be narrowed by name", {l["product_name"] for l in production.available_parts(conn, order_id, "акб")} == {"АКБ iPhone 13"})
+            line = {(l["product_id"], l["location_id"]): l for l in picks}
+            d1, d2, a1 = line[(display, 1)], line[(display, 2)], line[(akb, 1)]
+            try:
+                production.set_parts(conn, order_id, [(d1["batch_id"], d1["cell_id"], 5)], owner)
+                check("reserving more than is free is refused", False)
+            except production.ProductionError:
+                check("reserving more than is free is refused", True)
+            production.set_parts(conn, order_id, [(d2["batch_id"], d2["cell_id"], 1)], owner)
+            production.set_parts(conn, order_id, [(d1["batch_id"], d1["cell_id"], 1), (a1["batch_id"], a1["cell_id"], 1)], owner)
+            check("«Зарезервировать» replaces the selection: the first pick is free again, the new one is held",
+                  inventory.available_qty(conn, d2["batch_id"], d2["cell_id"]) == 1 and inventory.available_qty(conn, d1["batch_id"], d1["cell_id"]) == 1
+                  and inventory.available_qty(conn, a1["batch_id"], a1["cell_id"]) == 2
+                  and [(p["product_name"], p["qty"]) for p in production.get_parts(conn, order_id)] == [("Дисплей iPhone 13", 1), ("АКБ iPhone 13", 1)])
+            check("held parts are still on the точка's shelf but not on offer to a client repair",
+                  {l["product_id"]: l["free"] for l in repairs.available_parts(conn, counter)} == {display: 1, akb: 2})
+            try:
+                production.hand_over(conn, order_id, owner)
+                check("handover needs a master", False)
+            except production.ProductionError as exc:
+                check("handover needs a master", "выберите мастера" in str(exc))
+            try:
+                production.assign_master(conn, order_id, owner)
+                check("only an active master can be assigned", False)
+            except production.ProductionError:
+                check("only an active master can be assigned", True)
+            production.assign_master(conn, order_id, sergey, "1000")
+            transfers = production.hand_over(conn, order_id, owner)
+            order = production.get_order(conn, order_id)
+            check("«Передать в производство»: one перемещение from the точка, already received — phone and parts are on the master's склад",
+                  order["status"] == "in_work" and len(transfers) == 1
+                  and stock_transfers.get_transfer(conn, transfers[0])["status"] == "received"
+                  and warehouses.total_qty(conn, sergey_wh) == 3 and inventory.product_total_qty(conn, akb, 1) == 2)
+            check("«передача ≠ расход»: nothing is written off yet, and the goods stay held for the order at the master's",
+                  inventory.stock_value(conn) == 5000 + 2 * 2000 + 2200 + 3 * 700 + 5 * 100
+                  and all(l["qty"] - l["reserved"] == 0 for l in inventory.stock_lines(conn, warehouse_id=sergey_wh)))
+            other = repairs.create_repair(conn, client_id, "Смартфон", None, "iPhone 13", None, "Дисплей", "offline", sergey, 3000, owner, location_id=1)
+            check("the master can't put the order's parts into a client's repair", repairs.available_parts(conn, other) == [])
+
+            parts = {p["product_id"]: p for p in production.get_parts(conn, order_id)}
+            for kwargs, needle, label in (
+                ({"used": {parts[display]["id"]: 3}}, "нельзя отчитаться", "reporting more used than was handed over is refused"),
+                ({"extras": [("Шлейф", "")]}, "название и сумма", "a master's own part needs both a name and an amount"),
+            ):
+                try:
+                    production.submit_report(conn, order_id, sergey, **kwargs)
+                    check(label, False)
+                except production.ProductionError as exc:
+                    check(label, needle in str(exc))
+            try:
+                production.accept(conn, order_id, owner)
+                check("a result can't be accepted before the report", False)
+            except production.ProductionError:
+                check("a result can't be accepted before the report", True)
+            production.submit_report(conn, order_id, sergey, extras=[("Шлейф мастера", "400"), ("Проклейка мастера", "100"), ("", "")])
+            numbers = production.preview(conn, order_id)
+            check("the report adds up as on the макет: покупка 5000 + наши детали 2700 + детали мастера 500 + работа 1000 = 9200; мастеру 1500",
+                  (numbers["before"], numbers["parts"], numbers["extras"], numbers["work"], numbers["total"], numbers["to_master"])
+                  == (5000, 2700, 500, 1000, 9200, 1500) and production.get_order(conn, order_id)["status"] == "reported")
+            owed_before = masters.accrued_total(conn, sergey)
+            back = production.accept(conn, order_id, owner)
+            order = production.get_order(conn, order_id)
+            check("«Принять результат»: the phone's cost is now 9200, fixed on the order",
+                  order["status"] == "done" and order["cost_after"] == 9200 and order["cost_parts"] == 2700
+                  and inventory.get_batch(conn, unit["id"])["unit_cost_uah"] == 9200
+                  and documents.get_for(conn, "production", order_id)["amount"] == 9200)
+            check("the used parts are written off for good (each from its партия), nothing else",
+                  inventory.product_total_qty(conn, display) == 1 + 1 and inventory.product_total_qty(conn, akb) == 2
+                  and [(m["qty"], m["unit_cost"]) for m in conn.execute(
+                      "SELECT qty, unit_cost FROM stock_movements WHERE ref_type = 'production_order' AND ref_id = ? ORDER BY id", (order_id,))]
+                  == [(1, 2000), (1, 700)])
+            check("the master is owed работа + his own parts (1500) for this order",
+                  masters.accrued_total(conn, sergey) == owed_before + 1500 and masters.accrued_for(conn, "production_order", order_id) == 1500)
+            returning = stock_transfers.get_transfer(conn, back)
+            check("the finished phone goes back «Мастер → В пути → Точка» and waits to be received",
+                  returning["status"] == "sent" and returning["to_warehouse_id"] == point_1
+                  and warehouses.total_qty(conn, sergey_wh) == 0 and inventory.find_unit_by_imei(conn, "356000000000001") is not None)
+            stock_transfers.receive(conn, back, owner)
+            sold = sales.create_sale(conn, None, "offline", owner, [(unit["product_id"], 1, 12000, unit["id"])], location_id=1)
+            check("received at the точка it sells at its real cost: 12 000 − 9 200",
+                  sales.get_sale_items(conn, sold)[0]["unit_cost"] == 9200)
+            check("no hold of the order is left anywhere",
+                  conn.execute("SELECT COUNT(*) AS n FROM stock_reservations WHERE ref_type = 'production' AND ref_id = ? AND released_at IS NULL", (order_id,)).fetchone()["n"] == 0
+                  and _stock_is_consistent(conn))
+
+            # ---- неиспользованное возвращается; черновик можно отменить
+            second = buyback.create_purchase(conn, seller_phone="0970073090", model="iPhone 13 · 128 GB · Black",
+                                             imei="356000000000002", comment=None, price="4000", staff_id=owner, location_id=1)
+            order_2 = production.create_order(conn, imei="356000000000002", staff_id=owner, location_id=1)
+            free_akb = next(l for l in production.available_parts(conn, order_2) if l["product_id"] == akb)
+            production.set_parts(conn, order_2, [(free_akb["batch_id"], free_akb["cell_id"], 2)], owner)
+            production.assign_master(conn, order_2, sergey, "600")
+            production.hand_over(conn, order_2, owner)
+            part_id = production.get_parts(conn, order_2)[0]["id"]
+            production.submit_report(conn, order_2, sergey, used={part_id: 1}, work_price="800")
+            back_2 = production.accept(conn, order_2, owner)
+            check("only what the master reported as used is spent; the price of the work can be corrected in the report",
+                  production.get_order(conn, order_2)["cost_after"] == 4000 + 700 + 800)
+            check("the unused part travels back with the phone",
+                  sorted((i["product_id"], i["qty"]) for i in stock_transfers.get_items(conn, back_2))
+                  == sorted([(unit["product_id"], 1), (akb, 1)]))
+            stock_transfers.receive(conn, back_2, owner)
+            third = buyback.create_purchase(conn, seller_phone="0970073090", model="Samsung A54", imei="356000000000003",
+                                            comment=None, price="3000", staff_id=owner, location_id=1)
+            draft = production.create_order(conn, imei="356000000000003", staff_id=owner, location_id=1)
+            a_line = next(l for l in production.available_parts(conn, draft) if l["product_id"] == akb)
+            production.set_parts(conn, draft, [(a_line["batch_id"], a_line["cell_id"], 1)], owner)
+            production.cancel(conn, draft, owner)
+            check("cancelling a draft frees the phone and the parts, and the document stays, cancelled",
+                  production.get_order(conn, draft)["status"] == "cancelled"
+                  and inventory.available_qty(conn, a_line["batch_id"], a_line["cell_id"]) == 1
+                  and documents.get_for(conn, "production", draft)["status"] == "cancelled"
+                  and production.active_order_for_batch(conn, inventory.find_unit_by_imei(conn, "356000000000003")["id"]) is None)
+            try:
+                production.cancel(conn, order_2, owner)
+                check("an order that has left the draft can't be cancelled this way", False)
+            except production.ProductionError:
+                check("an order that has left the draft can't be cancelled this way", True)
+            check("orders can be listed by status and by master",
+                  [o["id"] for o in production.list_orders(conn, statuses=("done",), master_id=sergey)] == [order_2, order_id]
+                  and production.list_orders(conn, statuses=production.ACTIVE_STATUSES) == [])
+
+
+def scenario_service_center_http() -> None:
+    print("scenario: сервисный центр over HTTP — карточка ремонта, запчасть, прибыль, производство, мастера")
+    from core import notify, production, stock_transfers, warehouses
+
+    with tempfile.TemporaryDirectory() as tmp, _separate_base(tmp, "sc-http.sqlite3", ("Мастерская",)) as db_path:
+        with get_conn(db_path) as conn:
+            owner = auth.create_staff(conn, "sh5-owner", "pass", "Владелец", "owner")
+            keeper = auth.create_staff(conn, "sh5-keeper", "pass", "Кладовщик", "storekeeper", location_id=1)
+            master = auth.create_master(conn, "Сергей", 990011, "percent", 33)
+            other_master = auth.create_master(conn, "Чужой Мастер", None, None, None)
+            supplier = purchases.create_supplier(conn, "Поставщик А", None)
+            cell = inventory.create_cell(conn, "S5-1", None, None, location_id=1)
+            display = inventory.create_product(conn, "Дисплей iPhone 13", "S5-DSP", None, "шт", True, True, 0, 3500)
+            akb = inventory.create_product(conn, "АКБ iPhone 13", "S5-AKB", None, "шт", True, True, 0, 1200)
+            receipt = purchases.create_receipt(conn, supplier, "125", owner, [(display, cell, 3, 2000), (akb, cell, 2, 700)], location_id=1)
+            batch = {b["product_id"]: b["id"] for b in purchases.get_receipt_batches(conn, receipt)}
+            point = warehouses.point_warehouse(conn, 1)["id"]
+            master_wh = warehouses.master_warehouse(conn, master)["id"]
+            master_cell = warehouses.cells(conn, master_wh)[0]["id"]
+            sent = stock_transfers.send(conn, point, master_wh, [(batch[display], cell, 1)], owner)
+            stock_transfers.receive(conn, sent, master)
+            client_id = clients.get_or_create_by_phone(conn, "Клиент", "+380671234500", source="offline")
+            repair_id = repairs.create_repair(conn, client_id, "Смартфон", "Apple", "iPhone 13", None, "Замена дисплея", "offline", master, 3000, owner, location_id=1)
+            repairs.claim_repair(conn, repair_id, master)
+            cash.record_adjustment(conn, 20000, "старт", owner, location_id=1)
+            purchase = buyback.create_purchase(conn, seller_phone="0970073090", model="iPhone 13 · 128 GB", imei="356000000000555",
+                                               comment="дисплей, АКБ", price="5000", staff_id=owner, location_id=1)
+            acc = {(a["kind"], a["currency"]): a["id"] for a in accounts.list_accounts(conn, 1)}
+        token, keeper_token = make_token(owner, "1"), make_token(keeper, "1")
+        master_token, other_token = make_token(master, "1"), make_token(other_master, "1")
+
+        import webapp.main
+
+        with TestClient(webapp.main.app) as client:
+            # ---- ремонт клиента
+            page = client.get(f"/repairs/{repair_id}?t={token}").text
+            check("the repair page flags the missing part and offers the master's склад lines (партия, supplier, free qty)",
+                  "Нужна запчасть" in page and "Мастер: Сергей" in page and f'value="{batch[display]}:{master_cell}"' in page
+                  and "Поставщик А" in page and f"/repairs/{repair_id}/no-parts" in page)
+            check("the owner sees the repair's profit block; the master doesn't",
+                  "Прибыль ремонта" in page and "Прибыль ремонта" not in client.get(f"/repairs/{repair_id}?t={master_token}").text)
+            check("the «Ремонты» page has the service-centre tabs", "/production" in client.get(f"/repairs?t={token}").text)
+            wrong = client.post(f"/repairs/{repair_id}/parts?t={master_token}", data={"line": f"{batch[display]}:{cell}", "qty": "1"})
+            check("a part from the точка's shelf is a friendly error, not a write-off", "нет на складе исполнителя" in wrong.text)
+            ok = client.post(f"/repairs/{repair_id}/parts?t={master_token}", data={"line": f"{batch[display]}:{master_cell}", "qty": "1"}, follow_redirects=False)
+            check("the right line is written off", ok.status_code == 303)
+            page = client.get(f"/repairs/{repair_id}?t={token}").text
+            check("the part shows with its партия, supplier and cost; the flag is gone; the profit follows (3000 − 2000 → 33% = 330)",
+                  f"№{batch[display]}" in page and "2000 грн" in page and "Нужна запчасть" not in page and ">330 грн<" in page and ">670 грн<" in page)
+            client.post(f"/repairs/{repair_id}/price?t={token}", data={"price_estimate": "3000", "price_final": "3000"})
+            client.post(f"/repairs/{repair_id}/status?t={token}", data={"status": "issued", f"pay_{acc[('cash', 'UAH')]}": "3000"})
+            with get_conn(db_path) as conn:
+                check("выдача accrues the master's 330 and gives the document its profit",
+                      masters.accrued_total(conn, master) == 330 and documents.get_for(conn, "repair", repair_id)["profit"] == 670)
+            second = None
+            with get_conn(db_path) as conn:
+                second = repairs.create_repair(conn, client_id, "Смартфон", None, "A54", None, "Чистка", "offline", master, 400, owner, location_id=1)
+                repairs.claim_repair(conn, second, master)
+            client.post(f"/repairs/{second}/no-parts?t={master_token}")
+            page = client.get(f"/repairs/{second}?t={token}").text
+            check("«Без запчасти» is recorded and shown", "ремонт без запчасти" in page and "Нужна запчасть" not in page)
+
+            # ---- мастера: тип, навыки, начисления
+            client.post(f"/masters/{master}/edit?t={token}", data={"name": "Сергей", "telegram_id": "990011", "pay_type": "percent", "pay_value": "33",
+                                                                  "master_kind": "outsource", "skills": "замена дисплея, АКБ, разъёмы"})
+            mpage = client.get(f"/masters/{master}?t={token}").text
+            check("the master's card keeps type and skills and shows what he has been accrued",
+                  "замена дисплея, АКБ, разъёмы" in mpage and "Начисления" in mpage and ">330 грн<" in mpage and f"РК-{repair_id:03d}" in mpage)
+            with get_conn(db_path) as conn:
+                check("saved as аутсорс", auth.get_master(conn, master)["master_kind"] == "outsource")
+
+            # ---- производство
+            card = client.get(f"/buyback/{purchase}?t={token}").text
+            check("the покупка's card offers «Подобрать детали»", "Подобрать детали" in card and 'name="imei" value="356000000000555"' in card)
+            check("a master can't start an order", client.post(f"/production?t={master_token}", data={"imei": "356000000000555"}, follow_redirects=False).headers["location"].startswith("/production?"))
+            bad = client.post(f"/production?t={keeper_token}", data={"imei": "000"})
+            check("an unknown IMEI is a friendly error", bad.status_code == 200 and "не числится" in bad.text)
+            made = client.post(f"/production?t={keeper_token}", data={"imei": "356000000000555", "task": "дисплей, АКБ"}, follow_redirects=False)
+            order_id = int(made.headers["location"].split("/production/")[1].split("?")[0])
+            check("the покупка's card now links to its order instead", f"/production/{order_id}" in client.get(f"/buyback/{purchase}?t={token}").text)
+            detail = client.get(f"/production/{order_id}?t={keeper_token}").text
+            check("the draft shows «детали со всех складов» with supplier, закупка and cost, and the steps of the макет",
+                  all(x in detail for x in ("Детали со всех складов", "Поставщик А", f"qty_{batch[display]}_{cell}", f"qty_{batch[akb]}_{cell}",
+                                            "Зарезервировать", "Передать в производство", "Аутсорс")))
+            check("the list of masters can be narrowed to аутсорс (only Сергей)",
+                  "Сергей" in client.get(f"/production/{order_id}?t={keeper_token}&kind=outsource").text.split('name="master_id"')[1].split("</select>")[0]
+                  and "Чужой Мастер" not in client.get(f"/production/{order_id}?t={keeper_token}&kind=outsource").text.split('name="master_id"')[1].split("</select>")[0])
+            over = client.post(f"/production/{order_id}/parts?t={keeper_token}", data={f"qty_{batch[display]}_{cell}": "9"})
+            check("reserving more than is free is a friendly error", "нельзя зарезервировать" in over.text)
+            client.post(f"/production/{order_id}/parts?t={keeper_token}", data={f"qty_{batch[display]}_{cell}": "1", f"qty_{batch[akb]}_{cell}": "1"})
+            no_master = client.post(f"/production/{order_id}/handover?t={keeper_token}")
+            check("handover without a master is a friendly error", "выберите мастера" in no_master.text)
+            client.post(f"/production/{order_id}/master?t={keeper_token}", data={"master_id": str(master), "work_price": "1000"})
+
+            calls = []
+
+            class _Resp:
+                status_code, text = 200, "ok"
+
+                def json(self):
+                    return {"result": {"message_id": 1}}
+
+            def _fake_post(url, **kwargs):
+                calls.append({"method": url.rsplit("/", 1)[1], "json": kwargs.get("json")})
+                return _Resp()
+
+            orig_post, orig_token, orig_url = httpx.post, notify._BOT_TOKEN, os.environ.get("CRM_MINIAPP_URL")
+            httpx.post, notify._BOT_TOKEN = _fake_post, "test-token"
+            os.environ["CRM_MINIAPP_URL"] = "https://crm.example/miniapp"
+            try:
+                handed = client.post(f"/production/{order_id}/handover?t={keeper_token}", follow_redirects=False)
+            finally:
+                httpx.post, notify._BOT_TOKEN = orig_post, orig_token
+                if orig_url is None:
+                    os.environ.pop("CRM_MINIAPP_URL", None)
+                else:
+                    os.environ["CRM_MINIAPP_URL"] = orig_url
+            check("handover goes through", handed.status_code == 303)
+            note = next((c["json"] for c in calls if c["method"] == "sendMessage" and c["json"]["chat_id"] == 990011), None)
+            check("the master is told in his DM, with the list and a button straight to the report",
+                  note is not None and f"ПР-{order_id:03d}" in note["text"] and "Дисплей iPhone 13" in note["text"]
+                  and note["reply_markup"]["inline_keyboard"][0][0]["web_app"]["url"].startswith(f"https://crm.example/production/{order_id}?t="))
+            with get_conn(db_path) as conn:
+                check("the phone and both parts are now on the master's склад", warehouses.total_qty(conn, master_wh) == 3)
+            check("the master's own list shows the order; another master's doesn't",
+                  f"/production/{order_id}" in client.get(f"/production?t={master_token}").text
+                  and f"/production/{order_id}" not in client.get(f"/production?t={other_token}").text)
+            report_page = client.get(f"/production/{order_id}?t={master_token}").text
+            check("the master sees the report form (used parts, his own parts, work) but no «Принять результат»",
+                  f"/production/{order_id}/report" in report_page and "extra_title_0" in report_page and f"/production/{order_id}/accept" not in report_page)
+            denied = client.post(f"/production/{order_id}/report?t={other_token}", data={})
+            check("another master can't file the report", "мастер этого заказа" in denied.text)
+            with get_conn(db_path) as conn:
+                parts = {p["product_id"]: p["id"] for p in production.get_parts(conn, order_id)}
+            client.post(f"/production/{order_id}/report?t={master_token}", data={
+                f"used_{parts[display]}": "1", f"used_{parts[akb]}": "1", "extra_title_0": "Шлейф мастера", "extra_amount_0": "400",
+                "extra_title_1": "Проклейка мастера", "extra_amount_1": "100", "work_price": "1000", "note": "всё ок"})
+            reported = client.get(f"/production/{order_id}?t={keeper_token}").text
+            check("after the report the keeper sees the макет's numbers and «Принять результат»",
+                  all(x in reported for x in (">5000 грн<", ">2700 грн<", ">500 грн<", ">1000 грн<", ">9200 грн<", ">1500 грн<"))
+                  and f"/production/{order_id}/accept" in reported)
+            check("the master can't accept his own result",
+                  "кладовщик, админ или владелец" in client.post(f"/production/{order_id}/accept?t={master_token}").text)
+            client.post(f"/production/{order_id}/accept?t={keeper_token}")
+            done = client.get(f"/production/{order_id}?t={token}").text
+            check("the result card: «Готов к продаже», себестоимость 9200, the return transfer, what the master is owed",
+                  "Готов к продаже" in done and ">9200 грн<" in done and "/transfers/" in done and "начислено мастеру 1500" in done
+                  and "Шлейф мастера" in done)
+            with get_conn(db_path) as conn:
+                check("the phone's cost is 9200 and the master's accruals are 330 + 1500",
+                      inventory.find_unit_by_imei(conn, "356000000000555")["unit_cost_uah"] == 9200 and masters.accrued_total(conn, master) == 1830)
+            check("the finished order moved to «Производство: готовые»",
+                  f"/production/{order_id}" in client.get(f"/production?show=done&t={token}").text
+                  and f"/production/{order_id}" not in client.get(f"/production?t={token}").text)
+            journal = client.get(f"/journal?t={token}").text
+            check("the journal has the production document", f"ПР-{order_id:03d}" in journal and "Производство" in journal)
+            check("an unknown order id goes back to the list", client.get(f"/production/99999?t={token}", follow_redirects=False).status_code == 303)
+
+
+def scenario_repair_part_chat() -> None:
+    """The bot side of a client repair in Заход 5: приём с выбором мастера
+    на карточке, «Указать запчасть» в личке, «Готово» не закрывает ремонт,
+    пока не сказано, что установили."""
+    print("scenario: ремонт клиента в боте — мастер на карточке, «Указать запчасть», «Готово»")
+    import asyncio
+    from types import SimpleNamespace
+
+    from aiogram.fsm.context import FSMContext
+    from aiogram.fsm.storage.base import StorageKey
+    from aiogram.fsm.storage.memory import MemoryStorage
+
+    from bot import quick_actions as qa
+    from bot import repair_actions as ra
+    from core import stock_transfers, warehouses
+
+    OWNER_TG, MASTER_TG, GROUP = 883001, 883002, -100883
+
+    with tempfile.TemporaryDirectory() as tmp, _separate_base(tmp, "repair-chat.sqlite3", ("Мастерская",)) as db_path:
+        with get_conn(db_path) as conn:
+            conn.execute("UPDATE locations SET staff_group_chat_id = ? WHERE id = 1", (GROUP,))
+            owner = auth.create_staff(conn, "rc-owner", "pass", "Владелец", "owner")
+            auth.link_staff_telegram(conn, "rc-owner", OWNER_TG)
+            master = auth.create_master(conn, "Эдик", MASTER_TG, "percent", 33)
+            cell = inventory.create_cell(conn, "RC-1", None, None, location_id=1)
+            display = inventory.create_product(conn, "Дисплей", "RC-DSP", None, "шт", True, True, 0, 3000)
+            receipt = purchases.create_receipt(conn, None, None, owner, [(display, cell, 3, 1200)], location_id=1)
+            batch_id = purchases.get_receipt_batches(conn, receipt)[0]["id"]
+            master_wh = warehouses.master_warehouse(conn, master)["id"]
+            sent = stock_transfers.send(conn, warehouses.point_warehouse(conn, 1)["id"], master_wh, [(batch_id, cell, 2)], owner)
+            stock_transfers.receive(conn, sent, master)
+            clients.get_or_create_by_phone(conn, "Постоянный Клиент", "+380671110099", source="offline")
+            shifts.open_shift(conn, owner, 1)
+
+        photo_bytes = io.BytesIO()
+        Image.new("RGB", (40, 40), "white").save(photo_bytes, format="JPEG")
+        dms: list[dict] = []
+
+        class _Chat:
+            def __init__(self):
+                self.log, self._next = [], 700
+
+            def add(self, author, text, markup=None, kind="text"):
+                self._next += 1
+                self.log.append({"id": self._next, "author": author, "text": text, "markup": markup, "kind": kind})
+                return self._next
+
+            def delete(self, message_id):
+                self.log = [m for m in self.log if m["id"] != message_id]
+
+            def edit(self, message_id, text=None, markup=None, keep_text=False):
+                for m in self.log:
+                    if m["id"] == message_id:
+                        if not keep_text:
+                            m["text"] = text
+                        m["markup"] = markup
+
+        class _Bot:
+            def __init__(self, chat):
+                self.chat = chat
+
+            async def delete_message(self, chat_id, message_id):
+                self.chat.delete(message_id)
+
+            async def delete_messages(self, chat_id, message_ids):
+                for mid in message_ids:
+                    self.chat.delete(mid)
+
+            async def edit_message_text(self, chat_id, message_id, text, reply_markup=None):
+                self.chat.edit(message_id, text, reply_markup)
+
+            async def get_file(self, file_id):
+                return SimpleNamespace(file_path="x")
+
+            async def download_file(self, file_path):
+                return io.BytesIO(photo_bytes.getvalue())
+
+            async def send_message(self, chat_id, text, reply_markup=None, **kwargs):
+                dms.append({"to": chat_id, "text": text, "markup": reply_markup})
+
+        class _Msg:
+            def __init__(self, chat, bot, text=None, photo=False):
+                self._log, self.bot, self.text = chat, bot, text
+                self.photo = [SimpleNamespace(file_id="f")] if photo else None
+                self.chat = SimpleNamespace(id=OWNER_TG, type="private")
+                self.from_user = SimpleNamespace(id=OWNER_TG, full_name="Владелец")
+                self.message_id = chat.add("staff", text or "[фото]")
+
+            async def answer(self, text, reply_markup=None):
+                return SimpleNamespace(message_id=self._log.add("bot", text, reply_markup))
+
+            async def answer_photo(self, photo, caption=None, reply_markup=None):
+                return SimpleNamespace(message_id=self._log.add("bot", caption, reply_markup, kind="photo"))
+
+        class _CbMessage:
+            def __init__(self, chat, message_id, chat_id):
+                self._log, self.message_id = chat, message_id
+                self.chat = SimpleNamespace(id=chat_id, type="private" if chat_id > 0 else "supergroup")
+
+            async def answer(self, text, reply_markup=None):
+                return SimpleNamespace(message_id=self._log.add("bot", text, reply_markup))
+
+            async def edit_reply_markup(self, reply_markup=None):
+                self._log.edit(self.message_id, markup=reply_markup, keep_text=True)
+
+            async def edit_caption(self, caption=None, reply_markup=None):
+                self._log.edit(self.message_id, caption, reply_markup)
+
+            async def edit_text(self, text, reply_markup=None):
+                self._log.edit(self.message_id, text, reply_markup)
+
+        class _Cb:
+            def __init__(self, chat, bot, data, message_id, user_id, chat_id):
+                self.data, self.bot = data, bot
+                self.from_user = SimpleNamespace(id=user_id)
+                self.message = _CbMessage(chat, message_id, chat_id)
+                self.answered = []
+
+            async def answer(self, text=None, show_alert=False):
+                self.answered.append((text, show_alert))
+
+        def _buttons(markup) -> list[str]:
+            return [b.callback_data for row in markup.inline_keyboard for b in row if b.callback_data] if markup else []
+
+        async def run() -> None:
+            chat = _Chat()
+            bot = _Bot(chat)
+            state = FSMContext(storage=MemoryStorage(), key=StorageKey(bot_id=1, chat_id=OWNER_TG, user_id=OWNER_TG))
+            say = lambda text: _Msg(chat, bot, text)
+            screen = lambda: [m for m in chat.log if m["author"] == "bot"][-1]
+            tap = lambda data: _Cb(chat, bot, data, screen()["id"], OWNER_TG, OWNER_TG)
+
+            # ---- приём: знакомый клиент — имя не спрашиваем; мастер выбирается на карточке
+            await qa.repair_start(say(qa.BTN_REPAIR), state)
+            await qa.repair_got_photo(_Msg(chat, bot, photo=True), state)
+            await qa.repair_got_defect(say("Замена дисплея"), state)
+            await qa.repair_got_model(say("iPhone 13"), state)
+            await qa.repair_got_price(say("3000"), state)
+            await qa.repair_got_phone(say("067 111 00 99"), state)
+            card = screen()
+            check("a returning client's name is not asked again — straight to the card with it filled in",
+                  card["kind"] == "photo" and "Имя: Постоянный Клиент" in card["text"] and "Мастер: не назначен" in card["text"])
+            check("the card offers «Создать ремонт», «Мастер» and «Отмена»",
+                  set(_buttons(card["markup"])) == {"quick_repair_confirm", "rm_menu", "quick_repair_cancel"})
+            await qa.repair_master_menu(tap("rm_menu"), state)
+            check("«Мастер» turns the buttons into the list of masters", f"rm_set:{master}" in _buttons(screen()["markup"]) and "rm_set:0" in _buttons(screen()["markup"]))
+            await qa.repair_master_set(tap(f"rm_set:{master}"), state)
+            check("picking one rewrites the «Мастер» line and brings the buttons back",
+                  "Мастер: Эдик" in screen()["text"] and "quick_repair_confirm" in _buttons(screen()["markup"]))
+            await qa.repair_confirm(tap("quick_repair_confirm"), state)
+            with get_conn(db_path) as conn:
+                repair = repairs.list_repairs(conn)[0]
+                check("the repair is created for that client, with that master and price",
+                      repair["master_id"] == master and repair["price_estimate"] == 3000 and repair["client_name"] == "Постоянный Клиент")
+                repair_id = repair["id"]
+            check("the confirmation names the document", f"РК-{repair_id:03d} создан" in chat.log[-1]["text"])
+
+            # ---- группа: «Взять в работу» → «Готово» без запчасти не проходит
+            group_cb = lambda data, user: _Cb(chat, bot, data, 1, user, GROUP)
+            await ra.repair_take(group_cb(f"repair_take:{repair_id}", MASTER_TG))
+            done = group_cb(f"repair_done:{repair_id}", MASTER_TG)
+            await ra.repair_done(done)
+            with get_conn(db_path) as conn:
+                check("«Готово» with no part named does NOT close the repair",
+                      repairs.get_repair(conn, repair_id)["status"] == "in_progress" and done.answered[-1][1] is True
+                      and "укажите запчасть" in done.answered[-1][0])
+            picker = dms[-1]
+            check("instead the master gets the picker in his DM: what is on HIS склад, one button per партия, plus «Без запчасти»",
+                  picker["to"] == MASTER_TG and f"РК-{repair_id:03d}" in picker["text"]
+                  and _buttons(picker["markup"])[0].startswith(f"rp_pick:{repair_id}:{batch_id}:") and f"rp_none:{repair_id}" in _buttons(picker["markup"])
+                  and "2 шт" in picker["markup"].inline_keyboard[0][0].text)
+            stranger = group_cb(f"repair_part:{repair_id}", 4242)
+            await ra.repair_part(stranger)
+            check("someone who isn't staff can't open the picker", stranger.answered[-1][1] is True)
+
+            dm_id = chat.add("bot", picker["text"], picker["markup"])
+            dm_cb = lambda data, user=MASTER_TG: _Cb(chat, bot, data, dm_id, user, user)
+            pick_data = _buttons(picker["markup"])[0]
+            await ra.repair_part_pick(dm_cb(pick_data))
+            await asyncio.sleep(0.05)
+            with get_conn(db_path) as conn:
+                used = repairs.get_used_parts(conn, repair_id)
+                check("one tap writes off one piece of that партия from the master's склад",
+                      [(p["batch_id"], p["qty"], p["unit_cost"]) for p in used] == [(batch_id, 1, 1200)] and warehouses.total_qty(conn, master_wh) == 1)
+            dm = next(m for m in chat.log if m["id"] == dm_id)
+            check("the picker now shows what was written off and offers «Готово»",
+                  "Списано: Дисплей × 1" in dm["text"] and f"rp_done:{repair_id}" in _buttons(dm["markup"]))
+            other = dm_cb(pick_data, OWNER_TG)
+            await ra.repair_part_pick(other)
+            with get_conn(db_path) as conn:
+                check("an owner may add a part on the master's behalf (from the master's склад)", len(repairs.get_used_parts(conn, repair_id)) == 2)
+            await ra.repair_part_done(dm_cb(f"rp_done:{repair_id}"))
+            await asyncio.sleep(0.05)
+            with get_conn(db_path) as conn:
+                check("«Готово» from the picker closes the repair as готов к выдаче",
+                      repairs.get_repair(conn, repair_id)["status"] == "ready")
+            check("and the picker turns into a final line with no buttons",
+                  "Готов к выдаче" in next(m for m in chat.log if m["id"] == dm_id)["text"]
+                  and not next(m for m in chat.log if m["id"] == dm_id)["markup"])
+
+            # ---- «Без запчасти»
+            with get_conn(db_path) as conn:
+                client_id = clients.get_by_phone(conn, "+380671110099")["id"]
+                second = repairs.create_repair(conn, client_id, "Смартфон", None, "A54", None, "Чистка", "offline", master, 400, owner, location_id=1)
+                repairs.claim_repair(conn, second, master)
+            await ra.repair_part(group_cb(f"repair_part:{second}", MASTER_TG))
+            dm2 = chat.add("bot", dms[-1]["text"], dms[-1]["markup"])
+            await ra.repair_part_none(_Cb(chat, bot, f"rp_none:{second}", dm2, MASTER_TG, MASTER_TG))
+            await asyncio.sleep(0.05)
+            with get_conn(db_path) as conn:
+                check("«Без запчасти» is recorded", repairs.get_repair(conn, second)["no_parts"] == 1)
+            await ra.repair_done(group_cb(f"repair_done:{second}", MASTER_TG))
+            await asyncio.sleep(0.05)
+            with get_conn(db_path) as conn:
+                check("after that «Готово» in the group goes straight through", repairs.get_repair(conn, second)["status"] == "ready")
+
+            # ---- «Наш ремонт»
+            await qa.our_repair_start(say(qa.BTN_OUR_REPAIR), state)
+            check("«Наш ремонт» opens the Mini App pages (a web_app button)",
+                  "Наши ремонты" in screen()["text"] and screen()["markup"].inline_keyboard[0][0].web_app is not None)
+
+        asyncio.run(run())
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         db_path = os.path.join(tmp, "test.sqlite3")
@@ -5123,6 +5807,9 @@ def main() -> None:
     scenario_stock_http()
     scenario_transfer_chat()
     scenario_purchase_chat()
+    scenario_service_center()
+    scenario_service_center_http()
+    scenario_repair_part_chat()
     if os.path.exists(_WEBAPP_TEST_DB):
         os.remove(_WEBAPP_TEST_DB)
 

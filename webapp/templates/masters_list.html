@@ -50,6 +50,12 @@
       {% for l in locations %}<option value="{{ l.id }}">{{ l.name }}</option>{% endfor %}
     </select>
   </label>
+  <label>{{ t('master_kind_label') }}
+    <select name="master_kind">
+      {% for key in master_kinds %}<option value="{{ key }}" >{{ t('master_kind_' ~ key) }}</option>{% endfor %}
+    </select>
+  </label>
+  <label>{{ t('master_skills_label') }}<input type="text" name="skills" value="" placeholder="{{ t('master_skills_placeholder') }}"></label>
   <label>{{ t('pay_type_label') }}
     <select name="pay_type">
       <option value="">{{ t('pay_type_none_option') }}</option>

@@ -9,7 +9,9 @@ import uuid
 from core import clients as _clients
 from core import device_catalog as _device_catalog
 from core import documents as _documents
+from core import inventory as _inventory
 from core import locations as _locations
+from core import masters as _masters
 from core import notify as _notify
 from core import photos as _photos
 from core.storage import get_conn as _get_conn
@@ -138,6 +140,8 @@ def create_repair(
 def update_status(conn: sqlite3.Connection, order_id: int, new_status: str, staff_id: int, comment: str | None = None) -> None:
     if new_status not in STATUS_LABELS:
         raise ValueError(f"неизвестный статус: {new_status}")
+    previous = conn.execute("SELECT status FROM repair_orders WHERE id = ?", (order_id,)).fetchone()
+    previous_status = previous["status"] if previous else None
 
     timestamp_col = _TIMESTAMP_COLUMN.get(new_status)
     if timestamp_col:
@@ -152,6 +156,141 @@ def update_status(conn: sqlite3.Connection, order_id: int, new_status: str, staf
         "INSERT INTO repair_status_history (order_id, status, changed_by, comment) VALUES (?, ?, ?, ?)",
         (order_id, new_status, staff_id, comment),
     )
+    # «Выдан» is when the repair earns: the master's share is accrued and
+    # the document gets its profit. Moving it back out of «Выдан» undoes both.
+    if new_status == "issued" and previous_status != "issued":
+        settle(conn, order_id)
+    elif previous_status == "issued" and new_status != "issued":
+        unsettle(conn, order_id)
+
+
+# ---- запчасти и прибыль клиентского ремонта (Заход 5) ----
+#
+# «Клиентский телефон не является товаром фирмы» — the device itself never
+# enters stock; only the parts put into it leave it. A part comes from a
+# specific партия on the склад of whoever is doing the repair: the
+# master's own материально-ответственный склад (what he was handed is what
+# he may install), or — when the repair is done by someone who isn't a
+# master (an owner at the counter) — the склад of the точка that took the
+# repair in.
+
+class RepairPartError(Exception):
+    """A part operation that can't go ahead — message is shown to staff as-is."""
+
+
+def parts_warehouse(conn: sqlite3.Connection, repair: sqlite3.Row) -> sqlite3.Row | None:
+    """The склад this repair's parts are taken from (see above)."""
+    from core import warehouses as _warehouses  # local: warehouses imports storage only, kept out of module import order
+
+    if repair["master_id"]:
+        master = conn.execute("SELECT role FROM staff WHERE id = ?", (repair["master_id"],)).fetchone()
+        if master and master["role"] == "master":
+            own = _warehouses.master_warehouse(conn, repair["master_id"])
+            if own:
+                return own
+    return _warehouses.point_warehouse(conn, repair["location_id"] or _locations.default_location_id(conn))
+
+
+def available_parts(conn: sqlite3.Connection, order_id: int) -> list[dict]:
+    """What can be installed into this repair right now: repair-part
+    stock lines of its parts склад, with the quantity that is free (not
+    held for a производство order). One row per партия per cell."""
+    repair = get_repair(conn, order_id)
+    warehouse = parts_warehouse(conn, repair) if repair else None
+    if not warehouse:
+        return []
+    lines = []
+    for line in _inventory.stock_lines(conn, warehouse_id=warehouse["id"]):
+        free = line["qty"] - line["reserved"]
+        if line["is_repair_part"] and free > 0:
+            lines.append({**dict(line), "free": free})
+    return lines
+
+
+def use_part(conn: sqlite3.Connection, order_id: int, batch_id: int, cell_id: int, qty: int, staff_id: int) -> int:
+    """Install `qty` of a specific партия into the repair: it leaves the
+    parts склад for good, with that партия's cost snapshotted on the
+    movement — the cost the repair's profit is netted against."""
+    repair = get_repair(conn, order_id)
+    if not repair:
+        raise RepairPartError("Ремонт не найден.")
+    if repair["status"] in ("issued", "cancelled"):
+        raise RepairPartError("Ремонт уже закрыт — запчасть списать нельзя.")
+    if not qty or qty <= 0:
+        raise RepairPartError("Укажите количество.")
+    line = next(
+        (l for l in available_parts(conn, order_id) if l["batch_id"] == batch_id and l["cell_id"] == cell_id), None
+    )
+    if not line:
+        raise RepairPartError("Этой детали нет на складе исполнителя — выберите из списка.")
+    if qty > line["free"]:
+        raise RepairPartError(f"«{line['product_name']}»: свободно {line['free']}, нельзя списать {qty}.")
+    movement_id = _inventory.record_movement(
+        conn, line["product_id"], qty, "repair_use", staff_id, from_cell_id=cell_id,
+        ref_type="repair_order", ref_id=order_id, batch_id=batch_id,
+    )
+    conn.execute("UPDATE repair_orders SET no_parts = 0 WHERE id = ?", (order_id,))
+    return movement_id
+
+
+def declare_no_parts(conn: sqlite3.Connection, order_id: int) -> None:
+    """«Без запчасти» — the repair needed none (a cleaning, a firmware).
+    Said explicitly, so that «запчасть не указана» always means «forgot»."""
+    conn.execute("UPDATE repair_orders SET no_parts = 1 WHERE id = ?", (order_id,))
+
+
+def needs_part(conn: sqlite3.Connection, repair: sqlite3.Row) -> bool:
+    """In work or done, and nobody has said what was installed (or that
+    nothing was) — the «Нужна запчасть» flag."""
+    if repair["status"] not in ("in_progress", "ready") or repair["no_parts"]:
+        return False
+    return not get_used_parts(conn, repair["id"])
+
+
+def finance(conn: sqlite3.Connection, order_id: int) -> dict:
+    """The repair's money, as on the презентация's example: клиент
+    заплатил 3000 − запчасть 1200 = база 1800 → мастеру 33% = 594 →
+    прибыль фирмы 1206. Uses the final price (the estimate until there is
+    one) and the parts' snapshotted costs."""
+    repair = get_repair(conn, order_id)
+    price = repair["price_final"] or repair["price_estimate"] or 0
+    row = conn.execute(
+        """SELECT COALESCE(SUM(qty * COALESCE(unit_cost, 0)), 0) AS cost FROM stock_movements
+           WHERE ref_type = 'repair_order' AND ref_id = ? AND reason = 'repair_use'""",
+        (order_id,),
+    ).fetchone()
+    parts_cost = round(row["cost"], 2)
+    parts_cost = int(parts_cost) if parts_cost == int(parts_cost) else parts_cost
+    base = price - parts_cost
+    master = conn.execute(
+        "SELECT pay_type, pay_value FROM staff WHERE id = ?", (repair["master_id"],)
+    ).fetchone() if repair["master_id"] else None
+    share = _masters.repair_share(base, master["pay_type"], master["pay_value"]) if master else 0
+    return {
+        "price": price, "parts_cost": parts_cost, "base": base, "master_share": share,
+        "firm_profit": base - share,
+        "pay_type": master["pay_type"] if master else None, "pay_value": master["pay_value"] if master else None,
+        "is_final": bool(repair["price_final"]),
+    }
+
+
+def settle(conn: sqlite3.Connection, order_id: int) -> None:
+    """The repair is выдан: accrue the master's share and write the
+    document's profit. Safe to call again — it re-does both from scratch."""
+    repair = get_repair(conn, order_id)
+    numbers = finance(conn, order_id)
+    _masters.cancel_accruals(conn, "repair_order", order_id)
+    if repair["master_id"]:
+        _masters.accrue(
+            conn, repair["master_id"], "repair", "repair_order", order_id, numbers["master_share"],
+            comment=f"{_documents.label('repair', order_id)}: {numbers['base']} × ставка",
+        )
+    _documents.set_profit(conn, "repair", order_id, numbers["firm_profit"])
+
+
+def unsettle(conn: sqlite3.Connection, order_id: int) -> None:
+    _masters.cancel_accruals(conn, "repair_order", order_id)
+    _documents.set_profit(conn, "repair", order_id, None)
 
 
 def assign_master(conn: sqlite3.Connection, order_id: int, master_id: int | None) -> None:
@@ -225,9 +364,7 @@ def create_repair_intake(
         set_device_photo(conn, repair["device_id"], filename)
         photo_for_notify = (data, filename)
 
-    repair = get_repair(conn, order_id)
-    keyboard = render_keyboard(order_id, repair["status"])
-    card_text = render_card_text(repair)
+    card_text, keyboard = card(conn, order_id)
     return order_id, card_text, keyboard, photo_for_notify
 
 
@@ -403,41 +540,56 @@ def get_status_history(conn: sqlite3.Connection, order_id: int) -> list[sqlite3.
 
 def get_used_parts(conn: sqlite3.Connection, order_id: int) -> list[sqlite3.Row]:
     return conn.execute(
-        """SELECT stock_movements.*, products.name AS product_name
+        """SELECT stock_movements.*, products.name AS product_name, suppliers.name AS supplier_name
            FROM stock_movements
            JOIN products ON products.id = stock_movements.product_id
+           LEFT JOIN batches ON batches.id = stock_movements.batch_id
+           LEFT JOIN suppliers ON suppliers.id = batches.supplier_id
            WHERE stock_movements.ref_type = 'repair_order' AND stock_movements.ref_id = ?
            ORDER BY stock_movements.created_at DESC""",
         (order_id,),
     ).fetchall()
 
 
-def render_card_text(repair: sqlite3.Row) -> str:
+def render_card_text(repair: sqlite3.Row, parts: list | None = None) -> str:
     """HTML-formatted staff-group/topic card for a repair — shared by the
     web panel (on intake) and the bot (after a button press edits it in
     place), so the two channels never drift apart on wording. Escapes
     every user-supplied field: this goes out with parse_mode=HTML, and a
     device model or defect description is free text a client or master can
-    type anything into (same class of input as the repairs_list.html
-    device-catalog XSS fix, different sink — a Telegram message, not a
-    page)."""
+    type anything into.
+
+    Laid out as on the макет: «РК-101 • В работе», клиент, устройство,
+    работа, ответственный, запчасть. `parts` is get_used_parts() — pass it
+    whenever the repair may have any (card() below does); the «Запчасть»
+    line reads «не указана» while the repair is in work or done and
+    nobody has said what went in."""
     device = " ".join(filter(None, [repair["device_type"], repair["brand"], repair["model"]]))
-    channel_label = "Онлайн" if repair["channel"] == "online" else "Офлайн"
     master_label = html.escape(repair["master_name"]) if repair["master_name"] else "не назначен"
-    price_label = f"{repair['price_estimate']} грн" if repair["price_estimate"] else "не указана"
+    price = repair["price_final"] or repair["price_estimate"]
+    client = html.escape(repair["client_phone"] or "—")
+    if repair["client_name"] and repair["client_name"] != repair["client_phone"]:
+        client += f" · {html.escape(repair['client_name'])}"
 
     lines = [
-        f"🔧 <b>Ремонт №{repair['id']} — {STATUS_LABELS[repair['status']]}</b>",
+        f"🔧 <b>{_documents.label('repair', repair['id'])} • {STATUS_LABELS[repair['status']]}</b>",
         "",
-        f"Клиент: {html.escape(repair['client_name'])}",
-        f"Телефон: {html.escape(repair['client_phone'] or '—')}",
+        f"Клиент: {client}",
         f"Устройство: {html.escape(device)}",
     ]
     if repair["defect_description"]:
-        lines.append(f"Неисправность: {html.escape(repair['defect_description'])}")
-    lines.append(f"Мастер: {master_label}")
-    lines.append(f"Оценка: {price_label}")
-    lines.append(f"Канал: {channel_label}")
+        lines.append(f"Работа: {html.escape(repair['defect_description'])}")
+    lines.append(f"Ответственный: {master_label}")
+    if parts:
+        lines.append("Запчасть: " + "; ".join(
+            f"{html.escape(p['product_name'])} × {p['qty']}" + (f" (партия {p['batch_id']})" if p["batch_id"] else "")
+            for p in parts
+        ))
+    elif repair["no_parts"]:
+        lines.append("Запчасть: без запчасти")
+    elif repair["status"] in ("in_progress", "ready"):
+        lines.append("Запчасть: <b>не указана</b>")
+    lines.append(f"Цена: {price} грн" if price else "Цена: не указана")
 
     timestamp_label = _STATUS_TIMESTAMP_LABEL.get(repair["status"])
     timestamp_col = _TIMESTAMP_COLUMN.get(repair["status"])
@@ -445,6 +597,12 @@ def render_card_text(repair: sqlite3.Row) -> str:
         lines.append(f"{timestamp_label}: {kyiv_datetime(repair[timestamp_col])}")
 
     return "\n".join(lines)
+
+
+def card(conn: sqlite3.Connection, order_id: int) -> tuple[str, dict]:
+    """(text, keyboard) of a repair's card as it should look right now."""
+    repair = get_repair(conn, order_id)
+    return render_card_text(repair, get_used_parts(conn, order_id)), render_keyboard(order_id, repair["status"])
 
 
 def render_keyboard(order_id: int, status: str) -> dict:
@@ -466,8 +624,13 @@ def render_keyboard(order_id: int, status: str) -> dict:
         rows.append([{"text": "🔧 Взять в работу", "callback_data": f"repair_take:{order_id}"}])
     elif status == "in_progress":
         rows.append([
-            {"text": "✅ Готов к выдаче", "callback_data": f"repair_done:{order_id}"},
-            {"text": "❌ Не удалось починить", "callback_data": f"repair_release:{order_id}"},
+            {"text": "⚙️ Указать запчасть", "callback_data": f"repair_part:{order_id}"},
+            {"text": "✅ Готово", "callback_data": f"repair_done:{order_id}"},
         ])
+        rows.append([{"text": "❌ Не удалось починить", "callback_data": f"repair_release:{order_id}"}])
+    elif status == "ready":
+        # Done, but what was installed can still be said (or corrected)
+        # until the device is handed over.
+        rows.append([{"text": "⚙️ Указать запчасть", "callback_data": f"repair_part:{order_id}"}])
     rows.append([{"text": "🔗 Открыть в CRM", "callback_data": f"open_crm:repair:{order_id}"}])
     return {"inline_keyboard": rows}

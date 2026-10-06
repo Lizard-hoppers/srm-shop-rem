@@ -13,6 +13,7 @@ from core import storage as _storage
 _ITERATIONS = 260_000
 
 PAY_TYPES = {"percent": "Процент от прибыли", "fixed": "Фиксированная ставка за ремонт"}
+MASTER_KINDS = {"staff": "Штатный", "outsource": "Аутсорс"}
 
 
 def hash_password(password: str) -> str:
@@ -99,6 +100,8 @@ def create_master(
     pay_type: str | None,
     pay_value: int | None,
     location_id: int | None = None,
+    master_kind: str = "staff",
+    skills: str | None = None,
 ) -> int:
     base_login = _slugify_login(name)
     login, suffix = base_login, 0
@@ -106,9 +109,11 @@ def create_master(
         suffix += 1
         login = f"{base_login}-{suffix}"
     cur = conn.execute(
-        """INSERT INTO staff (login, password_hash, name, role, telegram_id, pay_type, pay_value, location_id)
-           VALUES (?, ?, ?, 'master', ?, ?, ?, ?)""",
-        (login, hash_password(secrets.token_hex(16)), name.strip(), telegram_id, pay_type, pay_value, location_id),
+        """INSERT INTO staff (login, password_hash, name, role, telegram_id, pay_type, pay_value, location_id,
+                              master_kind, skills)
+           VALUES (?, ?, ?, 'master', ?, ?, ?, ?, ?, ?)""",
+        (login, hash_password(secrets.token_hex(16)), name.strip(), telegram_id, pay_type, pay_value, location_id,
+         master_kind if master_kind in MASTER_KINDS else "staff", (skills or "").strip() or None),
     )
     # Every master has a материально-ответственный склад from the moment
     # he exists (core.warehouses) — parts handed to him land there.
@@ -140,12 +145,21 @@ def update_master(
     pay_type: str | None,
     pay_value: int | None,
     location_id: int | None = None,
+    master_kind: str | None = None,
+    skills: str | None = None,
 ) -> None:
     conn.execute(
         "UPDATE staff SET name = ?, telegram_id = ?, pay_type = ?, pay_value = ?, location_id = ? "
         "WHERE id = ? AND role = 'master'",
         (name.strip(), telegram_id, pay_type, pay_value, location_id, staff_id),
     )
+    # Штатный/аутсорс and skills are only touched when the caller says so
+    # (the «Мастера» form does) — older callers don't reset them.
+    if master_kind is not None:
+        conn.execute(
+            "UPDATE staff SET master_kind = ?, skills = ? WHERE id = ? AND role = 'master'",
+            (master_kind if master_kind in MASTER_KINDS else "staff", (skills or "").strip() or None, staff_id),
+        )
     _storage.ensure_master_warehouse(conn, staff_id, name.strip())
 
 

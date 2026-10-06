@@ -84,24 +84,57 @@
         <thead><tr><th>{{ t('part_col') }}</th><th>{{ t('qty_col') }}</th><th>{{ t('when_col') }}</th></tr></thead>
         <tbody>
           {% for p in parts %}
-          <tr><td>{{ p.product_name }}</td><td>{{ p.qty }}</td><td>{{ p.created_at | kyiv }}</td></tr>
+          <tr><td>{{ p.product_name }}{% if p.batch_id %}<div class="meta">{{ t('batch_col') }} №{{ p.batch_id }}{% if p.supplier_name %} · {{ p.supplier_name }}{% endif %}{% if p.unit_cost is not none %} · {{ p.unit_cost | money }} грн{% endif %}</div>{% endif %}</td><td>{{ p.qty }}</td><td>{{ p.created_at | kyiv }}</td></tr>
           {% else %}
           <tr><td colspan="3">{{ t('no_parts_used') }}</td></tr>
           {% endfor %}
         </tbody>
       </table>
 </div>
-      <form method="post" action="{{ link('/repairs/' ~ repair.id ~ '/parts') }}" class="inline-form" style="margin-top: 10px;">
-        <select name="product_id" required>
-          {% for p in products %}<option value="{{ p.id }}">{{ p.name }}</option>{% endfor %}
-        </select>
-        <select name="cell_id" required>
-          {% for c in cells %}<option value="{{ c.id }}">{{ c.code }}</option>{% endfor %}
-        </select>
-        <input type="number" name="qty" min="1" value="1" required style="width: 70px;">
-        <button type="submit">{{ t('writeoff_btn') }}</button>
+      {% if needs_part %}<p style="margin:10px 0 0;"><span class="pill pill-new">{{ t('repair_needs_part') }}</span></p>{% endif %}
+      {% if repair.no_parts and not parts %}<p class="meta" style="margin:10px 0 0;">{{ t('repair_no_parts_set') }}</p>{% endif %}
+      {% if repair.status not in ('issued', 'cancelled') %}
+      <p class="meta" style="margin:10px 0 0;">{{ t('repair_parts_from') }} {{ parts_from or '—' }}</p>
+      {% if part_lines %}
+      <form method="post" action="{{ link('/repairs/' ~ repair.id ~ '/parts') }}" class="edit-form" style="margin-top: 6px;">
+        <label>{{ t('part_col') }}
+          <div style="display:flex; gap:6px;">
+            <select name="line" required style="flex:1; min-width:0;">
+              {% for l in part_lines %}<option value="{{ l.batch_id }}:{{ l.cell_id }}">{{ l.product_name }} · {{ t('batch_col') }} №{{ l.batch_id }}{% if l.supplier_name %} · {{ l.supplier_name }}{% endif %} · {{ l.free }} {{ l.unit }}</option>{% endfor %}
+            </select>
+            <input type="number" name="qty" min="1" value="1" required style="width:80px; flex:0 0 auto;">
+          </div>
+        </label>
+        <button type="submit" class="secondary">{{ t('writeoff_btn') }}</button>
       </form>
+      {% else %}
+      <p class="meta">{{ t('repair_no_part_lines') }}</p>
+      {% endif %}
+      {% if not parts and not repair.no_parts %}
+      <form method="post" action="{{ link('/repairs/' ~ repair.id ~ '/no-parts') }}" style="margin-top: 8px;">
+        <button type="submit" class="secondary">{{ t('repair_no_parts_btn') }}</button>
+      </form>
+      {% endif %}
+      {% endif %}
     </div>
+
+    {% if finance and staff.role in ('owner', 'admin') %}
+    <div class="panel-box" style="margin-top: 16px;">
+      <h3>{{ t('repair_finance_title') }}</h3>
+      <div class="table-scroll">
+      <table class="table">
+        <tbody>
+          <tr><td>{{ t('repair_finance_price') if finance.is_final else t('repair_finance_estimate') }}</td><td>{{ finance.price | money }} грн</td></tr>
+          <tr><td>{{ t('parts_cost_label') }}</td><td>{{ finance.parts_cost | money }} грн</td></tr>
+          <tr><td>{{ t('repair_finance_base') }}</td><td>{{ finance.base | money }} грн</td></tr>
+          <tr><td>{{ t('repair_finance_master') }}{% if finance.pay_type == 'percent' %} {{ finance.pay_value }}%{% endif %}</td><td>{{ finance.master_share | money }} грн</td></tr>
+          <tr><td><b>{{ t('repair_finance_firm') }}</b></td><td><b>{{ finance.firm_profit | money }} грн</b></td></tr>
+        </tbody>
+      </table>
+      </div>
+      {% if repair.status != 'issued' %}<p class="meta">{{ t('repair_finance_hint') }}</p>{% endif %}
+    </div>
+    {% endif %}
 
     {% if attachments %}
     <div class="panel-box" style="margin-top: 16px;">
