@@ -5755,6 +5755,558 @@ def scenario_repair_part_chat() -> None:
         asyncio.run(run())
 
 
+def scenario_settlements() -> None:
+    """Заход 6 core: взаиморасчёты, продажа в долг, приём/выдача денег,
+    сверка, заказ с резервом на 24 часа, выплата мастеру."""
+    print("scenario: взаиморасчёты, продажа в долг, заказы с резервом 24 ч, выплата мастеру")
+    from core import orders, settlements
+
+    with tempfile.TemporaryDirectory() as tmp, _separate_base(tmp, "settle.sqlite3", ("Магазин",)) as db_path:
+        with get_conn(db_path) as conn:
+            owner = auth.create_staff(conn, "st-owner", "pass", "Владелец", "owner")
+            master = auth.create_master(conn, "Эдик", None, "percent", 33)
+            cell = inventory.create_cell(conn, "ST-1", None, None, location_id=1)
+            cable = inventory.create_product(conn, "Кабель", "ST-CBL", None, "шт", False, True, 0, 300)
+            purchases.create_receipt(conn, None, None, owner, [(cable, cell, 10, 100)], location_id=1)
+            acc = {(a["kind"], a["currency"]): a["id"] for a in accounts.list_accounts(conn, 1)}
+            cash_uah, usd = acc[("cash", "UAH")], acc[("cash", "USD")]
+            cash.record_adjustment(conn, 20000, "старт", owner, location_id=1)
+            anna = clients.get_or_create_by_phone(conn, "Анна", "+380671230001", source="offline")
+
+            # ---- обычная продажа: в сверке обе строки, баланс 0, прибыль у документа
+            paid_sale = sales.create_sale(conn, anna, "offline", owner, [(cable, 2, 300)], location_id=1)
+            check("a sale paid on the spot leaves the client's balance at zero",
+                  settlements.balance(conn, anna) == 0 and settlements.client_position(conn, anna) == {"balance": 0, "they_owe": 0, "we_owe": 0})
+            check("the sale's document carries its profit: 600 − 2 × 100", documents.get_for(conn, "sale", paid_sale)["profit"] == 400)
+
+            # ---- в долг
+            try:
+                sales.create_sale(conn, None, "offline", owner, [(cable, 1, 300)], location_id=1, payments=[], allow_debt=True)
+                check("a sale «в долг» needs a client", False)
+            except sales.SaleError as exc:
+                check("a sale «в долг» needs a client", "номером телефона" in str(exc))
+            try:
+                sales.create_sale(conn, anna, "offline", owner, [(cable, 1, 300)], location_id=1, payments=[(cash_uah, "500", None)], allow_debt=True)
+                check("paying MORE than the total is still an error", False)
+            except cash.PaymentError:
+                check("paying MORE than the total is still an error", True)
+            try:
+                sales.create_sale(conn, anna, "offline", owner, [(cable, 1, 300)], location_id=1, payments=[(cash_uah, "100", None)])
+                check("without «в долг» a short payment is refused as before", False)
+            except cash.PaymentError:
+                check("without «в долг» a short payment is refused as before", True)
+            check("none of the refusals left anything behind",
+                  inventory.product_total_qty(conn, cable, 1) == 8 and settlements.balance(conn, anna) == 0 and accounts.balance(conn, cash_uah) == 20600)
+            part = sales.create_sale(conn, anna, "offline", owner, [(cable, 2, 300)], location_id=1, payments=[(cash_uah, "200", None)], allow_debt=True)
+            check("part paid: 200 into the касса, 400 onto the client's balance («нам должны»)",
+                  accounts.balance(conn, cash_uah) == 20800 and settlements.client_position(conn, anna)["they_owe"] == 400
+                  and sales.sale_numbers(conn, part) == {"total": 600, "paid": 200, "debt": 400})
+            nothing = sales.create_sale(conn, anna, "offline", owner, [(cable, 1, 300)], location_id=1, payments=[], allow_debt=True)
+            check("nothing paid: the whole sale is debt, and it is marked so",
+                  settlements.balance(conn, anna) == 700 and sales.get_sale(conn, nothing)["payment_method"] == "debt"
+                  and accounts.balance(conn, cash_uah) == 20800)
+
+            # ---- «Принять деньги» / «Выдать деньги»
+            for call, label in (
+                (lambda: settlements.receive_money(conn, anna, [], staff_id=owner, location_id=1), "«Принять деньги» with no amount is refused"),
+                (lambda: settlements.receive_money(conn, anna, [(usd, "10", None)], staff_id=owner, location_id=1), "a foreign-currency part needs a rate"),
+            ):
+                try:
+                    call()
+                    check(label, False)
+                except (settlements.SettlementError, cash.PaymentError):
+                    check(label, True)
+            entry = settlements.receive_money(conn, anna, [(cash_uah, "300", None), (usd, "5", "40")], staff_id=owner, location_id=1, comment="за кабели")
+            doc_in = conn.execute("SELECT * FROM documents WHERE doc_type = 'cash_in' AND ref_id = ?", (entry,)).fetchone()
+            check("«Принять деньги»: 300 грн + 5 $ × 40 = 500 off the debt, each onto its account, one ПКО",
+                  settlements.balance(conn, anna) == 200 and accounts.balance(conn, cash_uah) == 21100 and accounts.balance(conn, usd) == 5
+                  and documents.doc_label(doc_in) == "ПКО-001" and doc_in["amount"] == 500 and doc_in["client_id"] == anna)
+            doc_cancel.cancel_document(conn, doc_in["id"], owner, "ошиблись клиентом")
+            check("cancelling the ПКО puts both the money and the debt back",
+                  settlements.balance(conn, anna) == 700 and accounts.balance(conn, cash_uah) == 20800 and accounts.balance(conn, usd) == 0)
+            settlements.receive_money(conn, anna, [(cash_uah, "1000", None)], staff_id=owner, location_id=1)
+            check("paying more than the debt makes it an аванс («мы должны» 300)",
+                  settlements.client_position(conn, anna) == {"balance": -300, "they_owe": 0, "we_owe": 300})
+            out = settlements.pay_out_money(conn, anna, [(cash_uah, "300", None)], staff_id=owner, location_id=1, comment="возврат аванса")
+            doc_out = conn.execute("SELECT * FROM documents WHERE doc_type = 'cash_out' AND ref_table = 'client_ledger' AND ref_id = ?", (out,)).fetchone()
+            check("«Выдать деньги» is an РКО that brings the balance back to zero",
+                  settlements.balance(conn, anna) == 0 and accounts.balance(conn, cash_uah) == 21500 and doc_out is not None
+                  and documents.doc_label(doc_out).startswith("РКО-"))
+            doc_cancel.cancel_document(conn, doc_out["id"], owner, "не выдали")
+            check("…and cancelling that РКО restores both", settlements.balance(conn, anna) == -300 and accounts.balance(conn, cash_uah) == 21800)
+
+            # ---- сверка
+            today = timefmt.kyiv_today()
+            st = settlements.statement(conn, anna, today, today)
+            check("«Сверка за период»: opening 0, every live row with a running balance, closing = the balance",
+                  st["opening"]["balance"] == 0 and st["closing"]["balance"] == -300 and st["rows"][-1]["balance"] == -300
+                  and st["charged"] == 600 + 600 + 300 and st["paid"] == 600 + 200 + 1000 and len(st["rows"]) == 6)
+            check("cancelled rows are not in it", all(r["comment"] != "за кабели" for r in st["rows"]))
+            later = settlements.statement(conn, anna, "2099-01-01", "2099-01-02")
+            check("a later period opens with today's balance and has no rows", later["opening"]["balance"] == -300 and later["rows"] == [])
+            check("the list of non-zero balances has her", [(d["id"], d["balance"]) for d in settlements.debtors(conn)] == [(anna, -300)])
+            doc_cancel.cancel_document(conn, documents.get_for(conn, "sale", nothing)["id"], owner, "вернул")
+            check("cancelling a sale takes its charge off the balance too", settlements.balance(conn, anna) == -600)
+
+            # ---- покупка у клиента: в сверке видна, баланс не меняет
+            seller = buyback.create_purchase(conn, seller_phone="0671230002", model="iPhone 12", imei="357000000000001",
+                                             comment=None, price="4000", staff_id=owner, location_id=1)
+            seller_id = buyback.get_buyback_order(conn, seller)["client_id"]
+            st2 = settlements.statement(conn, seller_id, today, today)
+            check("a покупка shows in the seller's сверка as owed and paid, net zero",
+                  settlements.balance(conn, seller_id) == 0 and (st2["charged"], st2["paid"]) == (4000, 4000))
+
+            # ---- заказ: резерв 24 ч, «Оплатить» и «Выдать» отдельно
+            boris = clients.get_or_create_by_phone(conn, "Борис", "+380671230003", source="offline")
+            for items, needle, label in (
+                ([], "хотя бы один", "an empty заказ is refused"),
+                ([(cable, 99, 300)], "свободно только", "more than is free is refused"),
+            ):
+                try:
+                    orders.create_order(conn, boris, items, owner, location_id=1)
+                    check(label, False)
+                except orders.OrderError as exc:
+                    check(label, needle in str(exc))
+            stock_before = inventory.product_total_qty(conn, cable, 1)
+            order_id = orders.create_order(conn, boris, [(cable, 3, 300)], owner, location_id=1)
+            order = orders.get_order(conn, order_id)
+            check("the заказ holds its goods for 24 hours and has its own document",
+                  order["status"] == "reserved" and order["total"] == 900
+                  and documents.doc_label(documents.get_for(conn, "client_order", order_id)) == f"ЗК-{order_id:03d}"
+                  and conn.execute("SELECT (julianday(?) - julianday('now')) * 24 AS h", (order["reserved_until"],)).fetchone()["h"] > 23.9)
+            check("held goods are still on the shelf, but only the rest can be sold",
+                  inventory.product_total_qty(conn, cable, 1) == stock_before == 6)
+            try:
+                sales.create_sale(conn, None, "offline", owner, [(cable, 4, 300)], location_id=1)
+                check("a sale can't take what the заказ holds", False)
+            except inventory.InsufficientStockError:
+                check("a sale can't take what the заказ holds", True)
+            try:
+                orders.pay(conn, order_id, [(cash_uah, "1000", None)], owner)
+                check("paying more than the заказ costs is refused", False)
+            except orders.OrderError as exc:
+                check("paying more than the заказ costs is refused", "осталось 900" in str(exc))
+            orders.pay(conn, order_id, [(cash_uah, "400", None)], owner)
+            check("«Оплатить»: 400 is an аванс on the client's balance, counted towards the заказ",
+                  orders.numbers(conn, order_id) == {"total": 900, "paid": 400, "left": 500}
+                  and settlements.client_position(conn, boris)["we_owe"] == 400 and inventory.product_total_qty(conn, cable, 1) == 6)
+            try:
+                orders.issue(conn, order_id, owner, payments=[(cash_uah, "600", None)])
+                check("at «Выдать» the client can't pay more than is left", False)
+            except orders.OrderError:
+                check("at «Выдать» the client can't pay more than is left", True)
+            sale_id = orders.issue(conn, order_id, owner, payments=[(cash_uah, "300", None)])
+            order = orders.get_order(conn, order_id)
+            check("«Выдать»: the заказ is now a sale of exactly what it held",
+                  order["status"] == "issued" and order["sale_id"] == sale_id and inventory.product_total_qty(conn, cable, 1) == 3
+                  and [(i["qty"], i["price"]) for i in sales.get_sale_items(conn, sale_id)] == [(3, 300)])
+            check("900 charged − 400 prepaid − 300 at handover = 200 «нам должны»; nothing is held any more",
+                  settlements.client_position(conn, boris)["they_owe"] == 200
+                  and conn.execute("SELECT COUNT(*) AS n FROM stock_reservations WHERE ref_type = 'client_order' AND released_at IS NULL").fetchone()["n"] == 0)
+            try:
+                orders.issue(conn, order_id, owner)
+                check("it can't be выдан twice", False)
+            except orders.OrderError:
+                check("it can't be выдан twice", True)
+            doc_cancel.cancel_document(conn, documents.get_for(conn, "sale", sale_id)["id"], owner, "вернул всё")
+            check("cancelling that sale returns the goods and the 300 taken at handover, closes the заказ; the 400 предоплата stays his аванс",
+                  inventory.product_total_qty(conn, cable, 1) == 6 and orders.get_order(conn, order_id)["status"] == "cancelled"
+                  and settlements.client_position(conn, boris)["we_owe"] == 400 and _stock_is_consistent(conn))
+
+            # ---- серийный товар, автоснятие и продление
+            unit = inventory.find_unit_by_imei(conn, "357000000000001")
+            try:
+                orders.create_order(conn, boris, [(unit["product_id"], 1, 6000)], owner, location_id=1)
+                check("a serial product in a заказ must name its IMEI", False)
+            except orders.OrderError as exc:
+                check("a serial product in a заказ must name its IMEI", "IMEI" in str(exc))
+            phone_order = orders.create_order(conn, boris, [(unit["product_id"], 1, 6000, unit["id"])], owner, location_id=1)
+            try:
+                sales.create_sale(conn, None, "offline", owner, [(unit["product_id"], 1, 6000, unit["id"])], location_id=1)
+                check("a phone held for a заказ can't be sold to someone else", False)
+            except inventory.InsufficientStockError:
+                check("a phone held for a заказ can't be sold to someone else", True)
+            orders.pay(conn, phone_order, [(cash_uah, "1000", None)], owner)
+
+            def _age(order: int) -> None:
+                conn.execute("UPDATE client_orders SET reserved_until = datetime('now', '-1 minute') WHERE id = ?", (order,))
+                conn.execute("UPDATE stock_reservations SET expires_at = datetime('now', '-1 minute') WHERE ref_type = 'client_order' AND ref_id = ?", (order,))
+
+            _age(phone_order)
+            check("24 hours on, the hold no longer counts even before anyone looks",
+                  inventory.available_qty(conn, unit["id"], unit["cell_id"]) == 1)
+            check("«автоснятие»: the заказ becomes «Резерв истёк»",
+                  orders.expire_due(conn) == [phone_order] and orders.get_order(conn, phone_order)["status"] == "expired" and orders.expire_due(conn) == [])
+            try:
+                orders.issue(conn, phone_order, owner)
+                check("an expired заказ can't be выдан as is", False)
+            except orders.OrderError as exc:
+                check("an expired заказ can't be выдан as is", "Резерв истёк" in str(exc))
+            orders.extend(conn, phone_order, owner)
+            check("«Продлить резерв» brings it back for another 24 hours while the phone is still free",
+                  orders.get_order(conn, phone_order)["status"] == "reserved" and inventory.available_qty(conn, unit["id"], unit["cell_id"]) == 0
+                  and orders.numbers(conn, phone_order)["paid"] == 1000)
+            _age(phone_order)
+            orders.expire_due(conn)
+            sales.create_sale(conn, None, "offline", owner, [(unit["product_id"], 1, 6500, unit["id"])], location_id=1)
+            try:
+                orders.extend(conn, phone_order, owner)
+                check("once the phone is sold to someone else the заказ can't be revived", False)
+            except orders.OrderError as exc:
+                check("once the phone is sold to someone else the заказ can't be revived", "уже нет" in str(exc))
+            doc_cancel.cancel_document(conn, documents.get_for(conn, "client_order", phone_order)["id"], owner, "товар ушёл")
+            check("the заказ can be cancelled from the journal; its предоплата stays the client's аванс",
+                  orders.get_order(conn, phone_order)["status"] == "cancelled" and documents.get_for(conn, "client_order", phone_order)["status"] == "cancelled"
+                  and settlements.client_position(conn, boris)["we_owe"] == 1400)
+            direct = orders.create_order(conn, boris, [(cable, 1, 300)], owner, location_id=1)
+            orders.cancel(conn, direct, owner)
+            check("«Отменить заказ» frees the goods and marks the document",
+                  orders.get_order(conn, direct)["status"] == "cancelled" and documents.get_for(conn, "client_order", direct)["status"] == "cancelled"
+                  and [o["id"] for o in orders.list_orders(conn, statuses=("reserved",))] == []
+                  and len(orders.list_orders(conn, client_id=boris)) == 3)
+
+            # ---- выплата мастеру
+            masters.accrue(conn, master, "repair", "repair_order", 1, 1000, comment="РК-001")
+            check("начислено 1000, выплачено 0 — мы должны 1000", masters.owed(conn, master) == 1000 and masters.paid_total(conn, master) == 0)
+            for call, label in (
+                (lambda: masters.pay_out(conn, master, [], paid_by=owner, location_id=1), "a payout with no amount is refused"),
+                (lambda: masters.pay_out(conn, owner, [(cash_uah, "10", None)], paid_by=owner, location_id=1), "only a master can be paid out"),
+            ):
+                try:
+                    call()
+                    check(label, False)
+                except masters.PayoutError:
+                    check(label, True)
+            before = accounts.balance(conn, cash_uah)
+            payout = masters.pay_out(conn, master, [(cash_uah, "600", None)], paid_by=owner, location_id=1, comment="за неделю")
+            payout_doc = conn.execute("SELECT * FROM documents WHERE ref_table = 'master_payouts' AND ref_id = ?", (payout,)).fetchone()
+            check("«Выплата мастеру»: 600 leaves the касса as an РКО, we owe him 400",
+                  masters.owed(conn, master) == 400 and masters.paid_total(conn, master) == 600 and accounts.balance(conn, cash_uah) == before - 600
+                  and payout_doc["doc_type"] == "cash_out" and "Эдик" in payout_doc["title"]
+                  and [p["amount"] for p in masters.list_payouts(conn, master)] == [600])
+            doc_cancel.cancel_document(conn, payout_doc["id"], owner, "не выдали")
+            check("cancelling it puts the money back and the debt to him back to 1000",
+                  masters.owed(conn, master) == 1000 and accounts.balance(conn, cash_uah) == before)
+
+
+def scenario_settlements_http() -> None:
+    print("scenario: взаиморасчёты over HTTP — продажа в долг, заказ, карточка клиента, сверка, выплата мастеру")
+    from core import orders, settlements
+
+    with tempfile.TemporaryDirectory() as tmp, _separate_base(tmp, "settle-http.sqlite3", ("Магазин",)) as db_path:
+        with get_conn(db_path) as conn:
+            owner = auth.create_staff(conn, "sh6-owner", "pass", "Владелец", "owner")
+            seller = auth.create_staff(conn, "sh6-seller", "pass", "Продавец", "storekeeper", location_id=1)
+            master = auth.create_master(conn, "Эдик", None, "percent", 33)
+            cell = inventory.create_cell(conn, "S6-1", None, None, location_id=1)
+            cable = inventory.create_product(conn, "Кабель", "S6-CBL", None, "шт", False, True, 0, 300)
+            purchases.create_receipt(conn, None, None, owner, [(cable, cell, 10, 100)], location_id=1)
+            cash.record_adjustment(conn, 20000, "старт", owner, location_id=1)
+            acc = {(a["kind"], a["currency"]): a["id"] for a in accounts.list_accounts(conn, 1)}
+            cash_uah = acc[("cash", "UAH")]
+            masters.accrue(conn, master, "repair", "repair_order", 1, 1000, comment="РК-001")
+        token, seller_token = make_token(owner, "1"), make_token(seller, "1")
+
+        import webapp.main
+
+        def sale_form(**extra) -> dict:
+            return {"row_count": "1", "product_id_0": str(cable), "product_name_0": "Кабель", "qty_0": "2", "price_0": "300",
+                    "channel": "offline", **extra}
+
+        with TestClient(webapp.main.app) as client:
+            page = client.get(f"/sales?t={token}").text
+            check("the sale form has «В долг», «Отложить на 24 часа» and the Продажи/Заказы tabs",
+                  'name="allow_debt"' in page and "Отложить на 24 часа" in page and "/orders" in page)
+            no_client = client.post(f"/sales?t={token}", data=sale_form(allow_debt="1", client_phone="+380"))
+            check("«в долг» without a phone is a friendly error", no_client.status_code == 200 and "укажите его номер" in no_client.text)
+            made = client.post(f"/sales?t={token}", data=sale_form(
+                allow_debt="1", client_name="Анна", client_phone="0671230010", **{f"pay_{cash_uah}": "200"}), follow_redirects=False)
+            sale_id = int(made.headers["location"].split("/sales/")[1].split("?")[0])
+            with get_conn(db_path) as conn:
+                anna = clients.get_by_phone(conn, "+380671230010")["id"]
+                check("the sale went through with 200 paid and 400 on the client's balance",
+                      settlements.client_position(conn, anna)["they_owe"] == 400 and accounts.balance(conn, cash_uah) == 20200)
+            detail = client.get(f"/sales/{sale_id}?t={token}").text
+            check("the sale's page says what was paid and what went into debt, and links to the client",
+                  "Оплачено при продаже: 200 грн из 600" in detail and "400 грн" in detail and f"/clients/{anna}" in detail)
+
+            # ---- карточка клиента
+            card = client.get(f"/clients/{anna}?t={token}").text
+            check("the client's card shows the balance, the документ with its profit, and the макет's actions",
+                  "нам должны" in card and ">400 грн<" in card and f"ПД-{sale_id:03d}" in card and "Прибыль" in card
+                  and all(x in card for x in ("Купить", "Продать", "Принять деньги", "Выдать деньги", "Сверка за период"))
+                  and "/buyback?phone=%2B380671230010" in card and "/sales?phone=%2B380671230010" in card)
+            seller_card = client.get(f"/clients/{anna}?t={seller_token}").text
+            check("a non-owner sees the balance but neither profit nor «Выдать деньги»",
+                  "нам должны" in seller_card and "прибыль по документам" not in seller_card and "/money-out" not in seller_card)
+            check("«Продать» / «Купить» open their forms with the client filled in",
+                  'name="client_phone" value="+380671230010"' in client.get(f"/sales?phone=%2B380671230010&name=Анна&t={token}").text
+                  and 'name="seller_phone" value="+380671230010"' in client.get(f"/buyback?phone=%2B380671230010&t={token}").text)
+            empty = client.post(f"/clients/{anna}/money-in?t={seller_token}", data={})
+            check("«Принять деньги» with no amount is a friendly error on the card", empty.status_code == 200 and "Укажите сумму" in empty.text)
+            idem = "abc123in"
+            for _ in range(2):
+                client.post(f"/clients/{anna}/money-in?t={seller_token}", data={f"pay_{cash_uah}": "1000", "comment": "за кабели", "idem": idem})
+            with get_conn(db_path) as conn:
+                check("«Принять деньги» posts once even when sent twice: debt gone, 600 аванс",
+                      settlements.client_position(conn, anna)["we_owe"] == 600 and accounts.balance(conn, cash_uah) == 21200)
+            denied = client.post(f"/clients/{anna}/money-out?t={seller_token}", data={f"pay_{cash_uah}": "600"})
+            check("a seller can't hand money out", "владелец или админ" in denied.text)
+            client.post(f"/clients/{anna}/money-out?t={token}", data={f"pay_{cash_uah}": "600", "comment": "возврат"})
+            with get_conn(db_path) as conn:
+                check("the owner can: balance back to zero", settlements.balance(conn, anna) == 0 and accounts.balance(conn, cash_uah) == 20600)
+            statement = client.get(f"/clients/{anna}/statement?t={token}").text
+            check("«Сверка за период» lists the sale, its payment, the ПКО and the РКО with turnovers",
+                  all(x in statement for x in (f"ПД-{sale_id:03d}", "Приём денег", "Выдача денег", "Обороты за период", "На конец периода"))
+                  and ">1200<" in statement)
+            check("a broken date falls back to this month", client.get(f"/clients/{anna}/statement?date_from=zzz&t={token}").status_code == 200)
+            journal = client.get(f"/journal?t={token}").text
+            check("the journal has the ПКО and the РКО", "ПКО-001" in journal and "Приём денег" in journal)
+
+            # ---- заказ
+            no_phone = client.post(f"/orders?t={token}", data=sale_form(client_phone="+380"))
+            check("a заказ without a phone is a friendly error on the sale form", "укажите его номер" in no_phone.text)
+            too_many = client.post(f"/orders?t={token}", data={**sale_form(client_phone="0671230010"), "qty_0": "99"})
+            check("a заказ for more than is free is a friendly error", "свободно только" in too_many.text)
+            held = client.post(f"/orders?t={seller_token}", data=sale_form(client_name="Анна", client_phone="0671230010", idem="ord1"), follow_redirects=False)
+            order_id = int(held.headers["location"].split("/orders/")[1].split("?")[0])
+            again = client.post(f"/orders?t={seller_token}", data=sale_form(client_name="Анна", client_phone="0671230010", idem="ord1"), follow_redirects=False)
+            check("a repeated submit lands on the same заказ", again.headers["location"].split("?")[0] == f"/orders/{order_id}")
+            opage = client.get(f"/orders/{order_id}?t={seller_token}").text
+            check("the заказ's page: «В резерве до …», the numbers, «Оплатить», «Выдать», «Продлить», «Отменить»",
+                  "В резерве" in opage and all(x in opage for x in (f"/orders/{order_id}/pay", f"/orders/{order_id}/issue",
+                                                                  f"/orders/{order_id}/extend", f"/orders/{order_id}/cancel")))
+            check("it is on the «Заказы» list and on the client's card",
+                  f"/orders/{order_id}" in client.get(f"/orders?t={token}").text and f"/orders/{order_id}" in client.get(f"/clients/{anna}?t={token}").text)
+            over = client.post(f"/orders/{order_id}/pay?t={seller_token}", data={f"pay_{cash_uah}": "999"})
+            check("overpaying a заказ is a friendly error", "осталось 600" in over.text)
+            client.post(f"/orders/{order_id}/pay?t={seller_token}", data={f"pay_{cash_uah}": "250", "idem": "p1"})
+            with get_conn(db_path) as conn:
+                check("«Оплатить» 250: counted towards the заказ", orders.numbers(conn, order_id) == {"total": 600, "paid": 250, "left": 350})
+                conn.execute("UPDATE client_orders SET reserved_until = datetime('now', '-1 minute') WHERE id = ?", (order_id,))
+                conn.execute("UPDATE stock_reservations SET expires_at = datetime('now', '-1 minute') WHERE ref_type = 'client_order' AND ref_id = ?", (order_id,))
+            expired = client.get(f"/orders/{order_id}?t={seller_token}").text
+            check("24 hours later the page shows «Резерв истёк» and offers only to renew or cancel",
+                  "Резерв истёк" in expired and f"/orders/{order_id}/issue" not in expired and "Возобновить резерв" in expired)
+            client.post(f"/orders/{order_id}/extend?t={seller_token}")
+            issued = client.post(f"/orders/{order_id}/issue?t={seller_token}", data={f"pay_{cash_uah}": "350", "idem": "i1"}, follow_redirects=False)
+            check("renewed and «Выдать» with the rest paid → the sale's page", "/sales/" in issued.headers["location"])
+            with get_conn(db_path) as conn:
+                check("the goods left, the заказ is выдан, the client owes nothing",
+                      inventory.product_total_qty(conn, cable, 1) == 6 and orders.get_order(conn, order_id)["status"] == "issued"
+                      and settlements.balance(conn, anna) == 0)
+            check("an unknown заказ goes back to the list", client.get(f"/orders/9999?t={token}", follow_redirects=False).status_code == 303)
+
+            # ---- мастер
+            mpage = client.get(f"/masters/{master}?t={token}").text
+            check("the master's card: начислено 1000 / выплачено 0 / мы должны 1000 and «Выплатить мастеру»",
+                  "выплачено" in mpage and "мы должны" in mpage and f"/masters/{master}/payout" in mpage)
+            bad = client.post(f"/masters/{master}/payout?t={token}", data={})
+            check("a payout with no amount is a friendly error", bad.status_code == 200 and "Укажите сумму выплаты" in bad.text)
+            client.post(f"/masters/{master}/payout?t={token}", data={f"pay_{cash_uah}": "600", "comment": "за неделю", "idem": "mp1"})
+            client.post(f"/masters/{master}/payout?t={token}", data={f"pay_{cash_uah}": "600", "comment": "за неделю", "idem": "mp1"})
+            with get_conn(db_path) as conn:
+                check("the payout posts once: we owe him 400", masters.owed(conn, master) == 400)
+            check("and it is listed on his card", "за неделю" in client.get(f"/masters/{master}?t={token}").text)
+
+
+def scenario_sale_chat() -> None:
+    """«🛍 Продажа» in the bot: товар → цена → телефон → оплата → карточка."""
+    print("scenario: продажа в боте — IMEI/название, клиент обязателен, оплата одним тапом или в долг")
+    import asyncio
+    from types import SimpleNamespace
+
+    from aiogram.fsm.context import FSMContext
+    from aiogram.fsm.storage.base import StorageKey
+    from aiogram.fsm.storage.memory import MemoryStorage
+
+    from bot import quick_actions as qa
+    from bot import sale_flow as sf
+    from core import channel_posts, notify, settlements
+
+    OWNER_TG, GROUP = 884001, -100884
+
+    with tempfile.TemporaryDirectory() as tmp, _separate_base(tmp, "sale-chat.sqlite3", ("Магазин",)) as db_path:
+        with get_conn(db_path) as conn:
+            conn.execute("UPDATE locations SET staff_group_chat_id = ? WHERE id = 1", (GROUP,))
+            owner = auth.create_staff(conn, "sc-owner", "pass", "Владелец", "owner")
+            auth.link_staff_telegram(conn, "sc-owner", OWNER_TG)
+            cell = inventory.create_cell(conn, "SL-1", None, None, location_id=1)
+            cable = inventory.create_product(conn, "Кабель Lightning", "SL-CBL", None, "шт", False, True, 0, 300)
+            purchases.create_receipt(conn, None, None, owner, [(cable, cell, 5, 100)], location_id=1)
+            cash.record_adjustment(conn, 20000, "старт", owner, location_id=1)
+            buyback.create_purchase(conn, seller_phone="0671110001", model="iPhone 12", imei="358000000000001",
+                                    comment=None, price="4000", staff_id=owner, location_id=1)
+            buyback.create_purchase(conn, seller_phone="0671110001", model="iPhone 12", imei="358000000000002",
+                                    comment=None, price="4200", staff_id=owner, location_id=1)
+            clients.get_or_create_by_phone(conn, "Постоянный", "+380671110077", source="offline")
+            acc = {(a["kind"], a["currency"]): a["id"] for a in accounts.list_accounts(conn, 1)}
+            cash_uah = acc[("cash", "UAH")]
+            shifts.open_shift(conn, owner, 1)
+            till = accounts.balance(conn, cash_uah)
+
+        class _Chat:
+            def __init__(self):
+                self.log, self._next = [], 900
+
+            def add(self, author, text, markup=None):
+                self._next += 1
+                self.log.append({"id": self._next, "author": author, "text": text, "markup": markup})
+                return self._next
+
+            def delete(self, message_id):
+                self.log = [m for m in self.log if m["id"] != message_id]
+
+        class _Bot:
+            def __init__(self, chat):
+                self.chat = chat
+
+            async def delete_message(self, chat_id, message_id):
+                self.chat.delete(message_id)
+
+            async def delete_messages(self, chat_id, message_ids):
+                for mid in message_ids:
+                    self.chat.delete(mid)
+
+            async def edit_message_text(self, chat_id, message_id, text, reply_markup=None):
+                for m in self.chat.log:
+                    if m["id"] == message_id:
+                        m["text"], m["markup"] = text, reply_markup
+
+        class _Msg:
+            def __init__(self, chat, bot, text):
+                self._log, self.bot, self.text, self.photo = chat, bot, text, None
+                self.chat = SimpleNamespace(id=OWNER_TG, type="private")
+                self.from_user = SimpleNamespace(id=OWNER_TG, full_name="Владелец")
+                self.message_id = chat.add("staff", text)
+
+            async def answer(self, text, reply_markup=None):
+                return SimpleNamespace(message_id=self._log.add("bot", text, reply_markup))
+
+        class _Cb:
+            def __init__(self, chat, bot, data, message_id):
+                self.data, self.bot = data, bot
+                self.from_user = SimpleNamespace(id=OWNER_TG)
+                self.answered = []
+                log = chat
+
+                class _M:
+                    chat = SimpleNamespace(id=OWNER_TG, type="private")
+
+                    async def answer(self_inner, text, reply_markup=None):
+                        return SimpleNamespace(message_id=log.add("bot", text, reply_markup))
+
+                self.message = _M()
+                self.message.message_id = message_id
+
+            async def answer(self, text=None, show_alert=False):
+                self.answered.append((text, show_alert))
+
+        def _buttons(markup) -> list[str]:
+            return [b.callback_data for row in markup.inline_keyboard for b in row if b.callback_data] if markup else []
+
+        posted: list[dict] = []
+        orig_notify, orig_sync = notify.notify_staff_group, channel_posts.sync_products
+        notify.notify_staff_group = lambda text, **kw: posted.append({"text": text, **kw})
+        channel_posts.sync_products = lambda *a, **kw: None
+
+        async def run() -> None:
+            chat = _Chat()
+            bot = _Bot(chat)
+            state = FSMContext(storage=MemoryStorage(), key=StorageKey(bot_id=1, chat_id=OWNER_TG, user_id=OWNER_TG))
+            say = lambda text: _Msg(chat, bot, text)
+            screen = lambda: [m for m in chat.log if m["author"] == "bot"][-1]
+            tap = lambda data: _Cb(chat, bot, data, screen()["id"])
+
+            check("«Продажа» is on the keyboard", any(b.text == qa.BTN_SALE for row in qa.QUICK_ACTIONS_KEYBOARD.keyboard for b in row))
+
+            # ---- телефон по IMEI, знакомый клиент, наличные
+            await sf.sale_start(say(qa.BTN_SALE), state)
+            check("step 1 asks what is being sold", "шаг 1 из" in screen()["text"] and "IMEI или часть названия" in screen()["text"])
+            await sf.sale_got_item(say("нет такого"), state)
+            check("nothing found is a nudge that keeps the question", "ничего не нашлось" in screen()["text"] and "IMEI или часть названия" in screen()["text"])
+            await sf.sale_got_item(say("iphone"), state)
+            check("two matching units → a pick list, one button per IMEI",
+                  len([b for b in _buttons(screen()["markup"]) if b.startswith("sl_pick:u:")]) == 2)
+            await sf.sale_got_item(say("358000000000001"), state)
+            check("an exact IMEI goes straight to the price", "Цена продажи" in screen()["text"] and "IMEI 358000000000001" in screen()["text"])
+            await sf.sale_got_price(say("дорого"), state)
+            check("a price that isn't a number is a nudge", "Введите цену числом" in screen()["text"])
+            await sf.sale_got_price(say("6500"), state)
+            check("then the client's phone — mandatory", "Номер телефона клиента" in screen()["text"] and "Обязательно" in screen()["text"])
+            await sf.sale_got_phone(say("абв"), state)
+            check("not a phone number is a nudge", "Не похоже на номер" in screen()["text"])
+            await sf.sale_got_phone(say("067 111 00 77"), state)
+            pay = screen()
+            check("a known client's name isn't asked: straight to «куда оплата» with the точка's гривневые счета, «В долг» and a link to the full form",
+                  "Куда оплата — 6500 грн" in pay["text"] and "Постоянный" in pay["text"] and f"sl_pay:{cash_uah}" in _buttons(pay["markup"])
+                  and "sl_pay:debt" in _buttons(pay["markup"]) and f"sl_pay:{acc[('cash', 'USD')]}" not in _buttons(pay["markup"])
+                  and any(b.web_app and "/sales?phone=" in b.web_app.url for row in pay["markup"].inline_keyboard for b in row))
+            await sf.sale_pick_pay(tap(f"sl_pay:{cash_uah}"), state)
+            check("the confirm card sums it up", all(x in screen()["text"] for x in ("Проверьте и продайте", "IMEI 358000000000001", "6500 грн", "+380671110077"))
+                  and _buttons(screen()["markup"]) == ["sl_confirm", "sl_cancel"])
+            confirm = tap("sl_confirm")
+            await sf.sale_confirm(confirm, state)
+            await asyncio.sleep(0.1)
+            with get_conn(db_path) as conn:
+                sale = sales.list_sales(conn)[0]
+                check("the sale is made: that unit is gone, 6500 in the касса, the client on it, profit 2500 on the document",
+                      inventory.find_unit_by_imei(conn, "358000000000001") is None and accounts.balance(conn, cash_uah) == till + 6500
+                      and sale["client_name"] == "Постоянный" and sale["total"] == 6500
+                      and documents.get_for(conn, "sale", sale["id"])["profit"] == 2500)
+                first_sale = sale["id"]
+            check("the chat keeps one card with the document's number", f"ПД-{first_sale:03d}" in chat.log[-1]["text"] and "Продано" in chat.log[-1]["text"]
+                  and len([m for m in chat.log if m["author"] == "staff"]) == 0)
+            check("the same card went to the staff group", len(posted) == 1 and f"ПД-{first_sale:03d}" in posted[0]["text"]
+                  and posted[0]["staff_group_chat_id"] == GROUP)
+            again = _Cb(chat, bot, "sl_confirm", confirm.message.message_id)
+            await state.set_state(qa.SaleFlow.confirm)
+            await state.update_data(store_id="1")
+            await sf.sale_confirm(again, state)
+            with get_conn(db_path) as conn:
+                check("a second tap on the same card doesn't sell twice", len(sales.list_sales(conn)) == 1 and "Уже проведено" in again.answered[-1][0])
+            await state.clear()
+
+            # ---- товар по названию, новый клиент, в долг
+            await sf.sale_start(say(qa.BTN_SALE), state)
+            await sf.sale_got_item(say("кабель"), state)
+            check("a non-serial product is one option with its free quantity and the card price on a button",
+                  "Кабель Lightning" in screen()["text"] and _buttons(screen()["markup"]) == ["sl_price_default"])
+            await sf.sale_price_default(tap("sl_price_default"), state)
+            await sf.sale_got_phone(say("0671110088"), state)
+            check("an unknown number → the name is asked", "Как его зовут" in screen()["text"] and "шаг 4 из 5" in screen()["text"])
+            await sf.sale_got_name(say("Новый Клиент"), state)
+            await sf.sale_pick_pay(tap("sl_pay:debt"), state)
+            check("«В долг» is spelled out on the confirm card", "в долг — на баланс клиента" in screen()["text"])
+            await sf.sale_confirm(tap("sl_confirm"), state)
+            await asyncio.sleep(0.1)
+            with get_conn(db_path) as conn:
+                newcomer = clients.get_by_phone(conn, "+380671110088")
+                check("the client is created, the cable is sold, nothing went into the касса, he owes 300",
+                      newcomer["name"] == "Новый Клиент" and inventory.product_total_qty(conn, cable, 1) == 4
+                      and accounts.balance(conn, cash_uah) == till + 6500 and settlements.client_position(conn, newcomer["id"])["they_owe"] == 300)
+                text, keyboard = await qa._client_card(stores.get_store("1"), newcomer["id"], owner)
+            check("the bot's client card shows the debt and links to the card and the сверка",
+                  "Нам должны: 300 грн" in text and len(keyboard.inline_keyboard) == 2 and "/statement" in keyboard.inline_keyboard[1][0].web_app.url)
+
+            # ---- отмена с карточки
+            await sf.sale_start(say(qa.BTN_SALE), state)
+            await sf.sale_got_item(say("358000000000002"), state)
+            await sf.sale_got_price(say("7000"), state)
+            await sf.sale_got_phone(say("0671110077"), state)
+            await qa.quick_cancel_callback(tap("sl_cancel"), state)
+            with get_conn(db_path) as conn:
+                check("❌ Отмена on the payment step sells nothing and leaves the chat clean",
+                      inventory.find_unit_by_imei(conn, "358000000000002") is not None and await state.get_state() is None
+                      and not [m for m in chat.log if "Куда оплата" in (m["text"] or "")])
+
+        try:
+            os.environ["CRM_MINIAPP_URL"] = os.environ.get("CRM_MINIAPP_URL") or "https://crm.example/miniapp"
+            asyncio.run(run())
+        finally:
+            notify.notify_staff_group, channel_posts.sync_products = orig_notify, orig_sync
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         db_path = os.path.join(tmp, "test.sqlite3")
@@ -5810,6 +6362,9 @@ def main() -> None:
     scenario_service_center()
     scenario_service_center_http()
     scenario_repair_part_chat()
+    scenario_settlements()
+    scenario_settlements_http()
+    scenario_sale_chat()
     if os.path.exists(_WEBAPP_TEST_DB):
         os.remove(_WEBAPP_TEST_DB)
 

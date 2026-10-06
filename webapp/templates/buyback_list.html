@@ -9,7 +9,7 @@
 
 <form method="post" action="{{ link('/buyback') }}" class="edit-form" enctype="multipart/form-data" id="buybackIntakeForm">
   <input type="hidden" name="idem" value="{{ idem }}">
-  <label>{{ t('purchase_seller_phone_label') }}<span class="required-mark">*</span><input type="text" name="seller_phone" value="+380" required></label>
+  <label>{{ t('purchase_seller_phone_label') }}<span class="required-mark">*</span><input type="text" name="seller_phone" value="{{ prefill_phone or '+380' }}" required></label>
   <p class="meta" style="margin:0;">{{ t('purchase_seller_hint') }}</p>
   <label>{{ t('purchase_seller_name_label') }}<input type="text" name="seller_name"></label>
 

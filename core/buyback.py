@@ -36,6 +36,7 @@ from core import accounts as _accounts
 from core import cash as _cash
 from core import clients as _clients
 from core import documents as _documents
+from core import settlements as _settlements
 from core import locations as _locations
 from core import notify as _notify
 from core.storage import get_conn as _get_conn
@@ -340,6 +341,11 @@ def create_purchase(
         conn, "expense", resolved, "buyback_order", order_id, staff_id,
         category="buyback", comment=f"Покупка №{order_id}: {model}",
     )
+    # Взаиморасчёты: we owed the seller the price and paid it on the spot.
+    _settlements.post(conn, client_id, -total_uah, "buyback", ref_type="buyback_order", ref_id=order_id,
+                      location_id=location_id, staff_id=staff_id, comment=f"{_documents.label('buyback', order_id)}: {model}")
+    _settlements.post(conn, client_id, total_uah, "payment", ref_type="buyback_order", ref_id=order_id,
+                      location_id=location_id, staff_id=staff_id, comment=f"Оплата {_documents.label('buyback', order_id)}")
     _documents.register(
         conn, "buyback", staff_id=staff_id, location_id=location_id, client_id=client_id,
         ref_table="buyback_orders", ref_id=order_id, title=model, amount=total_uah, key=key,

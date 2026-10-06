@@ -35,7 +35,7 @@
   <a href="{{ link('/repairs') }}" class="{{ 'active' if path.startswith('/repairs') or path.startswith('/production') else '' }}">
     {{ icons.icon('tool') }}<span>{{ t('nav_repairs') }}</span>
   </a>
-  <a href="{{ link('/sales') }}" class="{{ 'active' if path.startswith('/sales') else '' }}">
+  <a href="{{ link('/sales') }}" class="{{ 'active' if path.startswith('/sales') or path.startswith('/orders') else '' }}">
     {{ icons.icon('cart') }}<span>{{ t('nav_sales') }}</span>
   </a>
   <a href="{{ link('/warehouse') }}" class="{{ 'active' if path.startswith('/warehouse') or path.startswith('/inventory') or path.startswith('/purchases') or path.startswith('/transfers') or path.startswith('/buyback') else '' }}">

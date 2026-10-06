@@ -485,6 +485,69 @@ CREATE TABLE IF NOT EXISTS stock_reservations (
 CREATE INDEX IF NOT EXISTS idx_stock_reservations_batch ON stock_reservations(batch_id, cell_id);
 CREATE INDEX IF NOT EXISTS idx_stock_reservations_ref ON stock_reservations(ref_type, ref_id);
 
+-- Взаиморасчёты с контрагентом (Заход 6): one signed row per thing that
+-- changes what a client and the business owe each other. amount > 0 —
+-- the client owes us more (we sold him something, we handed him money);
+-- amount < 0 — he owes us less / we owe him (he paid, we bought from
+-- him). The sum of live rows is his balance: > 0 «нам должны», < 0 «мы
+-- должны» (an аванс is just that). Rows are cancelled with their
+-- document, never deleted.
+CREATE TABLE IF NOT EXISTS client_ledger (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_id INTEGER NOT NULL REFERENCES clients(id),
+    amount REAL NOT NULL,
+    kind TEXT NOT NULL,
+    ref_type TEXT,
+    ref_id INTEGER,
+    location_id INTEGER REFERENCES locations(id),
+    staff_id INTEGER REFERENCES staff(id),
+    comment TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    cancelled_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_client_ledger_client ON client_ledger(client_id);
+CREATE INDEX IF NOT EXISTS idx_client_ledger_ref ON client_ledger(ref_type, ref_id);
+
+-- Выплаты мастерам (Заход 6): «начислено − выплачено = мы должны мастеру».
+CREATE TABLE IF NOT EXISTS master_payouts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    staff_id INTEGER NOT NULL REFERENCES staff(id),
+    amount REAL NOT NULL,
+    location_id INTEGER REFERENCES locations(id),
+    paid_by INTEGER REFERENCES staff(id),
+    comment TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    cancelled_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_master_payouts_staff ON master_payouts(staff_id);
+
+-- Заказ клиента (Заход 6): goods we have are held for a client for 24
+-- hours («резерв»), can be paid for («Оплатить») and handed over
+-- («Выдать») as two separate steps. status: reserved → issued (became
+-- the sale sale_id) | expired (the hold ran out) | cancelled.
+CREATE TABLE IF NOT EXISTS client_orders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_id INTEGER NOT NULL REFERENCES clients(id),
+    location_id INTEGER REFERENCES locations(id),
+    status TEXT NOT NULL DEFAULT 'reserved',
+    reserved_until TEXT,
+    sale_id INTEGER REFERENCES sales_orders(id),
+    comment TEXT,
+    staff_id INTEGER REFERENCES staff(id),
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_client_orders_client ON client_orders(client_id);
+
+CREATE TABLE IF NOT EXISTS client_order_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id INTEGER NOT NULL REFERENCES client_orders(id),
+    product_id INTEGER NOT NULL REFERENCES products(id),
+    batch_id INTEGER NOT NULL REFERENCES batches(id),
+    cell_id INTEGER NOT NULL REFERENCES storage_cells(id),
+    qty INTEGER NOT NULL,
+    price REAL NOT NULL
+);
+
 -- Начисления мастерам (Заход 5): what the business owes a master for work
 -- done — his share of a client repair's profit, the fixed price of an
 -- internal job, parts he supplied himself. One row per document that

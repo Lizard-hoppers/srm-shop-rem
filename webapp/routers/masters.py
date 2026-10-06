@@ -3,11 +3,15 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import RedirectResponse
 
+from core import accounts as core_accounts
 from core import auth as core_auth
+from core import cash as core_cash
+from core import documents as core_documents
 from core import locations as core_locations
 from core import masters as core_masters
 from core.storage import get_conn
-from webapp.deps import link, optional_int, require_role
+from webapp.deps import idem_key, link, loc, optional_int, require_role
+from webapp.payments import payments_from_form
 from webapp.templating import render
 
 router = APIRouter(prefix="/masters")
@@ -76,12 +80,48 @@ def detail_view(request: Request, master_id: int, staff=Depends(require_role(*_M
             return RedirectResponse(link(request, "/masters"), status_code=303)
         summary = core_masters.master_summary(conn, master)
         locations = core_locations.list_locations(conn)
-        accrued = core_masters.accrued_total(conn, master_id)
-        accruals = core_masters.list_accruals(conn, master_id, limit=30)
+        money_ctx = _money_context(conn, request, master_id)
     return render(
         request, "master_detail.html", staff=staff, master=master, summary=summary, locations=locations,
-        master_kinds=core_auth.MASTER_KINDS, accrued=accrued, accruals=accruals,
+        master_kinds=core_auth.MASTER_KINDS, **money_ctx,
     )
+
+
+def _money_context(conn, request: Request, master_id: int) -> dict:
+    """«Начислено − выплачено = мы должны» and the two lists behind it."""
+    return {
+        "accrued": core_masters.accrued_total(conn, master_id),
+        "paid": core_masters.paid_total(conn, master_id),
+        "owed": core_masters.owed(conn, master_id),
+        "accruals": core_masters.list_accruals(conn, master_id, limit=30),
+        "payouts": core_masters.list_payouts(conn, master_id, limit=30),
+        "accounts": core_accounts.list_accounts(conn, loc(request)),
+    }
+
+
+@router.post("/{master_id}/payout")
+async def payout_view(request: Request, master_id: int, staff=Depends(require_role(*_MASTERS_ROLES))):
+    """«Выплата мастеру» — РКО from the accounts of the current точка."""
+    form = await request.form()
+    key = idem_key("master_payout", form.get("idem"))
+    try:
+        with get_conn() as conn:
+            if not core_documents.find_by_key(conn, key):
+                core_masters.pay_out(
+                    conn, master_id, payments_from_form(form), paid_by=staff["id"], location_id=loc(request),
+                    comment=form.get("comment"), key=key,
+                )
+    except (core_masters.PayoutError, core_cash.PaymentError) as exc:
+        with get_conn() as conn:
+            master = core_auth.get_master(conn, master_id)
+            if not master:
+                return RedirectResponse(link(request, "/masters"), status_code=303)
+            return render(
+                request, "master_detail.html", staff=staff, master=master,
+                summary=core_masters.master_summary(conn, master), locations=core_locations.list_locations(conn),
+                master_kinds=core_auth.MASTER_KINDS, error=str(exc), **_money_context(conn, request, master_id),
+            )
+    return RedirectResponse(link(request, f"/masters/{master_id}"), status_code=303)
 
 
 @router.post("/{master_id}/edit")
@@ -100,8 +140,7 @@ def edit_view(
             return render(
                 request, "master_detail.html", staff=staff, master=master, summary=summary,
                 locations=core_locations.list_locations(conn), master_kinds=core_auth.MASTER_KINDS,
-                accrued=core_masters.accrued_total(conn, master_id),
-                accruals=core_masters.list_accruals(conn, master_id, limit=30), error="Введите имя мастера.",
+                error="Введите имя мастера.", **_money_context(conn, request, master_id),
             )
         clean_type, clean_value = _clean_pay(pay_type, pay_value)
         core_auth.update_master(

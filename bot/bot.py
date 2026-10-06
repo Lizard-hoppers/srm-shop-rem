@@ -21,6 +21,7 @@ from bot.purchase_photo import router as purchase_photo_router
 from bot.quick_actions import router as quick_actions_router
 from bot.repair_actions import router as repair_actions_router
 from bot.repair_attachments import router as repair_attachments_router
+from bot.sale_flow import router as sale_flow_router
 from bot.transfer_flow import router as transfer_flow_router
 from core.storage import init_db
 from core.stores import load_stores
@@ -48,6 +49,7 @@ async def main() -> None:
     # flow's text steps first.
     dp.include_router(transfer_flow_router)
     dp.include_router(buyback_flow_router)
+    dp.include_router(sale_flow_router)
     dp.include_router(quick_actions_router)
     dp.include_router(repair_actions_router)
     dp.include_router(repair_attachments_router)

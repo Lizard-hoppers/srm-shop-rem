@@ -38,6 +38,13 @@ EXPENSE_CATEGORIES = {
     "other": "Прочее",
 }
 
+# Categories only the system writes (never offered in the «Расход» menu):
+# money that left the касса through a settlement, not a business expense.
+SETTLEMENT_CATEGORIES = {
+    "master_payout": "Выплата мастеру",
+    "client_payout": "Выдача денег контрагенту",
+}
+
 # How far the гривня value of a split payment may be from the document's
 # total and still count as «оплачено полностью» — a foreign-currency part
 # rarely multiplies out to a whole гривня.
@@ -192,6 +199,7 @@ def resolve_payments(
     total_uah,
     payments: list[tuple[int, object, object]] | None,
     legacy_method: str = "cash",
+    allow_partial: bool = False,
 ) -> list[dict]:
     """Turn «how the client paid» into rows ready to post, or raise
     PaymentError. `payments` is a list of (account_id, amount, rate) — rate
@@ -199,12 +207,31 @@ def resolve_payments(
     whole total onto the точка's default account for legacy_method (the
     one-tap «наличные»/«карта» path). Otherwise every account must be an
     active one of THIS точка, and the parts' гривня value must add up to
-    the total."""
+    the total. allow_partial (a sale «в долг», a заказ handed over with
+    part of it unpaid): less than the total is fine — an empty list then
+    means «nothing paid now», not the default account; more is still an
+    error."""
     total_uah = money(total_uah)
-    if not payments:
+    if payments is None or (not payments and not allow_partial):
         account = _accounts.default_account(conn, location_id, legacy_method if legacy_method in METHODS else "cash")
         return [{"account": account, "amount": total_uah, "rate": 1, "amount_uah": total_uah}]
 
+    resolved = resolve_parts(conn, location_id, payments)
+    paid = money(sum(p["amount_uah"] for p in resolved))
+    if allow_partial and paid < total_uah:
+        return resolved
+    if abs(paid - total_uah) > PAYMENT_TOLERANCE_UAH:
+        diff = money(total_uah - paid)
+        hint = f"не хватает {diff} грн" if diff > 0 else f"лишние {abs(diff)} грн"
+        raise PaymentError(f"Оплата не сходится с суммой: к оплате {total_uah} грн, внесено {paid} грн ({hint}).")
+    return resolved
+
+
+def resolve_parts(conn: sqlite3.Connection, location_id: int, payments: list[tuple[int, object, object]]) -> list[dict]:
+    """The parts of a payment on their own, each checked (an active
+    account of THIS точка, a readable amount, a rate for foreign
+    currency) — for money that isn't measured against a document's total:
+    «Принять деньги», «Выдать деньги», выплата мастеру."""
     resolved = []
     for account_id, amount, rate in payments:
         account = _accounts.get_account(conn, account_id)
@@ -223,13 +250,11 @@ def resolve_payments(
                 )
             amount_uah = money(float(amount) * float(rate_value))
         resolved.append({"account": account, "amount": amount, "rate": rate_value, "amount_uah": amount_uah})
-
-    paid = money(sum(p["amount_uah"] for p in resolved))
-    if abs(paid - total_uah) > PAYMENT_TOLERANCE_UAH:
-        diff = money(total_uah - paid)
-        hint = f"не хватает {diff} грн" if diff > 0 else f"лишние {abs(diff)} грн"
-        raise PaymentError(f"Оплата не сходится с суммой: к оплате {total_uah} грн, внесено {paid} грн ({hint}).")
     return resolved
+
+
+def paid_uah(resolved: list[dict]):
+    return money(sum(p["amount_uah"] for p in resolved))
 
 
 def record_payments(

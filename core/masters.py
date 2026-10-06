@@ -14,6 +14,7 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime
 
+from core.accounts import money
 from core.timefmt import KYIV, kyiv_date_range_utc, kyiv_today
 
 
@@ -171,3 +172,78 @@ def list_accruals(conn: sqlite3.Connection, staff_id: int, limit: int = 100) -> 
         "SELECT * FROM master_accruals WHERE staff_id = ? AND cancelled_at IS NULL ORDER BY id DESC LIMIT ?",
         (staff_id, limit),
     ).fetchall()
+
+
+# ---- выплаты (Заход 6): «начислено − выплачено = мы должны мастеру» ----
+
+class PayoutError(Exception):
+    """A payout that can't go ahead — message is shown to staff as-is."""
+
+
+def paid_total(conn: sqlite3.Connection, staff_id: int) -> float | int:
+    row = conn.execute(
+        "SELECT COALESCE(SUM(amount), 0) AS total FROM master_payouts WHERE staff_id = ? AND cancelled_at IS NULL",
+        (staff_id,),
+    ).fetchone()
+    return money(row["total"])
+
+
+def owed(conn: sqlite3.Connection, staff_id: int) -> float | int:
+    """What the business owes the master right now (negative — he was
+    paid ahead of what he has earned)."""
+    return money(accrued_total(conn, staff_id) - paid_total(conn, staff_id))
+
+
+def list_payouts(conn: sqlite3.Connection, staff_id: int, limit: int = 100) -> list[sqlite3.Row]:
+    return conn.execute(
+        """SELECT master_payouts.*, staff.name AS paid_by_name FROM master_payouts
+           LEFT JOIN staff ON staff.id = master_payouts.paid_by
+           WHERE master_payouts.staff_id = ? ORDER BY master_payouts.id DESC LIMIT ?""",
+        (staff_id, limit),
+    ).fetchall()
+
+
+def pay_out(
+    conn: sqlite3.Connection, staff_id: int, payments: list[tuple[int, object, object]], *, paid_by: int,
+    location_id: int | None = None, comment: str | None = None, key: str | None = None,
+) -> int:
+    """«Выплата мастеру» (РКО): money leaves the точка's accounts and
+    what we owe him goes down by its гривня value. Returns the payout id."""
+    from core import cash as _cash
+    from core import documents as _documents
+    from core import locations as _locations
+
+    master = conn.execute("SELECT * FROM staff WHERE id = ? AND role = 'master'", (staff_id,)).fetchone()
+    if not master:
+        raise PayoutError("Мастер не найден.")
+    location_id = _locations.resolve(conn, location_id)
+    resolved = _cash.resolve_parts(conn, location_id, payments or [])
+    total = _cash.paid_uah(resolved)
+    if not resolved or total <= 0:
+        raise PayoutError("Укажите сумму выплаты хотя бы на одном счёте.")
+    comment = (comment or "").strip() or None
+    payout_id = conn.execute(
+        "INSERT INTO master_payouts (staff_id, amount, location_id, paid_by, comment) VALUES (?, ?, ?, ?, ?)",
+        (staff_id, total, location_id, paid_by, comment),
+    ).lastrowid
+    title = f"Выплата мастеру: {master['name']}" + (f" — {comment}" if comment else "")
+    _cash.record_payments(
+        conn, "expense", resolved, "master_payout", payout_id, paid_by, category="master_payout", comment=title,
+    )
+    _documents.register(
+        conn, "cash_out", staff_id=paid_by, location_id=location_id, ref_table="master_payouts",
+        ref_id=payout_id, title=title, amount=total, key=key,
+    )
+    return payout_id
+
+
+def cancel_payout(conn: sqlite3.Connection, payout_id: int) -> None:
+    from core import cash as _cash
+
+    for row in conn.execute(
+        "SELECT id FROM cash_transactions WHERE ref_type = 'master_payout' AND ref_id = ?", (payout_id,)
+    ).fetchall():
+        _cash.cancel_transaction(conn, row["id"])
+    conn.execute(
+        "UPDATE master_payouts SET cancelled_at = datetime('now') WHERE id = ? AND cancelled_at IS NULL", (payout_id,)
+    )

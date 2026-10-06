@@ -9,7 +9,9 @@ import sqlite3
 from core import cash as core_cash
 from core import documents as _documents
 from core import locations as _locations
-from core.inventory import InsufficientStockError, get_product, pick_cell_with_stock, record_movement
+from core import settlements as _settlements
+from core.accounts import money
+from core.inventory import InsufficientStockError, available_qty, get_product, pick_cell_with_stock, record_movement
 
 
 class SaleError(Exception):
@@ -31,8 +33,6 @@ def _batch_cell(conn: sqlite3.Connection, batch_id: int, product_id: int, qty: i
         return None
     # Physically here, but held for another document (a производство
     # order, a client's заказ) is not sellable either.
-    from core.inventory import available_qty
-
     return row["cell_id"] if available_qty(conn, batch_id, row["cell_id"]) >= qty else None
 
 
@@ -48,11 +48,17 @@ def create_sale(
     location_id: int | None = None,
     key: str | None = None,
     payments: list[tuple[int, object, object]] | None = None,
+    allow_debt: bool = False,
+    reserved_for: tuple[str, int] | None = None,
 ) -> int:
     """items: list of (product_id, qty, price) or (product_id, qty, price,
     batch_id) — the 4th element names the exact партия/IMEI being sold,
     required for a serial product (which unit is leaving matters), optional
-    otherwise (oldest партия first). Each line remembers the cost of what
+    otherwise (oldest партия first); a 5th names the cell too (a заказ
+    sells exactly the lines it held). allow_debt: the client may pay less
+    than the total now — the rest goes onto his balance («нам должны»,
+    core.settlements), so it needs a client. reserved_for: the document
+    whose резерв this sale is taking from. Each line remembers the cost of what
     it actually took (sales_order_items.unit_cost) — the basis of the
     sale's profit. Records the sale total in
     the касса ledger (core.cash.record_income) same transaction as the
@@ -67,8 +73,10 @@ def create_sale(
     # наличные + ФОП, part in USDT… — and must add up to the total
     # (core.cash.PaymentError otherwise). None = the whole total onto the
     # точка's default account for payment_method, the one-tap path.
-    items = [tuple(item) + (None,) * (4 - len(item)) for item in items]
-    for product_id, qty, _price, batch_id in items:
+    if allow_debt and not client_id:
+        raise SaleError("Продажа в долг — только клиенту с номером телефона.")
+    items = [tuple(item) + (None,) * (5 - len(item)) for item in items]
+    for product_id, qty, _price, batch_id, _cell in items:
         product = get_product(conn, product_id)
         if product and product["is_serial"]:
             if not batch_id:
@@ -78,8 +86,10 @@ def create_sale(
     # Where each line comes from is settled before anything is written
     # too — a sale that can't be filled must not leave an order behind.
     cells = []
-    for product_id, qty, _price, batch_id in items:
-        if batch_id:
+    for product_id, qty, _price, batch_id, named_cell in items:
+        if batch_id and named_cell:
+            cell_id = named_cell if available_qty(conn, batch_id, named_cell, reserved_for=reserved_for) >= qty else None
+        elif batch_id:
             cell_id = _batch_cell(conn, batch_id, product_id, qty, location_id)
         else:
             cell_id = pick_cell_with_stock(conn, product_id, qty, location_id)
@@ -87,17 +97,20 @@ def create_sale(
             raise InsufficientStockError(f"Недостаточно товара (product_id={product_id}) ни на одной ячейке этой точки")
         cells.append(cell_id)
     resolved = core_cash.resolve_payments(
-        conn, location_id, sum(qty * price for _product_id, qty, price, _batch in items), payments, payment_method,
+        conn, location_id, sum(qty * price for _product_id, qty, price, _batch, _cell in items), payments,
+        payment_method, allow_partial=allow_debt,
     )
 
     order_id = conn.execute(
         """INSERT INTO sales_orders (client_id, channel, status, staff_id, warranty_until, payment_method, location_id)
            VALUES (?, ?, 'completed', ?, ?, ?, ?)""",
-        (client_id, channel, staff_id, warranty_until, core_cash.payment_method_label(resolved), location_id),
+        (client_id, channel, staff_id, warranty_until,
+         core_cash.payment_method_label(resolved) if resolved else "debt", location_id),
     ).lastrowid
 
     total = 0
-    for (product_id, qty, price, batch_id), cell_id in zip(items, cells):
+    cost_total, cost_known = 0, True
+    for (product_id, qty, price, batch_id, _cell), cell_id in zip(items, cells):
         item_id = conn.execute(
             "INSERT INTO sales_order_items (order_id, product_id, qty, price, batch_id) VALUES (?, ?, ?, ?, ?)",
             (order_id, product_id, qty, price, batch_id),
@@ -108,6 +121,7 @@ def create_sale(
         record_movement(
             conn, product_id, qty, "sale", staff_id,
             from_cell_id=cell_id, ref_type="sales_order", ref_id=order_id, batch_id=batch_id,
+            reserved_for=reserved_for,
         )
         cost = conn.execute(
             """SELECT SUM(qty * unit_cost) AS total, SUM(CASE WHEN unit_cost IS NULL THEN 1 ELSE 0 END) AS unknown
@@ -118,6 +132,9 @@ def create_sale(
             conn.execute(
                 "UPDATE sales_order_items SET unit_cost = ? WHERE id = ?", (round(cost["total"] / qty, 2), item_id)
             )
+            cost_total += cost["total"]
+        else:
+            cost_known = False
         total += qty * price
 
     core_cash.record_payments(conn, "income", resolved, "sales_order", order_id, staff_id)
@@ -125,8 +142,32 @@ def create_sale(
         conn, "sale", staff_id=staff_id, location_id=location_id, client_id=client_id,
         ref_table="sales_orders", ref_id=order_id, amount=total, key=key,
     )
+    # «Прибыль по документу»: only when the cost of every line is known.
+    if cost_known:
+        _documents.set_profit(conn, "sale", order_id, money(total - cost_total))
+    # Взаиморасчёты: what the client owed for it and what he paid on the
+    # spot — the difference stays on his balance.
+    if client_id:
+        label = _documents.label("sale", order_id)
+        _settlements.post(conn, client_id, total, "sale", ref_type="sales_order", ref_id=order_id,
+                          location_id=location_id, staff_id=staff_id, comment=label)
+        _settlements.post(conn, client_id, -core_cash.paid_uah(resolved), "payment", ref_type="sales_order",
+                          ref_id=order_id, location_id=location_id, staff_id=staff_id, comment=f"Оплата {label}")
 
     return order_id
+
+
+def sale_numbers(conn: sqlite3.Connection, order_id: int) -> dict:
+    """Сумма / оплачено при продаже / ушло в долг клиента."""
+    total = conn.execute(
+        "SELECT COALESCE(SUM(qty * price), 0) AS total FROM sales_order_items WHERE order_id = ?", (order_id,)
+    ).fetchone()["total"]
+    paid = conn.execute(
+        """SELECT COALESCE(SUM(amount_uah), 0) AS total FROM cash_transactions
+           WHERE ref_type = 'sales_order' AND ref_id = ? AND kind = 'income'""",
+        (order_id,),
+    ).fetchone()["total"]
+    return {"total": money(total), "paid": money(paid), "debt": money(max(total - paid, 0))}
 
 
 def list_sales(

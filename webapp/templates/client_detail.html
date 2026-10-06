@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% import "_icons.html" as icons %}
+{% import "_payments.html" as pay %}
 {% block title %}{{ client.name }}{% endblock %}
 {% block content %}
 <a class="back-link" href="{{ link('/clients') }}">{{ icons.icon('back', 16) }} {{ t('more_clients') }}</a>
@@ -8,6 +9,67 @@
   <h3>{{ client.name }}</h3>
   <p class="meta">{% if client.phone %}<a href="tel:{{ client.phone }}">{{ client.phone }}</a>{% else %}{{ t('no_phone') }}{% endif %} · {{ t('channel_online') if client.source == 'online' else t('channel_offline') }} · {{ t('in_base_since') }} {{ client.created_at | kyiv }}</p>
   {% if client.notes %}<p class="meta">{{ client.notes }}</p>{% endif %}
+</div>
+
+{% if error %}<div class="flash flash-error" style="margin-top: 12px;">{{ error }}</div>{% endif %}
+
+{# ---------------- взаиморасчёты ---------------- #}
+<h2>{{ t('client_balance_title') }}</h2>
+<div class="panel-box">
+  <div style="display:flex; gap:16px; flex-wrap:wrap;">
+    <div><div style="font-size: 22px; font-weight: 800;">{{ position.they_owe | money }} грн</div><div class="stat-label">{{ t('balance_they_owe') }}</div></div>
+    <div><div style="font-size: 22px; font-weight: 800;">{{ position.we_owe | money }} грн</div><div class="stat-label">{{ t('balance_we_owe') }}</div></div>
+    {% if show_profit %}<div><div style="font-size: 22px; font-weight: 800;">{{ profit_total | money }} грн</div><div class="stat-label">{{ t('client_profit_total') }}</div></div>{% endif %}
+  </div>
+</div>
+<div class="section-btns" style="margin-top: 10px;">
+  <a href="{{ link('/buyback?phone=' ~ ((client.phone or '') | urlencode)) }}"><button type="button" class="secondary">{{ t('client_buy_btn') }}</button></a>
+  <a href="{{ link('/sales?phone=' ~ ((client.phone or '') | urlencode) ~ '&name=' ~ (client.name | urlencode)) }}"><button type="button" class="secondary">{{ t('client_sell_btn') }}</button></a>
+  <a href="{{ link('/clients/' ~ client.id ~ '/statement') }}"><button type="button" class="secondary">{{ t('client_statement_btn') }}</button></a>
+</div>
+{% for o in open_orders %}
+<p class="meta"><a href="{{ link('/orders/' ~ o.id) }}">{{ o.label }} · {{ o.total | money }} грн →</a></p>
+{% endfor %}
+
+<details style="margin-top: 10px;">
+  <summary><b>{{ t('client_money_in_btn') }}</b></summary>
+  <form method="post" action="{{ link('/clients/' ~ client.id ~ '/money-in') }}" class="edit-form">
+    <input type="hidden" name="idem" value="{{ idem }}in">
+    {{ pay.rows(accounts, t) }}
+    <label>{{ t('comment_label') }}<input type="text" name="comment"></label>
+    <button type="submit">{{ t('client_money_in_btn') }}</button>
+  </form>
+</details>
+{% if can_pay_out %}
+<details style="margin-top: 10px;">
+  <summary><b>{{ t('client_money_out_btn') }}</b></summary>
+  <form method="post" action="{{ link('/clients/' ~ client.id ~ '/money-out') }}" class="edit-form">
+    <input type="hidden" name="idem" value="{{ idem }}out">
+    {{ pay.rows(accounts, t) }}
+    <label>{{ t('comment_label') }}<input type="text" name="comment"></label>
+    <button type="submit" class="danger">{{ t('client_money_out_btn') }}</button>
+  </form>
+</details>
+{% endif %}
+
+{# ---------------- история документов ---------------- #}
+<h2>{{ t('client_documents_title') }} {{ documents | length }}</h2>
+<div class="table-scroll">
+<table class="table">
+  <thead><tr><th>{{ t('journal_col_doc') }}</th><th>{{ t('sales_col_amount') }}</th>{% if show_profit %}<th>{{ t('journal_col_profit') }}</th>{% endif %}<th>{{ t('col_date') }}</th></tr></thead>
+  <tbody>
+    {% for d in documents %}
+    <tr {% if d.source_path and d.source_path != '/clients/' ~ client.id %}onclick="location.href='{{ link(d.source_path) }}'" class="clickable"{% endif %}>
+      <td><b>{{ d.label }}</b> · {{ t('doc_type_' ~ d.doc_type) }}{% if d.status == 'cancelled' %} <span class="pill pill-cancelled">{{ t('doc_cancelled') }}</span>{% endif %}{% if d.title %}<div class="meta">{{ d.title }}</div>{% endif %}</td>
+      <td>{{ d.amount | money if d.amount is not none else '—' }}</td>
+      {% if show_profit %}<td>{{ d.profit | money if d.profit is not none else '—' }}</td>{% endif %}
+      <td>{{ d.created_at | kyiv }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="4">{{ t('client_documents_empty') }}</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
 </div>
 
 <div class="panel-box" style="margin-top: 16px; text-align: center;">

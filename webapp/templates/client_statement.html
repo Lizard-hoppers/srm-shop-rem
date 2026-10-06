@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% import "_icons.html" as icons %}
+{% block title %}{{ t('client_statement_btn') }}{% endblock %}
+{% block content %}
+<a class="back-link" href="{{ link('/clients/' ~ client.id) }}">{{ icons.icon('back', 16) }} {{ client.name }}</a>
+<h2>{{ t('client_statement_btn') }}</h2>
+<form method="get" class="search-bar">
+  <input type="hidden" name="t" value="{{ token }}">
+  <input type="date" name="date_from" value="{{ date_from }}">
+  <input type="date" name="date_to" value="{{ date_to }}">
+  <button type="submit">{{ t('show_btn') }}</button>
+</form>
+{% macro pos(p) %}{% if p.they_owe %}{{ t('balance_they_owe') }} {{ p.they_owe | money }} грн{% elif p.we_owe %}{{ t('balance_we_owe') }} {{ p.we_owe | money }} грн{% else %}0 грн{% endif %}{% endmacro %}
+<p class="meta">{{ t('statement_opening') }}: <b>{{ pos(statement.opening) }}</b></p>
+<div class="table-scroll">
+<table class="table">
+  <thead><tr><th>{{ t('col_date') }}</th><th>{{ t('journal_col_doc') }}</th><th>{{ t('statement_col_charged') }}</th><th>{{ t('statement_col_paid') }}</th><th>{{ t('statement_col_balance') }}</th></tr></thead>
+  <tbody>
+    {% for r in statement.rows %}
+    <tr>
+      <td>{{ r.created_at | kyiv }}</td>
+      <td>{{ r.kind_label }}{% if r.source %} · {{ r.source }}{% endif %}{% if r.comment and r.comment != r.source %}<div class="meta">{{ r.comment }}</div>{% endif %}</td>
+      <td>{{ r.charged | money if r.charged is not none else '' }}</td>
+      <td>{{ r.paid | money if r.paid is not none else '' }}</td>
+      <td>{{ r.balance | money }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="5">{{ t('statement_empty') }}</td></tr>
+    {% endfor %}
+    <tr><td colspan="2"><b>{{ t('statement_turnover') }}</b></td><td><b>{{ statement.charged | money }}</b></td><td><b>{{ statement.paid | money }}</b></td><td></td></tr>
+  </tbody>
+</table>
+</div>
+<p class="meta">{{ t('statement_closing') }}: <b>{{ pos(statement.closing) }}</b></p>
+<p class="meta">{{ t('statement_hint') }}</p>
+{% endblock %}

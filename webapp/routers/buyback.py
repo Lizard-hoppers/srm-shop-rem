@@ -62,8 +62,9 @@ def _list_context(location_id: int) -> dict:
 
 
 @router.get("")
-def list_view(request: Request, staff=Depends(require_staff)):
-    return render(request, "buyback_list.html", staff=staff, **_list_context(loc(request)))
+def list_view(request: Request, phone: str = "", staff=Depends(require_staff)):
+    """?phone= prefills the seller — «Купить» on a client's card."""
+    return render(request, "buyback_list.html", staff=staff, prefill_phone=phone, **_list_context(loc(request)))
 
 
 @router.post("")

@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% import "_icons.html" as icons %}
+{% import "_payments.html" as pay %}
+{% block title %}{{ order.label }}{% endblock %}
+{% block content %}
+<a class="back-link" href="{{ link('/orders') }}">{{ icons.icon('back', 16) }} {{ t('orders_title') }}</a>
+{% if error %}<div class="flash flash-error">{{ error }}</div>{% endif %}
+
+<div class="panel-box">
+  <h3 style="margin:0;">{{ order.label }} · {{ order.total | money }} грн</h3>
+  <p class="meta" style="margin:6px 0 0;">
+    <span class="pill {{ 'pill-ready' if order.status == 'issued' else ('pill-cancelled' if order.status in ('cancelled', 'expired') else 'pill-in_progress') }}">{{ order.status_label }}</span>
+    {% if order.status == 'reserved' %} {{ t('order_until') }} {{ order.reserved_until | kyiv }}{% endif %}
+  </p>
+  <p class="meta" style="margin:4px 0 0;"><a href="{{ link('/clients/' ~ order.client_id) }}">{{ order.client_name }}{% if order.client_phone %} · {{ order.client_phone }}{% endif %} →</a></p>
+  <p class="meta" style="margin:4px 0 0;">{{ order.staff_name or '—' }} · {{ order.created_at | kyiv }} · {{ order.location_name or '' }}</p>
+  {% if order.sale_id %}<p class="meta" style="margin:4px 0 0;"><a href="{{ link('/sales/' ~ order.sale_id) }}">{{ sale_label }} →</a></p>{% endif %}
+</div>
+
+<div class="table-scroll">
+<table class="table">
+  <thead><tr><th>{{ t('col_product') }}</th><th>{{ t('qty_col') }}</th><th>{{ t('sale_col_price') }}</th><th>{{ t('sales_col_amount') }}</th></tr></thead>
+  <tbody>
+    {% for i in items %}
+    <tr>
+      <td>{{ i.product_name }}{% if i.imei %}<div class="meta">IMEI {{ i.imei }}</div>{% endif %}<div class="meta">{{ t('batch_col') }} №{{ i.batch_id }} · {{ i.cell_code }}</div></td>
+      <td>{{ i.qty }}</td>
+      <td>{{ i.price | money }}</td>
+      <td>{{ (i.qty * i.price) | money }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+
+<div class="table-scroll">
+<table class="table">
+  <tbody>
+    <tr><td>{{ t('pay_total_label') }}</td><td>{{ numbers.total | money }} грн</td></tr>
+    <tr><td>{{ t('pay_paid_label') }}</td><td>{{ numbers.paid | money }} грн</td></tr>
+    <tr><td><b>{{ t('pay_left_label') }}</b></td><td><b>{{ numbers.left | money }} грн</b></td></tr>
+  </tbody>
+</table>
+</div>
+
+{% if order.status == 'reserved' %}
+{% if numbers.left %}
+<h2>{{ t('order_pay_title') }}</h2>
+<form method="post" action="{{ link('/orders/' ~ order.id ~ '/pay') }}" class="edit-form">
+  <input type="hidden" name="idem" value="{{ idem }}p">
+  {{ pay.rows(accounts, t) }}
+  <p class="meta">{{ t('order_pay_hint') }}</p>
+  <button type="submit" class="secondary">{{ t('order_pay_btn') }}</button>
+</form>
+{% endif %}
+
+<h2>{{ t('order_issue_title') }}</h2>
+<form method="post" action="{{ link('/orders/' ~ order.id ~ '/issue') }}" class="edit-form">
+  <input type="hidden" name="idem" value="{{ idem }}i">
+  {% if numbers.left %}
+  {{ pay.rows(accounts, t) }}
+  <p class="meta">{{ t('order_issue_hint') }} {{ numbers.left | money }} грн.</p>
+  {% else %}
+  <p class="meta">{{ t('order_issue_paid_hint') }}</p>
+  {% endif %}
+  <button type="submit">{{ t('order_issue_btn') }}</button>
+</form>
+{% endif %}
+
+{% if order.status in ('reserved', 'expired') %}
+<form method="post" action="{{ link('/orders/' ~ order.id ~ '/extend') }}" class="edit-form" style="margin-top: 12px;">
+  <button type="submit" class="secondary">{{ t('order_renew_btn') if order.status == 'expired' else t('order_extend_btn') }}</button>
+</form>
+<form method="post" action="{{ link('/orders/' ~ order.id ~ '/cancel') }}" class="edit-form" style="margin-top: 12px;">
+  <button type="submit" class="danger">{{ t('production_cancel_btn') }}</button>
+</form>
+{% if numbers.paid %}<p class="meta">{{ t('order_cancel_hint') }}</p>{% endif %}
+{% endif %}
+
+{% if position.balance %}
+<p class="meta" style="margin-top: 12px;">{{ t('client_balance_title') }}: {% if position.they_owe %}{{ t('balance_they_owe') }} {{ position.they_owe | money }} грн{% else %}{{ t('balance_we_owe') }} {{ position.we_owe | money }} грн{% endif %}</p>
+{% endif %}
+{% if document and staff.role in ('owner', 'admin') %}
+<p class="meta" style="margin-top: 12px;"><a href="{{ link('/journal/' ~ document.id) }}">{{ t('more_journal') }} →</a></p>
+{% endif %}
+{% endblock %}

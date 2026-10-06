@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% import "_icons.html" as icons %}
+{% import "_payments.html" as pay %}
 {% block title %}{{ master.name }}{% endblock %}
 {% block content %}
 <a class="back-link" href="{{ link('/masters') }}">{{ icons.icon('back', 16) }} {{ t('nav_masters') }}</a>
@@ -50,9 +51,33 @@
 
 <h2>{{ t('master_accruals_title') }}</h2>
 <div class="panel-box" style="margin-bottom: 12px;">
-  <div style="font-size: 24px; font-weight: 800;">{{ accrued | money }} грн</div>
-  <div class="stat-label">{{ t('master_accrued_label') }}</div>
+  <div style="display:flex; gap:16px; flex-wrap:wrap;">
+    <div><div style="font-size: 22px; font-weight: 800;">{{ accrued | money }} грн</div><div class="stat-label">{{ t('master_accrued_label') }}</div></div>
+    <div><div style="font-size: 22px; font-weight: 800;">{{ paid | money }} грн</div><div class="stat-label">{{ t('master_paid_label') }}</div></div>
+    <div><div style="font-size: 22px; font-weight: 800;">{{ owed | money }} грн</div><div class="stat-label">{{ t('master_owed_label') }}</div></div>
+  </div>
 </div>
+<details style="margin-bottom: 12px;">
+  <summary><b>{{ t('master_payout_btn') }}</b></summary>
+  <form method="post" action="{{ link('/masters/' ~ master.id ~ '/payout') }}" class="edit-form">
+    <input type="hidden" name="idem" value="{{ idem }}">
+    {{ pay.rows(accounts, t) }}
+    <label>{{ t('comment_label') }}<input type="text" name="comment"></label>
+    <button type="submit">{{ t('master_payout_btn') }}</button>
+  </form>
+</details>
+{% if payouts %}
+<div class="table-scroll">
+<table class="table">
+  <thead><tr><th>{{ t('col_when') }}</th><th>{{ t('master_payout_col') }}</th><th>{{ t('sales_col_amount') }}</th></tr></thead>
+  <tbody>
+    {% for p in payouts %}
+    <tr><td>{{ p.created_at | kyiv }}</td><td>{{ p.comment or '—' }}{% if p.paid_by_name %} <span class="meta">· {{ p.paid_by_name }}</span>{% endif %}{% if p.cancelled_at %} <span class="pill pill-cancelled">{{ t('doc_cancelled') }}</span>{% endif %}</td><td>{{ p.amount | money }}</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
 {% if accruals %}
 <div class="table-scroll">
 <table class="table">

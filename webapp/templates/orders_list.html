@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% import "_icons.html" as icons %}
+{% block title %}{{ t('orders_title') }}{% endblock %}
+{% block content %}
+{% set sales_tab = 'orders' %}{% include "_sales_tabs.html" %}
+<div class="section-btns">
+  <a href="{{ link('/orders') }}"><button type="button" class="secondary" {% if show != 'all' %}style="border-color: var(--accent); color: var(--accent-2);"{% endif %}>{{ t('orders_active') }}</button></a>
+  <a href="{{ link('/orders?show=all') }}"><button type="button" class="secondary" {% if show == 'all' %}style="border-color: var(--accent); color: var(--accent-2);"{% endif %}>{{ t('filter_all') }}</button></a>
+</div>
+<div class="nav-list">
+  {% for o in orders %}
+  <a class="card nav-card" href="{{ link('/orders/' ~ o.id) }}">
+    <div class="card-icon">{{ icons.icon('box', 18) }}</div>
+    <div class="nav-card-body">
+      <div class="nav-card-title">{{ o.label }} · {{ o.client_name }} · {{ o.total | money }} грн</div>
+      <div class="nav-card-sub">{{ o.status_label }}{% if o.status == 'reserved' %} {{ t('order_until') }} {{ o.reserved_until | kyiv }}{% endif %} · {{ t('order_paid_short') }} {{ o.paid | money }}</div>
+    </div>
+    <div class="chevron">{{ icons.icon('chevron', 18) }}</div>
+  </a>
+  {% else %}
+  <p class="meta">{{ t('orders_empty') }}</p>
+  {% endfor %}
+</div>
+<p class="meta">{{ t('orders_how_hint') }} <a href="{{ link('/sales') }}">{{ t('nav_sales') }} →</a></p>
+{% endblock %}

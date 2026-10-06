@@ -25,12 +25,15 @@ import sqlite3
 from core import cash as _cash
 from core import documents as _documents
 from core import inventory as _inventory
+from core import masters as _masters
+from core import orders as _orders
+from core import settlements as _settlements
 from core import stock_transfers as _stock_transfers
 from core.documents import DocumentError
 
 CANCELLABLE_TYPES = (
     "sale", "cash_out", "cash_adjust", "exchange", "money_transfer",
-    "receipt", "stock_in", "writeoff", "transfer", "buyback",
+    "receipt", "stock_in", "writeoff", "transfer", "buyback", "cash_in", "client_order",
 )
 
 
@@ -53,10 +56,28 @@ def _cancel_sale(conn: sqlite3.Connection, doc: sqlite3.Row, staff_id: int) -> N
     ).fetchall():
         _cash.cancel_transaction(conn, row["id"])
     conn.execute("UPDATE sales_orders SET status = 'cancelled' WHERE id = ?", (order_id,))
+    _settlements.cancel_ref(conn, "sales_order", order_id)
+    # A sale that came out of a заказ: the заказ is over too (whatever was
+    # paid towards it stays on the client's balance as an аванс).
+    conn.execute("UPDATE client_orders SET status = 'cancelled' WHERE sale_id = ?", (order_id,))
 
 
 def _cancel_cash(conn: sqlite3.Connection, doc: sqlite3.Row, staff_id: int) -> None:
-    _cash.cancel_transaction(conn, doc["ref_id"])
+    """A кассовый document wraps one of three things: a plain cash row, a
+    «Принять/Выдать деньги» with a контрагент, or a выплата мастеру."""
+    if doc["ref_table"] == "client_ledger":
+        _settlements.cancel_money(conn, doc["ref_id"])
+    elif doc["ref_table"] == "master_payouts":
+        _masters.cancel_payout(conn, doc["ref_id"])
+    else:
+        _cash.cancel_transaction(conn, doc["ref_id"])
+
+
+def _cancel_client_order(conn: sqlite3.Connection, doc: sqlite3.Row, staff_id: int) -> None:
+    try:
+        _orders.cancel(conn, doc["ref_id"], staff_id, mark_document=False)
+    except _orders.OrderError as exc:
+        raise DocumentError(str(exc)) from exc
 
 
 def _cancel_money_rows(conn: sqlite3.Connection, ref_type: str, ref_id: int) -> None:
@@ -150,6 +171,7 @@ def _cancel_buyback(conn: sqlite3.Connection, doc: sqlite3.Row, staff_id: int) -
     ).fetchall()
     _reverse_movements(conn, movements, staff_id, "buyback_cancel", doc["ref_id"], f"Отмена {_documents.doc_label(doc)}")
     _cancel_money_rows(conn, "buyback_order", doc["ref_id"])
+    _settlements.cancel_ref(conn, "buyback_order", doc["ref_id"])
 
 
 _REVERSERS = {
@@ -158,6 +180,7 @@ _REVERSERS = {
     "transfer": _cancel_manual_stock,
     "sale": _cancel_sale, "cash_out": _cancel_cash, "cash_adjust": _cancel_cash,
     "exchange": _cancel_exchange, "money_transfer": _cancel_transfer,
+    "cash_in": _cancel_cash, "client_order": _cancel_client_order,
 }
 
 

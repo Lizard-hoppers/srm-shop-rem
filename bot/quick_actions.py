@@ -46,6 +46,7 @@ from core import inventory as core_inventory
 from core import production as core_production
 from core import repairs as core_repairs
 from core import sales as core_sales
+from core import settlements as core_settlements
 from core import shifts as core_shifts
 from core import store_access
 from core.storage import get_conn
@@ -79,6 +80,7 @@ _ADJUST_ROLES = ("owner", "admin")
 # call.
 BTN_REPAIR = "🔧 Принять ремонт"
 BTN_OUR_REPAIR = "🛠 Наш ремонт"
+BTN_SALE = "🛍 Продажа"
 BTN_CLIENT = "👤 Клиент"
 BTN_BUYBACK = "🛒 Покупка"
 BTN_PURCHASE = "📦 Приход"
@@ -87,7 +89,7 @@ BTN_CASH = "💵 Касса"
 BTN_TRANSFER = "🔁 Перемещение"
 BTN_CANCEL = "❌ Отмена"
 _ENTRY_BUTTONS = {
-    BTN_REPAIR, BTN_OUR_REPAIR, BTN_CLIENT, BTN_BUYBACK, BTN_PURCHASE, BTN_SUMMARY, BTN_CASH, BTN_TRANSFER, BTN_CANCEL,
+    BTN_SALE, BTN_REPAIR, BTN_OUR_REPAIR, BTN_CLIENT, BTN_BUYBACK, BTN_PURCHASE, BTN_SUMMARY, BTN_CASH, BTN_TRANSFER, BTN_CANCEL,
 }
 
 
@@ -103,11 +105,11 @@ _ENTRY_BUTTONS = {
 # what other messages/edits happen, so there's no need to re-attach it.
 QUICK_ACTIONS_KEYBOARD = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text=BTN_REPAIR), KeyboardButton(text=BTN_CLIENT, style="primary")],
-        [KeyboardButton(text=BTN_BUYBACK, style="success"), KeyboardButton(text=BTN_PURCHASE)],
-        [KeyboardButton(text=BTN_OUR_REPAIR), KeyboardButton(text=BTN_TRANSFER)],
-        [KeyboardButton(text=BTN_SUMMARY), KeyboardButton(text=BTN_CASH)],
-        [KeyboardButton(text=BTN_CANCEL, style="danger")],
+        [KeyboardButton(text=BTN_SALE, style="success"), KeyboardButton(text=BTN_BUYBACK, style="success")],
+        [KeyboardButton(text=BTN_REPAIR), KeyboardButton(text=BTN_OUR_REPAIR)],
+        [KeyboardButton(text=BTN_PURCHASE), KeyboardButton(text=BTN_TRANSFER)],
+        [KeyboardButton(text=BTN_CLIENT, style="primary"), KeyboardButton(text=BTN_CASH)],
+        [KeyboardButton(text=BTN_SUMMARY), KeyboardButton(text=BTN_CANCEL, style="danger")],
     ],
     resize_keyboard=True,
     is_persistent=True,
@@ -181,6 +183,19 @@ class TransferFlow(StatesGroup):
     search = State()
     qty = State()
     review = State()
+
+
+class SaleFlow(StatesGroup):
+    """«🛍 Продажа» (Заход 6) — handlers live in bot/sale_flow.py; the
+    states are declared here so the shared cancel/fallback handlers at the
+    bottom of this module cover them like every other flow. `name` is
+    asked only for a phone number the base doesn't know yet."""
+    item = State()
+    price = State()
+    phone = State()
+    name = State()
+    pay = State()
+    confirm = State()
 
 
 class ShiftOpen(StatesGroup):
@@ -511,11 +526,26 @@ def _summary_cash_adjustment(data: dict) -> list[str]:
     return [f"{verb}: {data['amount']} грн"]
 
 
+def _steps_sale(data: dict) -> list[str]:
+    return ["item", "price", "phone"] + ([] if data.get("client_known") else ["name"]) + ["pay"]
+
+
+def _summary_sale(data: dict) -> list[str]:
+    lines = []
+    if data.get("item_label"):
+        lines.append(f"Товар: {html.escape(data['item_label'])}")
+    if data.get("price"):
+        lines.append(f"Цена: {data['price']} грн")
+    lines.append(_client_line("Клиент", data))
+    return [line for line in lines if line]
+
+
 # Ключ — имя StatesGroup ровно так, как aiogram отдаёт его в
 # state.get_state() ("RepairIntake:model").
 _FLOWS = {
     "RepairIntake": ("🔧 Приём ремонта", _steps_repair, _summary_repair),
     "PhoneBuy": ("🛒 Покупка телефона", _steps_phone_buy, _summary_phone_buy),
+    "SaleFlow": ("🛍 Продажа", _steps_sale, _summary_sale),
     "QuickContact": ("👤 Новый клиент", _steps_contact, _summary_contact),
     "CashExpense": ("💵 Расход", _steps_cash_expense, _summary_cash_expense),
     "CashAdjustment": ("💵 Касса", _steps_cash_adjustment, _summary_cash_adjustment),
@@ -1160,21 +1190,33 @@ async def _client_card(store: StoreConfig, client_id: int, staff_id: int) -> tup
         client = core_clients.get_client(conn, client_id)
         repairs_count = len(core_repairs.list_repairs_by_client(conn, client_id))
         sales_count = len(core_sales.list_sales_by_client(conn, client_id))
+        position = core_settlements.client_position(conn, client_id)
 
     lines = [f"👤 <b>{html.escape(client['name'])}</b>"]
     if client["phone"]:
         lines.append(f"📞 {html.escape(client['phone'])}")
     lines.append(f"🔧 Ремонтов: {repairs_count}")
     lines.append(f"🛒 Продаж: {sales_count}")
+    # Взаиморасчёты — the first thing to know before selling or paying out.
+    if position["they_owe"]:
+        lines.append(f"💰 <b>Нам должны: {position['they_owe']} грн</b>")
+    elif position["we_owe"]:
+        lines.append(f"💰 <b>Мы должны: {position['we_owe']} грн</b>")
+    else:
+        lines.append("💰 Взаиморасчёты: 0")
     if client["notes"]:
         lines.append(f"📝 {html.escape(client['notes'])}")
 
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(
-            text="Открыть в CRM",
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="📋 Карточка: история, деньги, сверка",
             web_app=WebAppInfo(url=crm_link(f"/clients/{client_id}", staff_id, store.id)),
-        ),
-    ]])
+        )],
+        [InlineKeyboardButton(
+            text="🧾 Сверка за период",
+            web_app=WebAppInfo(url=crm_link(f"/clients/{client_id}/statement", staff_id, store.id)),
+        )],
+    ])
     return "\n".join(lines), keyboard
 
 
@@ -1251,7 +1293,7 @@ async def client_search_pick(callback: CallbackQuery, state: FSMContext) -> None
     await callback.answer()
 
 
-@router.message(F.text == BTN_CANCEL, StateFilter(RepairIntake, QuickContact, PhoneBuy, CashExpense, CashAdjustment, ClientSearch, ShiftOpen, TransferFlow))
+@router.message(F.text == BTN_CANCEL, StateFilter(RepairIntake, QuickContact, PhoneBuy, CashExpense, CashAdjustment, ClientSearch, ShiftOpen, TransferFlow, SaleFlow))
 async def cancel_flow(message: Message, state: FSMContext) -> None:
     """Deletes EVERYTHING from this flow attempt — the bot's own tracked
     message, every reply the staff member typed along the way (name,
@@ -1612,7 +1654,7 @@ async def contact_confirm(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer("Готово")
 
 
-@router.callback_query(F.data.in_({"quick_repair_cancel", "quick_contact_cancel", "buy_cancel", "cash_cancel", "tr_cancel"}))
+@router.callback_query(F.data.in_({"quick_repair_cancel", "quick_contact_cancel", "buy_cancel", "cash_cancel", "tr_cancel", "sl_cancel"}))
 async def quick_cancel_callback(callback: CallbackQuery, state: FSMContext) -> None:
     """Inline ❌ Отмена on the confirm card — same full cleanup as
     cancel_flow, minus the entry-tap-of-cancel (a button tap doesn't
@@ -1630,6 +1672,6 @@ async def quick_cancel_callback(callback: CallbackQuery, state: FSMContext) -> N
 # message while waiting on inline-button confirm) gets a nudge instead of
 # silence ---
 
-@router.message(StateFilter(RepairIntake, QuickContact, PhoneBuy, CashExpense, CashAdjustment, ClientSearch, ShiftOpen, TransferFlow))
+@router.message(StateFilter(RepairIntake, QuickContact, PhoneBuy, CashExpense, CashAdjustment, ClientSearch, ShiftOpen, TransferFlow, SaleFlow))
 async def quick_flow_fallback(message: Message, state: FSMContext) -> None:
     await _nudge(message, state, "Не понял ответ. Следуйте подсказке выше, либо ❌ Отмена.")

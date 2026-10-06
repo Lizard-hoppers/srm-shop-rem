@@ -7,6 +7,7 @@
 <div style="margin-bottom: 10px;"><span class="pill pill-cancelled">{{ t('doc_cancelled') }}</span>{% if document and document.cancel_reason %} <span class="meta">{{ t('doc_cancel_reason_prefix') }} {{ document.cancel_reason }}</span>{% endif %}</div>
 {% endif %}
 <p class="meta">{{ t('sales_col_client') }}: {{ sale.client_name or t('sales_client_none') }} · {{ t('channel_label') }}: {{ t('channel_online') if sale.channel == 'online' else t('channel_offline') }} · {{ t('sale_meta_payment') }}: {{ t('payment_method_' ~ sale.payment_method) if sale.payment_method else '—' }} · {{ t('sales_col_seller') }}: {{ sale.staff_name or '—' }} · {{ sale.created_at | kyiv }}</p>
+{% if sale.client_id %}<p class="meta"><a href="{{ link('/clients/' ~ sale.client_id) }}">{{ t('client_card_link') }} →</a>{% if order_id %} · <a href="{{ link('/orders/' ~ order_id) }}">{{ order_label }} →</a>{% endif %}</p>{% endif %}
 {% if sale.warranty_until %}<p class="badge">{{ t('warranty_until_label') }} {{ sale.warranty_until | rudate }}</p>{% endif %}
 
 <div class="table-scroll">
@@ -37,6 +38,12 @@
     {% endfor %}
   </tbody>
 </table>
+</div>
+{% endif %}
+{% if numbers.debt and sale.status != 'cancelled' %}
+<div class="panel-box" style="margin-top: 12px;">
+  <b>{{ t('sale_paid_now') }}: {{ numbers.paid | money }} грн {{ t('production_used_of') }} {{ numbers.total | money }}</b>
+  <p class="meta" style="margin:4px 0 0;">{{ t('sale_debt_note') }} {{ numbers.debt | money }} грн</p>
 </div>
 {% endif %}
 {% if document and staff.role in ('owner', 'admin') %}

@@ -65,22 +65,17 @@ def _serial_units(conn, location_id: int | None) -> dict:
 
 
 @router.get("")
-def list_view(request: Request, staff=Depends(require_staff)):
+def list_view(request: Request, phone: str = "", name: str = "", staff=Depends(require_staff)):
+    """?phone=&name= prefill the client — «Продать» on a client's card."""
     with get_conn() as conn:
         ctx = _list_context(conn, loc(request))
-    return render(request, "sales_list.html", staff=staff, **ctx)
+    return render(request, "sales_list.html", staff=staff, prefill_phone=phone, prefill_name=name, **ctx)
 
 
-@router.post("")
-async def create_view(request: Request, staff=Depends(require_staff)):
-    form = await request.form()
-    client_name = (form.get("client_name") or "").strip()
-    client_phone = core_clients.normalize_phone((form.get("client_phone") or "").strip())
-    channel = form.get("channel", "offline")
-    warranty_until = (form.get("warranty_until") or "").strip() or None
-    payment_method = form.get("payment_method") or "cash"
-    if payment_method not in core_cash.METHODS:
-        payment_method = "cash"
+def parse_rows(form) -> tuple[list[tuple[int, int, int, str]], str | None]:
+    """The checkout rows of the sale form as (product_id, qty, price,
+    imei), and an error for the cashier if they can't be used. Shared
+    with «Отложить на 24 часа» (webapp.routers.orders) — the same form."""
     row_count = int(form.get("row_count") or INITIAL_ROWS)
 
     items = []
@@ -105,6 +100,40 @@ async def create_view(request: Request, staff=Depends(require_staff)):
         error = "Не найден в каталоге: " + ", ".join(unresolved) + " — выберите товар из списка или уберите строку."
     elif not items:
         error = "Добавьте хотя бы один товар в чек."
+    return items, error
+
+
+def resolve_units(conn, items: list[tuple[int, int, int, str]]) -> list[tuple[int, int, int, int | None]]:
+    """A typed/scanned IMEI names the exact unit (its партия)."""
+    resolved_items = []
+    for product_id, qty, price, imei in items:
+        batch_id = None
+        if imei:
+            unit = core_inventory.find_unit_by_imei(conn, imei)
+            if not unit or unit["product_id"] != product_id:
+                raise core_sales.SaleError(f"IMEI {imei} не найден на остатке этого товара.")
+            batch_id = unit["id"]
+        resolved_items.append((product_id, qty, price, batch_id))
+    return resolved_items
+
+
+@router.post("")
+async def create_view(request: Request, staff=Depends(require_staff)):
+    form = await request.form()
+    client_name = (form.get("client_name") or "").strip()
+    client_phone = core_clients.normalize_phone((form.get("client_phone") or "").strip())
+    channel = form.get("channel", "offline")
+    warranty_until = (form.get("warranty_until") or "").strip() or None
+    payment_method = form.get("payment_method") or "cash"
+    if payment_method not in core_cash.METHODS:
+        payment_method = "cash"
+    # «В долг»: whatever isn't paid now goes onto the client's balance —
+    # so there has to be a client to carry it.
+    allow_debt = form.get("allow_debt") == "1"
+
+    items, error = parse_rows(form)
+    if not error and allow_debt and not client_phone:
+        error = "Продажа в долг — только клиенту: укажите его номер телефона."
 
     if error:
         with get_conn() as conn:
@@ -117,21 +146,15 @@ async def create_view(request: Request, staff=Depends(require_staff)):
             already = core_documents.find_by_key(conn, key)
             if already:
                 return RedirectResponse(link(request, f"/sales/{already['ref_id']}"), status_code=303)
-            # A typed/scanned IMEI names the exact unit (its партия).
-            resolved_items = []
-            for product_id, qty, price, imei in items:
-                batch_id = None
-                if imei:
-                    unit = core_inventory.find_unit_by_imei(conn, imei)
-                    if not unit or unit["product_id"] != product_id:
-                        raise core_sales.SaleError(f"IMEI {imei} не найден на остатке этого товара.")
-                    batch_id = unit["id"]
-                resolved_items.append((product_id, qty, price, batch_id))
-            items = resolved_items
+            items = resolve_units(conn, items)
             client_id = core_clients.get_or_create_by_phone(conn, client_name, client_phone, source=channel) if client_phone else None
             order_id = core_sales.create_sale(
                 conn, client_id, channel, staff["id"], items, warranty_until, payment_method,
-                location_id=loc(request), key=key, payments=payments_from_form(form) or None,
+                location_id=loc(request), key=key,
+                # In «в долг» an empty «Оплата» means «nothing paid now»,
+                # not «all of it in cash».
+                payments=payments_from_form(form) if allow_debt else (payments_from_form(form) or None),
+                allow_debt=allow_debt,
             )
     except (InsufficientStockError, core_cash.PaymentError, core_sales.SaleError) as exc:
         # Raised out of the `with` on purpose: get_conn() commits on a
@@ -159,6 +182,10 @@ def detail_view(request: Request, order_id: int, staff=Depends(require_staff)):
         items = core_sales.get_sale_items(conn, order_id)
         document = core_documents.get_for(conn, "sale", order_id)
         payments = core_cash.payments_for(conn, "sales_order", order_id)
+        numbers = core_sales.sale_numbers(conn, order_id)
+        order = conn.execute("SELECT id FROM client_orders WHERE sale_id = ?", (order_id,)).fetchone()
     return render(
         request, "sale_detail.html", staff=staff, sale=sale, items=items, document=document, payments=payments,
+        numbers=numbers, order_label=core_documents.label("client_order", order["id"]) if order else None,
+        order_id=order["id"] if order else None,
     )

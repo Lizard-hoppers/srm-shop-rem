@@ -42,6 +42,8 @@ DOC_TYPES: dict[str, tuple[str, str]] = {
     "money_transfer": ("ДП", "Перемещение денег"),
     "shift": ("СМ", "Открытие смены"),
     "production": ("ПР", "Производство"),
+    "client_order": ("ЗК", "Заказ клиента"),
+    "cash_in": ("ПКО", "Приём денег"),
 }
 
 # Types whose number IS the id of the row they wrap (repair №44 has always
@@ -49,6 +51,7 @@ DOC_TYPES: dict[str, tuple[str, str]] = {
 # РК-44, not a second, different number). The rest count up on their own.
 _NUMBER_FROM_REF = {
     "repair", "sale", "buyback", "receipt", "supplier_return", "exchange", "money_transfer", "shift", "production",
+    "client_order",
 }
 
 # Where «открыть документ» leads, by type. {id} is ref_id.
@@ -58,6 +61,7 @@ _SOURCE_PATHS = {
     "buyback": "/buyback/{id}",
     "receipt": "/purchases/{id}",
     "production": "/production/{id}",
+    "client_order": "/orders/{id}",
 }
 
 
@@ -83,6 +87,8 @@ def type_name(doc_type: str) -> str:
 def source_path(doc: sqlite3.Row) -> str | None:
     if doc["doc_type"] == "transfer" and doc["ref_table"] == "stock_transfers":
         return f"/transfers/{doc['ref_id']}"
+    if doc["ref_table"] == "client_ledger" and doc["client_id"]:
+        return f"/clients/{doc['client_id']}"
     template = _SOURCE_PATHS.get(doc["doc_type"])
     return template.format(id=doc["ref_id"]) if template and doc["ref_id"] else None
 

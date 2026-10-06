@@ -2,6 +2,7 @@
 {% import "_payments.html" as pay %}
 {% block title %}{{ t('nav_sales') }}{% endblock %}
 {% block content %}
+{% set sales_tab = 'sales' %}{% include "_sales_tabs.html" %}
 {% if error %}<div class="flash flash-error">{{ error }}</div>{% endif %}
 
 <div class="table-scroll">
@@ -58,17 +59,21 @@
   <h3>{{ t('pay_section_title') }}</h3>
   {{ pay.rows(accounts, t) }}
   <p class="meta" id="salePayTotals">{{ t('pay_sale_hint') }}</p>
+  <label style="display:flex; align-items:center; gap:8px;"><input type="checkbox" name="allow_debt" value="1" style="width:auto;"> {{ t('sale_debt_label') }}</label>
+  <p class="meta" style="margin-top:0;">{{ t('sale_debt_hint') }}</p>
   <label>{{ t('sales_warranty_optional_label') }}<input type="date" name="warranty_until"></label>
   </div>
 
   <div>
   <h3>{{ t('sales_client_contacts_title') }}</h3>
-  <label>{{ t('client_name_label') }}<input type="text" name="client_name"></label>
-  <label>{{ t('client_phone_label') }}<input type="text" name="client_phone" value="+380"></label>
+  <label>{{ t('client_name_label') }}<input type="text" name="client_name" value="{{ prefill_name or '' }}"></label>
+  <label>{{ t('client_phone_label') }}<input type="text" name="client_phone" value="{{ prefill_phone or '+380' }}"></label>
   </div>
   </div>
 
   <button type="submit">{{ t('sales_submit_btn') }}</button>
+  <button type="submit" class="secondary" formaction="{{ link('/orders') }}" style="margin-top: 8px;">{{ t('order_hold_btn') }}</button>
+  <p class="meta">{{ t('order_hold_hint') }}</p>
 </form>
 
 <template id="saleRowTemplate">
