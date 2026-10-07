@@ -63,6 +63,18 @@ from core.storage import get_conn, init_db
 from core.telegram_auth import validate_init_data
 from fastapi.testclient import TestClient
 
+# Photos written during the run go to a throwaway folder, never into
+# webapp/static: this file is also run inside the LIVE folder after every
+# deploy, and until 07.10 each run left its fake покупка photos next to the
+# real ones (and `git add -A` then committed them).
+import atexit
+import shutil
+
+_TEST_PHOTO_ROOT = tempfile.mkdtemp(prefix="crm-test-photos-")
+atexit.register(shutil.rmtree, _TEST_PHOTO_ROOT, True)
+repairs.PHOTO_DIR = os.path.join(_TEST_PHOTO_ROOT, "device_photos")
+buyback.PHOTO_DIR = os.path.join(_TEST_PHOTO_ROOT, "buyback_photos")
+
 PASS = 0
 FAIL = 0
 
@@ -2473,7 +2485,7 @@ def scenario_webapp_forms(db_path: str) -> None:
             intake_photo_path = repairs.get_repair(conn, intake_photo_order_id)["device_photo_path"]
         check("a photo attached on the intake form is on record immediately, not after a follow-up trip",
               bool(intake_photo_path) and intake_photo_path.endswith(".jpg"))
-        intake_photo_file = os.path.join("webapp", "static", "device_photos", intake_photo_path or "")
+        intake_photo_file = os.path.join(repairs.PHOTO_DIR, intake_photo_path or "")
         check("the intake photo file was actually written to disk", os.path.exists(intake_photo_file))
         if os.path.exists(intake_photo_file):
             os.remove(intake_photo_file)
@@ -2526,7 +2538,7 @@ def scenario_webapp_forms(db_path: str) -> None:
         repairs_list_resp = client.get(f"/repairs?t={token}")
         check("the repairs list is now a card grid, not a table", 'class="cards"' in repairs_list_resp.text)
 
-        saved_device_photo_file = os.path.join("webapp", "static", "device_photos", device_photo_path or "")
+        saved_device_photo_file = os.path.join(repairs.PHOTO_DIR, device_photo_path or "")
         check("the uploaded device photo file was actually written to disk",
               device_photo_path is not None and os.path.exists(saved_device_photo_file))
         if device_photo_path and os.path.exists(saved_device_photo_file):

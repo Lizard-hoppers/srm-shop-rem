@@ -11,3 +11,5 @@ stores.json
 webapp/static/product_photos/
 webapp/static/repair_photos/
 webapp/static/device_photos/
+# фото купленных телефонов — данные клиентов, как и остальные папки с фото
+webapp/static/buyback_photos/
