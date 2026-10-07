@@ -62,6 +62,14 @@ def set_sales_channel(conn: sqlite3.Connection, sales_channel: str | None, locat
     )
 
 
+def set_assistant_digest(conn: sqlite3.Connection, enabled: bool, location_id: int | None = None) -> None:
+    """Switch the помощник's daily «Проблемы» digest for this точка on or off (core.assistant)."""
+    conn.execute(
+        "UPDATE locations SET assistant_digest = ?, updated_at = datetime('now') WHERE id = ?",
+        (1 if enabled else 0, _locations.resolve(conn, location_id)),
+    )
+
+
 def set_buyback_topic(conn: sqlite3.Connection, topic_id: str | int | None, location_id: int | None = None) -> None:
     """The forum topic of the точка's staff group that покупки are posted
     to (the number from a t.me/c/<group>/<topic> link). Blank or anything

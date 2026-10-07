@@ -1,0 +1,15 @@
+{# День / неделя / месяц and (owner/admin with several точки) which точка.
+   Set filter_path before including; expects period, point, locations. #}
+<div class="section-btns">
+  {% for key in ('day', 'week', 'month') %}
+  <a href="{{ link(filter_path ~ '?period=' ~ key ~ '&point=' ~ point) }}"><button type="button" class="secondary" {% if period == key %}style="border-color: var(--accent); color: var(--accent-2);"{% endif %}>{{ t('period_' ~ key) }}</button></a>
+  {% endfor %}
+</div>
+{% if locations | length > 1 %}
+<div class="section-btns">
+  <a href="{{ link(filter_path ~ '?period=' ~ period ~ '&point=all') }}"><button type="button" class="secondary" {% if point == 'all' %}style="border-color: var(--accent); color: var(--accent-2);"{% endif %}>{{ t('point_all') }}</button></a>
+  {% for l in locations %}
+  <a href="{{ link(filter_path ~ '?period=' ~ period ~ '&point=' ~ l.id) }}"><button type="button" class="secondary" {% if point == l.id | string %}style="border-color: var(--accent); color: var(--accent-2);"{% endif %}>{{ l.name }}</button></a>
+  {% endfor %}
+</div>
+{% endif %}

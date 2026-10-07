@@ -19,6 +19,24 @@
     </div>
     <div class="chevron">{{ icons.icon('chevron', 18) }}</div>
   </a>
+  {% if staff.role in ('owner', 'admin') %}
+  <a class="card nav-card" href="{{ link('/profit') }}">
+    <div class="card-icon">{{ icons.icon('chart', 18) }}</div>
+    <div class="nav-card-body">
+      <div class="nav-card-title">{{ t('profit_title') }}</div>
+      <div class="nav-card-sub">{{ t('profit_sub') }}</div>
+    </div>
+    <div class="chevron">{{ icons.icon('chevron', 18) }}</div>
+  </a>
+  {% endif %}
+  <a class="card nav-card" href="{{ link('/orders') }}">
+    <div class="card-icon">{{ icons.icon('box', 18) }}</div>
+    <div class="nav-card-body">
+      <div class="nav-card-title">{{ t('orders_title') }}</div>
+      <div class="nav-card-sub">{{ t('orders_sub') }}</div>
+    </div>
+    <div class="chevron">{{ icons.icon('chevron', 18) }}</div>
+  </a>
   <a class="card nav-card" href="{{ link('/reports') }}">
     <div class="card-icon">{{ icons.icon('chart', 18) }}</div>
     <div class="nav-card-body">

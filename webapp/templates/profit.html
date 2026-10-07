@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% import "_icons.html" as icons %}
+{% block title %}{{ t('profit_title') }}{% endblock %}
+{% block content %}
+<a class="back-link" href="{{ link('/') }}">{{ icons.icon('back', 16) }} {{ t('nav_home') }}</a>
+<h2>{{ t('profit_title') }}</h2>
+{% set filter_path = '/profit' %}{% include "_period_filter.html" %}
+<form method="get" class="search-bar">
+  <input type="hidden" name="t" value="{{ token }}">
+  <input type="hidden" name="point" value="{{ point }}">
+  <input type="date" name="date_from" value="{{ date_from }}">
+  <input type="date" name="date_to" value="{{ date_to }}">
+  <button type="submit">{{ t('show_btn') }}</button>
+</form>
+
+<div class="panel-box" style="margin: 12px 0;">
+  <div style="font-size: 28px; font-weight: 800;">{{ profit.net | money }} грн</div>
+  <div class="stat-label">{{ t('profit_title') }} · {{ date_from | rudate }} — {{ date_to | rudate }}</div>
+</div>
+
+<div class="table-scroll">
+<table class="table">
+  <tbody>
+    <tr><td>{{ t('profit_sales') }} <span class="meta">· {{ profit.sales_count }} · {{ t('profit_revenue') }} {{ profit.sales_revenue | money }}</span></td><td>+{{ profit.sales_profit | money }}</td></tr>
+    <tr><td>{{ t('profit_repairs') }} <span class="meta">· {{ profit.repairs_count }} · {{ t('profit_revenue') }} {{ profit.repairs_revenue | money }}</span></td><td>+{{ profit.repairs_profit | money }}</td></tr>
+    <tr><td><b>{{ t('profit_gross') }}</b></td><td><b>{{ profit.gross | money }}</b></td></tr>
+    <tr><td>{{ t('expense_category_rent') }}</td><td>−{{ profit.expenses.rent | money }}</td></tr>
+    <tr><td>{{ t('expense_category_salary') }}</td><td>−{{ profit.expenses.salary | money }}</td></tr>
+    <tr><td>{{ t('expense_category_other') }}</td><td>−{{ profit.expenses.other | money }}</td></tr>
+    <tr><td>{{ t('profit_writeoffs') }}</td><td>−{{ profit.writeoffs | money }}</td></tr>
+    <tr><td><b>{{ t('profit_title') }}</b></td><td><b>{{ profit.net | money }}</b></td></tr>
+  </tbody>
+</table>
+</div>
+{% if profit.sales_unknown_cost %}<p class="meta">⚠️ {{ t('profit_unknown_cost') }} {{ profit.sales_unknown_cost }}</p>{% endif %}
+<p class="meta">{{ t('profit_hint') }}</p>
+
+<h2>{{ t('profit_standing_title') }}</h2>
+<div class="table-scroll">
+<table class="table">
+  <tbody>
+    <tr><td>{{ t('home_cash_balance') }}</td><td>{{ standing.cash_balance | money }}</td></tr>
+    <tr><td>{{ t('home_stock_value') }}</td><td>{{ standing.stock_value | money }}</td></tr>
+    <tr><td>{{ t('home_they_owe') }}</td><td>{{ standing.they_owe | money }}</td></tr>
+    <tr><td>{{ t('profit_we_owe_clients') }}</td><td>{{ standing.we_owe | money }}</td></tr>
+    <tr><td>{{ t('profit_we_owe_masters') }}</td><td>{{ standing.masters_owed | money }}</td></tr>
+  </tbody>
+</table>
+</div>
+<p class="meta"><a href="{{ link('/journal') }}">{{ t('more_journal') }} →</a></p>
+{% endblock %}

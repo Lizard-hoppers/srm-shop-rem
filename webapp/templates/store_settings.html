@@ -13,6 +13,8 @@
   <p class="meta">{{ t('store_settings_sales_channel_hint') }}</p>
   <label>{{ t('store_settings_buyback_topic') }}<input type="text" inputmode="numeric" name="buyback_topic_id" value="{{ settings.buyback_topic_id or '' }}"></label>
   <p class="meta">{{ t('store_settings_buyback_topic_hint') }}</p>
+  <label style="display:flex; align-items:center; gap:8px;"><input type="checkbox" name="assistant_digest" value="1" style="width:auto;" {% if settings.assistant_digest %}checked{% endif %}> {{ t('store_settings_assistant') }}</label>
+  <p class="meta">{{ t('store_settings_assistant_hint') }}</p>
   <button type="submit">{{ t('store_settings_save') }}</button>
 </form>
 {% endblock %}

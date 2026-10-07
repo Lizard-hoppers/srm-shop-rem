@@ -943,6 +943,11 @@ def init_db(db_path: str = DB_PATH) -> None:
         _ensure_column(conn, "buyback_orders", "purchase_price_uah", "purchase_price_uah REAL")
         _ensure_column(conn, "buyback_orders", "batch_id", "batch_id INTEGER REFERENCES batches(id)")
         _ensure_column(conn, "locations", "buyback_topic_id", "buyback_topic_id INTEGER")
+        # Помощник (Заход 7): the daily «Проблемы» digest into the точка's
+        # staff group — off until switched on in «Кабинет магазина» — and
+        # the Kyiv date it last went out.
+        _ensure_column(conn, "locations", "assistant_digest", "assistant_digest INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "locations", "assistant_last_digest", "assistant_last_digest TEXT")
         # Заход 5: a master is штатный or аутсорс and has skills on record;
         # a client repair remembers that its master said «без запчасти».
         _ensure_column(conn, "staff", "master_kind", "master_kind TEXT NOT NULL DEFAULT 'staff'")

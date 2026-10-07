@@ -1,5 +1,7 @@
-"""Photo -> structured data via OpenAI's vision API — invoice line items
-and product barcode/label reads. Both are best-effort guesses, never a
+"""Photo -> structured data via a vision model — invoice line items and
+product barcode/label reads. Claude (Anthropic) when ANTHROPIC_API_KEY is
+set in .env — the «Claude-помощник разбирает накладные» of the
+презентация; OpenAI otherwise, as before. Both are best-effort guesses, never a
 source of truth: every caller must show the result to a human for
 confirmation before it touches stock or the product catalog; a misread
 must never silently corrupt data.
@@ -17,6 +19,8 @@ logger = logging.getLogger(__name__)
 
 _API_KEY = os.environ.get("OPENAI_API_KEY")
 _MODEL = os.environ.get("OPENAI_VISION_MODEL", "gpt-4o-mini")
+_ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY")
+_ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_VISION_MODEL", "claude-sonnet-5-5")
 
 _INVOICE_PROMPT = (
     "На фото — накладная от поставщика (магазин электроники, запчасти, "
@@ -70,6 +74,8 @@ def _call_vision_json(prompt: str, photo_bytes: bytes) -> dict:
     on any failure (missing key, network error, non-200, unparseable
     content) — callers must treat that as "couldn't recognize", never
     fall through to an empty/default result silently."""
+    if _ANTHROPIC_KEY:
+        return _call_claude_json(prompt, photo_bytes)
     if not _API_KEY:
         raise VisionOcrError("OPENAI_API_KEY не задан")
 
@@ -106,6 +112,46 @@ def _call_vision_json(prompt: str, photo_bytes: bytes) -> dict:
         return json.loads(content)
     except (KeyError, IndexError, ValueError) as exc:
         logger.warning("OpenAI vision returned an unexpected shape: %s", resp.text)
+        raise VisionOcrError("Не смог разобрать ответ распознавания") from exc
+
+
+def _call_claude_json(prompt: str, photo_bytes: bytes) -> dict:
+    """The same contract as the OpenAI path above, through Anthropic's
+    Messages API: one photo + the prompt in, a JSON object out, or
+    VisionOcrError."""
+    payload = {
+        "model": _ANTHROPIC_MODEL,
+        "max_tokens": 1500,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "image", "source": {
+                    "type": "base64", "media_type": "image/jpeg",
+                    "data": base64.b64encode(photo_bytes).decode("ascii"),
+                }},
+                {"type": "text", "text": prompt},
+            ],
+        }],
+    }
+    try:
+        resp = httpx.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={"x-api-key": _ANTHROPIC_KEY, "anthropic-version": "2023-06-01"},
+            json=payload,
+            timeout=45,
+        )
+    except httpx.HTTPError as exc:
+        raise VisionOcrError("Не удалось связаться с Claude") from exc
+    if resp.status_code != 200:
+        logger.warning("Claude vision request failed: %s %s", resp.status_code, resp.text)
+        raise VisionOcrError(f"Claude вернул ошибку {resp.status_code}")
+    try:
+        text = "".join(block.get("text", "") for block in resp.json()["content"] if block.get("type") == "text")
+        # The prompt asks for bare JSON; tolerate a code fence or a stray
+        # sentence around it by taking the outermost object.
+        return json.loads(text[text.index("{"): text.rindex("}") + 1])
+    except (KeyError, TypeError, ValueError) as exc:
+        logger.warning("Claude vision returned an unexpected shape: %s", resp.text)
         raise VisionOcrError("Не смог разобрать ответ распознавания") from exc
 
 

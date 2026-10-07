@@ -35,6 +35,7 @@ def store_settings_save(
     working_hours: str = Form(""),
     sales_channel: str = Form(""),
     buyback_topic_id: str = Form(""),
+    assistant_digest: str = Form(""),
     staff=Depends(require_role("owner", "admin")),
 ):
     if not name.strip():
@@ -48,6 +49,7 @@ def store_settings_save(
         core_store_settings.update_settings(conn, name, address, phone, working_hours, location_id=loc(request))
         core_store_settings.set_sales_channel(conn, sales_channel, location_id=loc(request))
         core_store_settings.set_buyback_topic(conn, buyback_topic_id, location_id=loc(request))
+        core_store_settings.set_assistant_digest(conn, assistant_digest == "1", location_id=loc(request))
         settings = core_store_settings.get_settings(conn, loc(request))
     return render(request, "store_settings.html", staff=staff, settings=settings, success="Изменения сохранены.")
 

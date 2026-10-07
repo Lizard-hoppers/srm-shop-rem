@@ -20,7 +20,7 @@ from __future__ import annotations
 import asyncio
 import html
 
-from aiogram import F, Router
+from aiogram import BaseMiddleware, F, Router
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
@@ -45,10 +45,12 @@ from core import documents as core_documents
 from core import inventory as core_inventory
 from core import production as core_production
 from core import repairs as core_repairs
+from core import overview as core_overview
 from core import sales as core_sales
 from core import settlements as core_settlements
 from core import shifts as core_shifts
 from core import store_access
+from core.accounts import money
 from core.storage import get_conn
 from core.stores import StoreConfig, get_store
 from core.timefmt import kyiv_date_range_utc, kyiv_today
@@ -79,6 +81,10 @@ _ADJUST_ROLES = ("owner", "admin")
 # off entirely for a plain/unstyled button — Приход stays plain, Павел's
 # call.
 BTN_REPAIR = "🔧 Принять ремонт"
+# The label this button had before Заход 5. Telegram keeps showing a
+# keyboard until the bot sends a new one, so people still tap it — it
+# must keep starting the intake, not fall into silence (06.10).
+BTN_REPAIR_LEGACY = "🔧 Ремонт"
 BTN_OUR_REPAIR = "🛠 Наш ремонт"
 BTN_SALE = "🛍 Продажа"
 BTN_CLIENT = "👤 Клиент"
@@ -89,8 +95,41 @@ BTN_CASH = "💵 Касса"
 BTN_TRANSFER = "🔁 Перемещение"
 BTN_CANCEL = "❌ Отмена"
 _ENTRY_BUTTONS = {
-    BTN_SALE, BTN_REPAIR, BTN_OUR_REPAIR, BTN_CLIENT, BTN_BUYBACK, BTN_PURCHASE, BTN_SUMMARY, BTN_CASH, BTN_TRANSFER, BTN_CANCEL,
+    BTN_SALE, BTN_REPAIR, BTN_REPAIR_LEGACY, BTN_OUR_REPAIR, BTN_CLIENT, BTN_BUYBACK, BTN_PURCHASE, BTN_SUMMARY, BTN_CASH, BTN_TRANSFER, BTN_CANCEL,
 }
+
+
+# Telegram clients append the invisible variation selector U+FE0F to some
+# emoji when a reply-keyboard button is tapped — «🛠 Наш ремонт» arrives as
+# «🛠\ufe0f Наш ремонт» — and every handler here matches a button by its
+# exact text. Two buttons added in Заходы 5–6 (🛠, 🛍) were dead in the real
+# client because of it while every test passed (06.10). So: an incoming
+# text that is one of our buttons give or take that selector is put back
+# into its canonical form before any handler sees it.
+_VARIATION_SELECTOR = "\ufe0f"
+
+
+def canonical_button_text(text: str | None) -> str | None:
+    """The button label this text is, if it differs from one only by
+    variation selectors / outer spaces; otherwise the text unchanged."""
+    if not text:
+        return text
+    stripped = text.replace(_VARIATION_SELECTOR, "").strip()
+    for label in _ENTRY_BUTTONS:
+        if stripped == label.replace(_VARIATION_SELECTOR, ""):
+            return label
+    return text
+
+
+class ButtonTextMiddleware(BaseMiddleware):
+    """Outer middleware for messages — see canonical_button_text."""
+
+    async def __call__(self, handler, event, data):
+        if isinstance(event, Message) and event.text:
+            canonical = canonical_button_text(event.text)
+            if canonical != event.text:
+                event = event.model_copy(update={"text": canonical}).as_(data.get("bot"))
+        return await handler(event, data)
 
 
 # One single keyboard, always — Отмена lives on it permanently instead of
@@ -689,7 +728,7 @@ async def _nudge(message: Message, state: FSMContext, hint: str) -> None:
 
 # --- entry points — always available, even mid-flow (restarts fresh) ---
 
-@router.message(F.text == BTN_REPAIR, F.chat.type == "private")
+@router.message(F.text.in_({BTN_REPAIR, BTN_REPAIR_LEGACY}), F.chat.type == "private")
 async def repair_start(message: Message, state: FSMContext) -> None:
     resolved = _resolve_staff_for_dm(message.from_user.id)
     if not resolved:
@@ -699,6 +738,9 @@ async def repair_start(message: Message, state: FSMContext) -> None:
         await message.answer("Недостаточно прав для приёма ремонта.")
         return
 
+    if message.text == BTN_REPAIR_LEGACY:
+        # An old keyboard is still on this person's screen — replace it.
+        await message.answer("Кнопки меню обновились — вот актуальные.", reply_markup=QUICK_ACTIONS_KEYBOARD)
     if not await _shift_gate(message, state, store, staff):
         return
     await _reset(message, state)
@@ -859,6 +901,16 @@ async def summary_view(message: Message) -> None:
         cash_today = core_cash.period_summary(conn, utc_start, utc_end, location_id)
         cash_balance = core_cash.cash_balance(conn, location_id)
         low_stock = len(core_inventory.low_stock_report(conn, location_id))
+        problem_lines = core_overview.problems_text(conn, location_id)
+        # Прибыль и долги — the owner's/admin's numbers, as in the Mini App.
+        money_lines = []
+        if _staff["role"] in ("owner", "admin"):
+            profit = core_overview.profit(conn, utc_start, utc_end, location_id)
+            standing = core_overview.standing(conn, location_id)
+            money_lines = [
+                f"📈 Чистая прибыль сегодня: {profit['net']} грн",
+                f"🤝 Нам должны: {standing['they_owe']} грн · мы должны: {money(standing['we_owe'] + standing['masters_owed'])} грн",
+            ]
 
     lines = [
         f"📊 <b>Сводка — {html.escape(store.name)}</b>",
@@ -868,7 +920,10 @@ async def summary_view(message: Message) -> None:
         f"💵 Касса сегодня: +{cash_today['income_total']} / −{cash_today['expense_total']} грн",
         f"💰 Баланс в кассе: {cash_balance} грн",
         f"📉 Товаров с низким остатком: {low_stock}",
+        *money_lines,
     ]
+    if problem_lines:
+        lines += ["", "⚠️ <b>Проблемы</b>", *problem_lines]
     await message.answer("\n".join(lines))
 
 

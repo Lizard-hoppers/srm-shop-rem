@@ -6289,6 +6289,22 @@ def scenario_sale_chat() -> None:
             check("the bot's client card shows the debt and links to the card and the сверка",
                   "Нам должны: 300 грн" in text and len(keyboard.inline_keyboard) == 2 and "/statement" in keyboard.inline_keyboard[1][0].web_app.url)
 
+            await qa.summary_view(say(qa.BTN_SUMMARY))
+            summary = chat.log[-1]["text"]
+            check("«Сводка» gives the owner today's net profit (2500 + 200) and the debts",
+                  "Чистая прибыль сегодня: 2700 грн" in summary and "Нам должны: 300 грн" in summary)
+
+            # ---- старая клавиатура: кнопка с прежней подписью не должна молчать
+            from bot import fallback
+            await fallback.unknown_text(say("🔧 Ремонт"))
+            check("a tap on a button of an old keyboard gets the current keyboard instead of silence",
+                  "Кнопки меню обновились" in chat.log[-1]["text"] and chat.log[-1]["markup"] is qa.QUICK_ACTIONS_KEYBOARD)
+            stranger = say("привет")
+            stranger.from_user = SimpleNamespace(id=555000111, full_name="Кто-то")
+            before = len(chat.log)
+            await fallback.unknown_text(stranger)
+            check("someone who isn't staff gets nothing from it", len(chat.log) == before)
+
             # ---- отмена с карточки
             await sf.sale_start(say(qa.BTN_SALE), state)
             await sf.sale_got_item(say("358000000000002"), state)
@@ -6305,6 +6321,295 @@ def scenario_sale_chat() -> None:
             asyncio.run(run())
         finally:
             notify.notify_staff_group, channel_posts.sync_products = orig_notify, orig_sync
+
+
+def scenario_overview() -> None:
+    """Заход 7: чистая прибыль, «Проблемы», Главная с фильтрами, помощник,
+    разбор накладной через Claude."""
+    print("scenario: главная, чистая прибыль, «Проблемы», помощник")
+    from datetime import datetime
+
+    from core import assistant, notify, orders, overview, production, settlements, stock_transfers, vision_ocr, warehouses
+
+    with tempfile.TemporaryDirectory() as tmp, _separate_base(tmp, "overview.sqlite3", ("Мастерская", "Магазин")) as db_path:
+        with get_conn(db_path) as conn:
+            conn.execute("UPDATE locations SET staff_group_chat_id = -100771 WHERE id = 1")
+            owner = auth.create_staff(conn, "ov-owner", "pass", "Владелец", "owner")
+            keeper = auth.create_staff(conn, "ov-keeper", "pass", "Кладовщик", "storekeeper", location_id=1)
+            master = auth.create_master(conn, "Эдик", None, "percent", 50)
+            c1 = inventory.create_cell(conn, "OV-1", None, None, location_id=1)
+            c2 = inventory.create_cell(conn, "OV-2", None, None, location_id=2)
+            cable = inventory.create_product(conn, "Кабель", "OV-CBL", None, "шт", False, True, 0, 300)
+            display = inventory.create_product(conn, "Дисплей", "OV-DSP", None, "шт", True, True, 0, 3000)
+            purchases.create_receipt(conn, None, None, owner, [(cable, c1, 10, 100), (display, c1, 3, 1000)], location_id=1)
+            purchases.create_receipt(conn, None, None, owner, [(cable, c2, 4, 100)], location_id=2)
+            cash.record_adjustment(conn, 50000, "старт", owner, location_id=1)
+            cash.record_adjustment(conn, 10000, "старт", owner, location_id=2)
+            today = timefmt.kyiv_today()
+            start, end = timefmt.kyiv_date_range_utc(today, today)
+            empty = overview.profit(conn, start, end)
+            check("with nothing sold the profit is zero across the board", empty["net"] == 0 and empty["gross"] == 0 and empty["sales_count"] == 0)
+            check("and there are no problems", overview.problems(conn) == [])
+
+            # ---- прибыль: продажи + ремонты − расходы − списания
+            anna = clients.get_or_create_by_phone(conn, "Анна", "+380671239001", source="offline")
+            sales.create_sale(conn, anna, "offline", owner, [(cable, 2, 300)], location_id=1)                       # +400
+            sales.create_sale(conn, None, "offline", owner, [(cable, 1, 300)], location_id=2)                       # +200 (точка 2)
+            cancelled = sales.create_sale(conn, None, "offline", owner, [(cable, 1, 999)], location_id=1)
+            doc_cancel.cancel_document(conn, documents.get_for(conn, "sale", cancelled)["id"], owner, "ошибка")
+            point_1, master_wh = warehouses.point_warehouse(conn, 1)["id"], warehouses.master_warehouse(conn, master)["id"]
+            batch = conn.execute("SELECT id FROM batches WHERE product_id = ?", (display,)).fetchone()["id"]
+            sent = stock_transfers.send(conn, point_1, master_wh, [(batch, c1, 1)], owner)
+            stock_transfers.receive(conn, sent, master)
+            repair_id = repairs.create_repair(conn, anna, "Смартфон", None, "iPhone 13", None, "Дисплей", "offline", master, 3000, owner, location_id=1)
+            repairs.claim_repair(conn, repair_id, master)
+            line = repairs.available_parts(conn, repair_id)[0]
+            repairs.use_part(conn, repair_id, line["batch_id"], line["cell_id"], 1, master)
+            repairs.set_price(conn, repair_id, 3000, 3000)
+            repairs.complete_repair(conn, repair_id, master)
+            repairs.update_status(conn, repair_id, "issued", owner)                                                 # 3000 − 1000 = 2000 → 50% → +1000
+            cash.record_expense(conn, "cash", 700, "rent", "аренда", owner, location_id=1)
+            cash.record_expense(conn, "cash", 300, "other", "вода", owner, location_id=1)
+            cash.record_expense(conn, "cash", 5000, "supplies", "закупка", owner, location_id=1)
+            inventory.write_off_stock(conn, cable, c1, 2, owner, comment="брак")                                    # −200
+            masters.pay_out(conn, master, [(next(a["id"] for a in accounts.list_accounts(conn, 1) if a["kind"] == "cash" and a["currency"] == "UAH"), "400", None)],
+                            paid_by=owner, location_id=1)
+            numbers = overview.profit(conn, start, end, 1)
+            check("точка 1: продажи +400, ремонт +1000 фирме, расходы 1000 (аренда + прочее), списание 200 → чистая 200",
+                  (numbers["sales_profit"], numbers["repairs_profit"], numbers["gross"], numbers["expenses_total"], numbers["writeoffs"], numbers["net"])
+                  == (400, 1000, 1400, 1000, 200, 200))
+            check("a cancelled sale counts nowhere; revenue is what was really sold and выдано",
+                  numbers["sales_count"] == 1 and numbers["sales_revenue"] == 600 and numbers["repairs_revenue"] == 3000)
+            check("закупка товара and выплата мастеру are not expenses", numbers["expenses"] == {"rent": 700, "salary": 0, "other": 300})
+            conn.execute("UPDATE documents SET profit = NULL WHERE doc_type = 'repair' AND ref_id = ?", (repair_id,))
+            check("a repair выданный before profit was kept on the document still counts — worked out on the fly",
+                  overview.profit(conn, start, end, 1)["repairs_profit"] == 1000)
+            documents.set_profit(conn, "repair", repair_id, 1000)
+            whole = overview.profit(conn, start, end)
+            check("the whole business adds точка 2's sale: чистая 400", whole["net"] == 400 and whole["sales_count"] == 2)
+            check("another period is empty", overview.profit(conn, *timefmt.kyiv_date_range_utc("2020-01-01", "2020-01-31"))["net"] == 0)
+            act = overview.activity(conn, start, end, 1)
+            check("the period's counters: 1 ремонт принят и выдан, 1 продажа",
+                  (act["repairs_accepted"], act["repairs_issued"], act["sales"], act["orders_new"]) == (1, 1, 1, 0))
+
+            # ---- сейчас: деньги, товар, долги
+            sales.create_sale(conn, anna, "offline", owner, [(cable, 1, 300)], location_id=1, payments=[], allow_debt=True)
+            boris = clients.get_or_create_by_phone(conn, "Борис", "+380671239002", source="offline")
+            settlements.receive_money(conn, boris, [(next(a["id"] for a in accounts.list_accounts(conn, 1) if a["kind"] == "cash" and a["currency"] == "UAH"), "150", None)],
+                                      staff_id=owner, location_id=1)
+            stand = overview.standing(conn, 1)
+            check("«нам должны» 300 (Анна), «мы должны» 150 (аванс Бориса), мастеру 1000 − 400 = 600",
+                  (stand["they_owe"], stand["we_owe"], stand["masters_owed"]) == (300, 150, 600)
+                  and [d["name"] for d in stand["debtors"]] == ["Анна"] and [d["name"] for d in stand["creditors"]] == ["Борис"]
+                  and stand["masters"] == [{"id": master, "name": "Эдик", "owed": 600}])
+            check("«в товаре» is this точка's stock at cost", stand["stock_value"] == inventory.stock_value(conn, 1))
+
+            # ---- «Проблемы»
+            stuck = repairs.create_repair(conn, anna, "Смартфон", None, "A54", None, "Чистка", "offline", master, 500, owner, location_id=1)
+            repairs.claim_repair(conn, stuck, master)
+            check("a repair just taken into work is not a problem yet", overview.problems(conn, 1) == [])
+            conn.execute("UPDATE repair_orders SET started_at = datetime('now', '-3 hours') WHERE id = ?", (stuck,))
+            old_ready = repairs.create_repair(conn, anna, "Смартфон", None, "A12", None, "Стекло", "offline", master, 400, owner, location_id=1)
+            repairs.claim_repair(conn, old_ready, master)
+            repairs.declare_no_parts(conn, old_ready)
+            repairs.complete_repair(conn, old_ready, master)
+            conn.execute("UPDATE repair_orders SET completed_at = datetime('now', '-8 days') WHERE id = ?", (old_ready,))
+            cable_batch = conn.execute("SELECT batch_id FROM batch_stock WHERE cell_id = ? AND qty > 0", (c1,)).fetchone()["batch_id"]
+            late = stock_transfers.send(conn, point_1, warehouses.point_warehouse(conn, 2)["id"], [(cable_batch, c1, 1)], owner)
+            conn.execute("UPDATE stock_transfers SET sent_at = datetime('now', '-30 hours') WHERE id = ?", (late,))
+            order_id = orders.create_order(conn, anna, [(cable, 1, 300)], owner, location_id=1)
+            conn.execute("UPDATE client_orders SET reserved_until = datetime('now', '-1 minute') WHERE id = ?", (order_id,))
+            texts_1 = {p["text"]: p["count"] for p in overview.problems(conn, 1)}
+            texts_2 = {p["text"]: p["count"] for p in overview.problems(conn, 2)}
+            check("точка 1: ремонт без запчасти, готовый ремонт не забирают, заказ с истёкшим резервом",
+                  texts_1 == {"ремонтов в работе без указанной запчасти": 1, "готовых ремонтов не забирают больше 7 дней": 1,
+                              "заказов с истёкшим резервом — продлить или отменить": 1})
+            check("the transfer nobody received is the RECEIVING точка's problem",
+                  texts_2 == {"перемещений товара в пути дольше 24 ч — не приняты": 1})
+            inventory.create_product(conn, "Стекло", "OV-GLS", None, "шт", False, True, 2, 100)
+            check("a product below a minimum somebody set is a problem; «0 при минимуме 0» is not",
+                  {p["text"]: p["count"] for p in overview.problems(conn, 2)}.get("товаров с остатком ниже минимума") == 1)
+            conn.execute("UPDATE products SET min_qty = 0 WHERE sku = 'OV-GLS'")
+            check("every problem says where to go", all(p["path"].startswith("/") for p in overview.problems(conn)))
+            check("the whole business sees all four", len(overview.problems(conn)) == 4)
+
+            # ---- помощник
+            location = locations.get_location(conn, 1)
+            text = assistant.digest_text(conn, location)
+            check("the digest names the точка and lists its problems", "Помощник · Мастерская" in text and "• 1 — ремонтов в работе без указанной запчасти" in text)
+            check("a точка with nothing waiting has no digest", assistant.digest_text(conn, {"id": 99, "name": "Пусто"}) is None)
+
+        sent: list[dict] = []
+        orig_notify = notify.notify_staff_group
+        notify.notify_staff_group = lambda text, **kw: (sent.append({"text": text, **kw}) or 555)
+        noon = datetime(2026, 10, 6, 12, 0, tzinfo=timefmt.KYIV)
+        try:
+            check("off by default: nothing is posted", assistant.run_once(db_path, noon) == 0 and sent == [])
+            with get_conn(db_path) as conn:
+                store_settings.set_assistant_digest(conn, True, location_id=1)
+                store_settings.set_assistant_digest(conn, True, location_id=2)
+            check("before 10:00 it keeps quiet", assistant.run_once(db_path, noon.replace(hour=9)) == 0 and sent == [])
+            check("after 10:00 the точка with a group gets its digest — once (точка 2 has no group)",
+                  assistant.run_once(db_path, noon) == 1 and len(sent) == 1 and sent[0]["staff_group_chat_id"] == -100771
+                  and assistant.run_once(db_path, noon.replace(hour=15)) == 0 and len(sent) == 1)
+            check("the next day it goes out again", assistant.run_once(db_path, noon.replace(day=7)) == 1)
+            notify.notify_staff_group = lambda text, **kw: None
+            check("if Telegram didn't take it, the day isn't marked — it will retry",
+                  assistant.run_once(db_path, noon.replace(day=8)) == 0)
+            notify.notify_staff_group = lambda text, **kw: (sent.append({"text": text, **kw}) or 555)
+            check("…and does", assistant.run_once(db_path, noon.replace(day=8)) == 1)
+        finally:
+            notify.notify_staff_group = orig_notify
+
+        # ---- Главная и «Чистая прибыль» over HTTP
+        token, keeper_token = make_token(owner, "1"), make_token(keeper, "1")
+        import webapp.main
+
+        with TestClient(webapp.main.app) as client:
+            home = client.get(f"/?t={token}").text
+            check("the owner's Главная: фильтры периода и точки, деньги, «Проблемы», разделы, долги, журнал",
+                  all(x in home for x in ("Сегодня", "7 дней", "Месяц", "Все точки", "Магазин", "чистая прибыль", "нам должны",
+                                          "Проблемы", "ремонтов в работе без указанной запчасти", "Разделы", "Сервисный центр",
+                                          "Чистая прибыль", "Долги", "Анна", "Борис", "Эдик", "Последние документы")))
+            check("problems link to where they are fixed", "/orders?" in home and "/repairs?" in home)
+            all_points = client.get(f"/?period=month&point=all&t={token}").text
+            check("«Все точки» adds the other точка's problem", "перемещений товара в пути" in all_points and "перемещений товара в пути" not in home)
+            keeper_home = client.get(f"/?point=all&t={keeper_token}").text
+            check("a non-owner sees problems and sections of their точка, but no money, no долги and no точка switch",
+                  "ремонтов в работе без указанной запчасти" in keeper_home and "чистая прибыль" not in keeper_home
+                  and "Долги" not in keeper_home and "Все точки" not in keeper_home and "перемещений товара в пути" not in keeper_home
+                  and "/profit" not in keeper_home)
+            check("garbage in the filters falls back to defaults", client.get(f"/?period=zzz&point=zzz&t={token}").status_code == 200)
+            profit_page = client.get(f"/profit?period=day&point=1&t={token}").text
+            check("«Чистая прибыль» shows the breakdown for the точка",
+                  all(x in profit_page for x in ("Прибыль продаж", "Прибыль ремонтов", "Валовая прибыль", "Аренда", "Списания товара", "Сейчас в бизнесе"))
+                  and "+1000" in profit_page and "−700" in profit_page)
+            check("a custom date range works and an empty one is all zeros",
+                  ">0 грн<" in client.get(f"/profit?date_from=2020-01-01&date_to=2020-01-31&t={token}").text.replace("\n", "").replace("  ", ""))
+            check("«Чистая прибыль» is owner/admin only", client.get(f"/profit?t={keeper_token}", follow_redirects=False).status_code in (303, 403))
+            more = client.get(f"/more?t={token}").text
+            check("«Ещё» has «Чистая прибыль» and «Заказы»", "/profit" in more and "/orders" in more)
+            settings_page = client.get(f"/store/settings?t={token}").text
+            check("«Кабинет магазина» has the помощник switch, on", 'name="assistant_digest"' in settings_page and "checked" in settings_page.split('name="assistant_digest"')[1][:60])
+            client.post(f"/store/settings?t={token}", data={"name": "Мастерская", "address": "", "phone": "", "working_hours": "", "sales_channel": "", "buyback_topic_id": ""})
+            with get_conn(db_path) as conn:
+                check("saving the form with the box unticked switches it off", locations.get_location(conn, 1)["assistant_digest"] == 0)
+
+    # ---- накладная через Claude, когда задан ключ
+    class _ClaudeResponse:
+        status_code, text = 200, "ok"
+
+        def json(self):
+            return {"content": [{"type": "text", "text": 'Вот:\n```json\n{"items": [{"name": "Дисплей", "qty": 3, "unit_cost": 1000}]}\n```'}]}
+
+    calls: list[dict] = []
+
+    def _fake_post(url, headers, json, timeout):
+        calls.append({"url": url, "headers": headers, "json": json})
+        return _ClaudeResponse()
+
+    orig_post, orig_key = httpx.post, vision_ocr._ANTHROPIC_KEY
+    httpx.post, vision_ocr._ANTHROPIC_KEY = _fake_post, "sk-ant-test"
+    try:
+        items = vision_ocr.extract_invoice_items(b"fake-bytes")
+        check("with ANTHROPIC_API_KEY set the накладная is read by Claude (JSON taken out of its reply)",
+              items == [{"name": "Дисплей", "qty": 3, "unit_cost": 1000}] and calls[0]["url"] == "https://api.anthropic.com/v1/messages"
+              and calls[0]["headers"]["x-api-key"] == "sk-ant-test" and calls[0]["json"]["messages"][0]["content"][0]["type"] == "image")
+        _ClaudeResponse.status_code = 529
+        try:
+            vision_ocr.extract_invoice_items(b"fake-bytes")
+            check("a Claude error is a VisionOcrError, never an empty result", False)
+        except vision_ocr.VisionOcrError:
+            check("a Claude error is a VisionOcrError, never an empty result", True)
+    finally:
+        httpx.post, vision_ocr._ANTHROPIC_KEY = orig_post, orig_key
+
+
+def scenario_bot_dispatch() -> None:
+    """Every keyboard button through the REAL dispatcher — routers in
+    their order, filters, middleware. The other bot scenarios call handler
+    functions directly, which skips exactly the layer where a button can
+    be dead: on 06.10 «🛠 Наш ремонт» and «🛍 Продажа» answered nothing in
+    the real client (Telegram appends U+FE0F to those emoji) while every
+    test was green."""
+    print("scenario: бот целиком — каждая кнопка клавиатуры доходит до обработчика")
+    import asyncio
+    import datetime
+
+    from aiogram import Bot
+    from aiogram.dispatcher.event.bases import UNHANDLED
+    from aiogram.fsm.storage.base import StorageKey
+    from aiogram.types import Chat, Message, Update, User
+
+    import bot.bot as bot_module
+    from bot import quick_actions as qa
+
+    TG = 885001
+
+    check("the variation selector is the only thing normalised away",
+          qa.canonical_button_text("🛠️ Наш ремонт") == qa.BTN_OUR_REPAIR and qa.canonical_button_text(" 🛍️ Продажа ") == qa.BTN_SALE
+          and qa.canonical_button_text(qa.BTN_CASH) == qa.BTN_CASH and qa.canonical_button_text("Наш ремонт") == "Наш ремонт"
+          and qa.canonical_button_text("0501234567") == "0501234567" and qa.canonical_button_text(None) is None)
+
+    with tempfile.TemporaryDirectory() as tmp, _separate_base(tmp, "dispatch.sqlite3", ("Мастерская",)) as db_path:
+        with get_conn(db_path) as conn:
+            owner = auth.create_staff(conn, "bd-owner", "pass", "Владелец", "owner")
+            auth.link_staff_telegram(conn, "bd-owner", TG)
+            shifts.open_shift(conn, owner, 1)
+
+        sent: list[str] = []
+
+        class _FakeBot(Bot):
+            async def __call__(self, method, request_timeout=None):
+                name = type(method).__name__
+                if name.startswith("Send"):
+                    sent.append(getattr(method, "text", None) or getattr(method, "caption", None) or "")
+                    return Message(message_id=7000 + len(sent), date=datetime.datetime.now(),
+                                   chat=Chat(id=method.chat_id, type="private"), text="x")
+                return True
+
+        async def run() -> None:
+            bot = _FakeBot(token="123456:test-bot-token-not-real")
+            dp = bot_module.build_dispatcher()
+            counter = 0
+
+            async def tap(text: str, user_id: int = TG) -> tuple[bool, list[str]]:
+                nonlocal counter
+                counter += 1
+                await dp.storage.set_state(key=StorageKey(bot_id=bot.id, chat_id=user_id, user_id=user_id), state=None)
+                sent.clear()
+                update = Update(update_id=counter, message=Message(
+                    message_id=counter, date=datetime.datetime.now(), chat=Chat(id=user_id, type="private"),
+                    from_user=User(id=user_id, is_bot=False, first_name="T"), text=text))
+                result = await dp.feed_update(bot, update)
+                return result is not UNHANDLED, list(sent)
+
+            labels = [b.text for row in qa.QUICK_ACTIONS_KEYBOARD.keyboard for b in row]
+            check("every button on the keyboard is a known entry button", set(labels) <= qa._ENTRY_BUTTONS)
+            dead = []
+            for label in labels:
+                emoji, rest = label.split(" ", 1)
+                for variant in (label, f"{emoji}️ {rest}"):
+                    handled, _replies = await tap(variant)
+                    if not handled:
+                        dead.append(variant)
+            check("every keyboard button is handled — as written and as Telegram sends it (with U+FE0F)", dead == [])
+            for label, expect in ((qa.BTN_OUR_REPAIR, "Наши ремонты"), (qa.BTN_SALE, "Что продаём"), (qa.BTN_REPAIR, "Пришлите фото устройства")):
+                emoji, rest = label.split(" ", 1)
+                _handled, replies = await tap(f"{emoji}️ {rest}")
+                check(f"«{rest}» with the selector opens its own screen", any(expect in r for r in replies))
+            handled, replies = await tap(qa.BTN_REPAIR_LEGACY)
+            check("the pre-Заход-5 «🔧 Ремонт» still starts the intake and brings the new keyboard",
+                  handled and any("Кнопки меню обновились" in r for r in replies) and any("Пришлите фото устройства" in r for r in replies))
+            handled, replies = await tap("👤 Контакт")
+            check("any other stale button gets the current keyboard instead of silence",
+                  handled and replies == ["Кнопки меню обновились — вот актуальные. Нажмите нужную ещё раз."])
+            handled, replies = await tap("/start")
+            check("/start answers", handled and "Быстрые действия:" in replies)
+            _handled, replies = await tap("что угодно", user_id=885999)
+            check("a stranger's text gets nothing", replies == [])
+
+        asyncio.run(run())
 
 
 def main() -> None:
@@ -6365,6 +6670,8 @@ def main() -> None:
     scenario_settlements()
     scenario_settlements_http()
     scenario_sale_chat()
+    scenario_overview()
+    scenario_bot_dispatch()
     if os.path.exists(_WEBAPP_TEST_DB):
         os.remove(_WEBAPP_TEST_DB)
 

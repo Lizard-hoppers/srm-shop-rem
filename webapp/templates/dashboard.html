@@ -14,7 +14,84 @@
   </a>
 </div>
 {% endif %}
+{% set filter_path = '/' %}{% include "_period_filter.html" %}
+
+{% if show_money %}
 <div class="cards">
+  <a class="card" href="{{ link('/profit?period=' ~ period ~ '&point=' ~ point) }}">
+    <div class="card-icon">{{ icons.icon('chart', 18) }}</div>
+    <div>
+      <div class="card-num">{{ profit.net | money }}</div>
+      <div class="card-label">{{ t('home_net_profit') }}</div>
+    </div>
+  </a>
+  <a class="card" href="{{ link('/cash') }}">
+    <div class="card-icon">{{ icons.icon('cash', 18) }}</div>
+    <div>
+      <div class="card-num">{{ standing.cash_balance | money }}</div>
+      <div class="card-label">{{ t('home_cash_balance') }}</div>
+    </div>
+  </a>
+  <a class="card" href="{{ link('/inventory/products') }}">
+    <div class="card-icon">{{ icons.icon('archive', 18) }}</div>
+    <div>
+      <div class="card-num">{{ standing.stock_value | money }}</div>
+      <div class="card-label">{{ t('home_stock_value') }}</div>
+    </div>
+  </a>
+  <a class="card {% if standing.they_owe %}card-warn{% endif %}" href="#homeDebts">
+    <div class="card-icon">{{ icons.icon('users', 18) }}</div>
+    <div>
+      <div class="card-num">{{ standing.they_owe | money }}</div>
+      <div class="card-label">{{ t('home_they_owe') }}</div>
+    </div>
+  </a>
+  <a class="card" href="#homeDebts">
+    <div class="card-icon">{{ icons.icon('user', 18) }}</div>
+    <div>
+      <div class="card-num">{{ (standing.we_owe + standing.masters_owed) | money }}</div>
+      <div class="card-label">{{ t('home_we_owe') }}</div>
+    </div>
+  </a>
+</div>
+{% endif %}
+
+<h2>{{ t('home_period_title') }}</h2>
+<div class="table-scroll">
+<table class="table">
+  <tbody>
+    <tr><td>{{ t('home_repairs_accepted') }}</td><td>{{ activity.repairs_accepted }}</td></tr>
+    <tr><td>{{ t('home_repairs_issued') }}</td><td>{{ activity.repairs_issued }}{% if show_money %} · {{ profit.repairs_revenue | money }} грн{% endif %}</td></tr>
+    <tr><td>{{ t('home_sales') }}</td><td>{{ activity.sales }}{% if show_money %} · {{ profit.sales_revenue | money }} грн{% endif %}</td></tr>
+    <tr><td>{{ t('home_orders_new') }}</td><td>{{ activity.orders_new }}</td></tr>
+    <tr><td>{{ t('home_buyback') }}</td><td>{{ activity.buyback_count }}{% if show_money %} · {{ activity.buyback_total | money }} грн{% endif %}</td></tr>
+    {% if show_money %}<tr><td>{{ t('home_cash_flow') }}</td><td>+{{ activity.cash.income_total | money }} / −{{ activity.cash.expense_total | money }} грн</td></tr>{% endif %}
+  </tbody>
+</table>
+</div>
+
+<h2>{{ t('home_problems_title') }}</h2>
+<div class="nav-list">
+  {% for p in problems %}
+  <a class="card nav-card card-warn" href="{{ link(p.path) }}">
+    <div class="card-icon"><b>{{ p.count }}</b></div>
+    <div class="nav-card-body"><div class="nav-card-title">{{ p.text }}</div></div>
+    <div class="chevron">{{ icons.icon('chevron', 18) }}</div>
+  </a>
+  {% else %}
+  <p class="meta">{{ t('home_problems_none') }}</p>
+  {% endfor %}
+</div>
+
+<h2>{{ t('home_now_title') }}</h2>
+<div class="cards">
+  <a class="card" href="{{ link('/orders') }}">
+    <div class="card-icon">{{ icons.icon('box', 18) }}</div>
+    <div>
+      <div class="card-num">{{ standing.open_orders }}</div>
+      <div class="card-label">{{ t('home_open_orders') }}</div>
+    </div>
+  </a>
   <a class="card" href="{{ link('/repairs') }}">
     <div class="card-icon">{{ icons.icon('tool', 18) }}</div>
     <div>
@@ -51,4 +128,68 @@
     </div>
   </a>
 </div>
+
+<h2>{{ t('home_sections_title') }}</h2>
+<div class="nav-list">
+  {% for path, icon, title in [('/orders', 'box', 'orders_title'), ('/sales', 'cart', 'nav_sales'), ('/repairs', 'tool', 'home_service_center'), ('/warehouse', 'archive', 'nav_warehouse'), ('/transfers', 'truck', 'transfers_title'), ('/clients', 'users', 'more_clients')] %}
+  <a class="card nav-card" href="{{ link(path) }}">
+    <div class="card-icon">{{ icons.icon(icon, 18) }}</div>
+    <div class="nav-card-body"><div class="nav-card-title">{{ t(title) }}</div></div>
+    <div class="chevron">{{ icons.icon('chevron', 18) }}</div>
+  </a>
+  {% endfor %}
+  {% if staff.role in ('owner', 'admin', 'storekeeper') %}
+  <a class="card nav-card" href="{{ link('/cash') }}">
+    <div class="card-icon">{{ icons.icon('cash', 18) }}</div>
+    <div class="nav-card-body"><div class="nav-card-title">{{ t('nav_cash') }}</div></div>
+    <div class="chevron">{{ icons.icon('chevron', 18) }}</div>
+  </a>
+  {% endif %}
+  {% if show_money %}
+  <a class="card nav-card" href="{{ link('/profit') }}">
+    <div class="card-icon">{{ icons.icon('chart', 18) }}</div>
+    <div class="nav-card-body"><div class="nav-card-title">{{ t('profit_title') }}</div></div>
+    <div class="chevron">{{ icons.icon('chevron', 18) }}</div>
+  </a>
+  {% endif %}
+</div>
+
+{% if show_money %}
+<h2 id="homeDebts">{{ t('home_debts_title') }}</h2>
+<div class="table-scroll">
+<table class="table">
+  <tbody>
+    {% for d in standing.debtors %}
+    <tr onclick="location.href='{{ link('/clients/' ~ d.id) }}'" class="clickable"><td>{{ d.name }}{% if d.phone %} <span class="meta">· {{ d.phone }}</span>{% endif %}</td><td>{{ t('balance_they_owe') }} {{ d.balance | money }}</td></tr>
+    {% endfor %}
+    {% for d in standing.creditors %}
+    <tr onclick="location.href='{{ link('/clients/' ~ d.id) }}'" class="clickable"><td>{{ d.name }}{% if d.phone %} <span class="meta">· {{ d.phone }}</span>{% endif %}</td><td>{{ t('balance_we_owe') }} {{ (-d.balance) | money }}</td></tr>
+    {% endfor %}
+    {% for m in standing.masters %}
+    <tr onclick="location.href='{{ link('/masters/' ~ m.id) }}'" class="clickable"><td>{{ m.name }} <span class="meta">· {{ t('master_label') }}</span></td><td>{% if m.owed > 0 %}{{ t('balance_we_owe') }} {{ m.owed | money }}{% else %}{{ t('home_master_advance') }} {{ (-m.owed) | money }}{% endif %}</td></tr>
+    {% endfor %}
+    {% if not standing.debtors and not standing.creditors and not standing.masters %}
+    <tr><td colspan="2">{{ t('home_debts_none') }}</td></tr>
+    {% endif %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+
+<h2>{{ t('home_journal_title') }}</h2>
+<div class="table-scroll">
+<table class="table">
+  <tbody>
+    {% for d in journal %}
+    <tr {% if d.source_path %}onclick="location.href='{{ link(d.source_path) }}'" class="clickable"{% endif %}>
+      <td><b>{{ d.label }}</b> · {{ t('doc_type_' ~ d.doc_type) }}{% if d.status == 'cancelled' %} <span class="pill pill-cancelled">{{ t('doc_cancelled') }}</span>{% endif %}{% if d.title or d.client_name %}<div class="meta">{{ d.title or d.client_name }}</div>{% endif %}</td>
+      <td>{% if show_money and d.amount is not none %}{{ d.amount | money }}{% endif %}<div class="meta">{{ d.created_at | kyiv }}</div></td>
+    </tr>
+    {% else %}
+    <tr><td colspan="2">{{ t('journal_empty') }}</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+{% if show_money %}<p class="meta"><a href="{{ link('/journal') }}">{{ t('more_journal') }} →</a></p>{% endif %}
 {% endblock %}
