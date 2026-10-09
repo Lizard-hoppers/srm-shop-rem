@@ -7105,6 +7105,146 @@ def scenario_repair_notes() -> None:
             check("a repair nobody wrote about has no such block", "Заметки из чата" not in client.get(f"/repairs/{other_repair}?t={token}").text)
 
 
+def scenario_bot_questions() -> None:
+    """«Бот, сколько у нас ремонтов?» — the list of repairs still with us,
+    each device linking to its card in the chat."""
+    print("scenario: вопрос боту по имени — список невыданных ремонтов со ссылками на карточки")
+    import asyncio
+    import datetime
+
+    from aiogram import Bot
+    from aiogram.dispatcher.event.bases import UNHANDLED
+    from aiogram.types import Chat, Message, Update, User
+
+    from bot import assistant_chat
+    from core import repair_digest, repair_notes
+
+    GROUP, MASTERS_GROUP, TOPIC, OWNER_TG, MEMBER_TG = -1004478000111, -1003820000222, 5, 887001, 887002
+
+    check("only a message that starts with the word «бот» is a question to it",
+          assistant_chat.question_of("бот сколько у нас ремонтов") == "сколько у нас ремонтов"
+          and assistant_chat.question_of("  Бот, какие готовы?") == "какие готовы?" and assistant_chat.question_of("БОТ: ремонты") == "ремонты"
+          and assistant_chat.question_of("бот") == "" and assistant_chat.question_of("ботинок порвался") is None
+          and assistant_chat.question_of("робот сломался") is None and assistant_chat.question_of("скажи бот сколько") is None
+          and assistant_chat.question_of(None) is None)
+    check("the question may narrow the list to a status",
+          assistant_chat.statuses_asked("какие готовы") == ("ready",) and assistant_chat.statuses_asked("что в работе") == ("in_progress",)
+          and assistant_chat.statuses_asked("новые ремонты") == ("new",) and assistant_chat.statuses_asked("сколько ремонтов") == repair_digest.OPEN_STATUSES)
+    check("a link to a card: supergroup, with and without a topic; none for a chat that can't be linked",
+          repair_digest.card_link("-1004478000111", 136, 5) == "https://t.me/c/4478000111/5/136"
+          and repair_digest.card_link(-1003820000222, 276) == "https://t.me/c/3820000222/276" and repair_digest.card_link("-55512", 7) is None)
+
+    with tempfile.TemporaryDirectory() as tmp, _separate_base(tmp, "questions.sqlite3", ("Мастерская", "Магазин")) as db_path:
+        with get_conn(db_path) as conn:
+            conn.execute("UPDATE locations SET staff_group_chat_id = ?, masters_group_chat_id = ?, repair_topic_id = ? WHERE id = 1", (GROUP, MASTERS_GROUP, TOPIC))
+            owner = auth.create_staff(conn, "bq-owner", "pass", "Владелец", "owner")
+            auth.link_staff_telegram(conn, "bq-owner", OWNER_TG)
+            master = auth.create_master(conn, "Эдик", None, None, None)
+            client_id = clients.get_or_create_by_phone(conn, "Клиент", "+380671235000", source="offline")
+
+            def make(model: str, price, status: str, location_id: int = 1, cards: bool = True) -> int:
+                rid = repairs.create_repair(conn, client_id, "Смартфон", "Apple" if "iPhone" in model else None, model, None, "Ремонт", "offline", master, price, owner, location_id=location_id)
+                if status != "new":
+                    repairs.claim_repair(conn, rid, master)
+                if status in ("ready", "issued"):
+                    repairs.declare_no_parts(conn, rid)
+                    repairs.complete_repair(conn, rid, master)
+                if status == "issued":
+                    repairs.update_status(conn, rid, "issued", owner)
+                if status == "cancelled":
+                    repairs.update_status(conn, rid, "cancelled", owner)
+                if cards:
+                    conn.execute("INSERT INTO repair_order_messages (order_id, chat_id, message_id, kind) VALUES (?, ?, ?, 'topic')", (rid, str(GROUP), 100 + rid))
+                    conn.execute("INSERT INTO repair_order_messages (order_id, chat_id, message_id, kind) VALUES (?, ?, ?, 'masters_group')", (rid, str(MASTERS_GROUP), 200 + rid))
+                return rid
+
+            fresh = make("iPhone 13", 3000, "new")
+            working = make("Galaxy <A54>", 1500, "in_progress")
+            ready = make("Redmi Note 12", None, "ready")
+            issued = make("iPhone 11", 2000, "issued")
+            cancelled = make("Pixel 7", 900, "cancelled")
+            no_card = make("Nokia 3310", 400, "in_progress", cards=False)
+            elsewhere = make("iPad", 5000, "new", location_id=2)
+            repair_notes.add_note(conn, working, "text", "жду запчасть", "жду запчасть", stage="ждём запчасть до понедельника")
+
+            text = "\n".join(repair_digest.build(conn, 1, prefer_chat_id=GROUP, topics={str(GROUP): TOPIC}))
+            check("the list: how many and for how much, grouped by status — готовые first; выданные, отменённые and other точки are not in it",
+                  "<b>Ремонтов не выдано: 4</b> · на 4900 грн" in text and text.index("Готов к выдаче — 1") < text.index("В работе — 2") < text.index("Новый — 1")
+                  and "iPhone 11" not in text and "Pixel 7" not in text and "iPad" not in text)
+            check("each line: the device as a link to its card in THIS chat's topic, the price, the document number; a stage if there is one",
+                  f'<a href="https://t.me/c/4478000111/5/{100 + fresh}">Apple iPhone 13</a> — 3000 грн · РК-{fresh:03d}' in text
+                  and f'/5/{100 + working}">Galaxy &lt;A54&gt;</a> — 1500 грн · РК-{working:03d} · <i>ждём запчасть до понедельника</i>' in text
+                  and f'">Redmi Note 12</a> — цена не указана' in text)
+            check("a repair with no card in any chat is listed as plain text", f"• Nokia 3310 — 400 грн · РК-{no_card:03d}" in text)
+            masters_text = "\n".join(repair_digest.build(conn, 1, prefer_chat_id=MASTERS_GROUP, topics={str(GROUP): TOPIC}))
+            check("asked in the masters' group, the links lead to the cards there", f"https://t.me/c/3820000222/{200 + fresh}" in masters_text)
+            check("asked somewhere with no cards (a DM), they lead to the staff group's topic",
+                  f"https://t.me/c/4478000111/5/{100 + fresh}" in "\n".join(repair_digest.build(conn, 1, prefer_chat_id=OWNER_TG, topics={str(GROUP): TOPIC})))
+            only_ready = "\n".join(repair_digest.build(conn, 1, statuses=("ready",)))
+            check("narrowed to one status", "<b>Ремонтов: 1</b>" in only_ready and "Redmi Note 12" in only_ready and "iPhone 13" not in only_ready)
+            check("nothing to show says so", repair_digest.build(conn, 3) == ["🔧 Невыданных ремонтов нет."])
+            for i in range(60):
+                make(f"Очень длинное название модели телефона номер {i} для проверки разбивки", 1000 + i, "new")
+            chunks = repair_digest.build(conn, 1, prefer_chat_id=GROUP, topics={str(GROUP): TOPIC})
+            check("a long list is split into messages that fit Telegram's limit, losing nothing",
+                  len(chunks) > 1 and all(len(c) <= 4096 for c in chunks) and sum(c.count("• ") for c in chunks) == 64)
+            conn.execute("DELETE FROM repair_order_messages WHERE order_id > ?", (elsewhere,))
+            conn.execute("UPDATE repair_orders SET status = 'cancelled' WHERE id > ?", (elsewhere,))
+
+        sent: list[dict] = []
+
+        class _FakeBot(Bot):
+            async def __call__(self, method, request_timeout=None):
+                if type(method).__name__ == "SendMessage":
+                    sent.append({"chat": method.chat_id, "text": method.text, "reply_to": getattr(method.reply_parameters, "message_id", None),
+                                 "preview_off": getattr(method.link_preview_options, "is_disabled", None) is True})
+                    return Message(message_id=8000 + len(sent), date=datetime.datetime.now(), chat=Chat(id=method.chat_id, type="private"), text="x")
+                return True
+
+        async def run() -> None:
+            bot = _FakeBot(token="123456:test-bot-token-not-real")
+            dp = _the_dispatcher()
+            counter = 500
+
+            async def say(chat_id: int, user_id: int, text: str, reply_to: int | None = None) -> tuple[bool, int]:
+                nonlocal counter
+                counter += 1
+                sent.clear()
+                chat = Chat(id=chat_id, type="private" if chat_id > 0 else "supergroup")
+                replied = Message(message_id=reply_to, date=datetime.datetime.now(), chat=chat, text="card") if reply_to else None
+                update = Update(update_id=counter, message=Message(
+                    message_id=counter, date=datetime.datetime.now(), chat=chat, reply_to_message=replied,
+                    from_user=User(id=user_id, is_bot=False, first_name="T"), text=text))
+                result = await dp.feed_update(bot, update)
+                await asyncio.sleep(0.05)
+                return result is not UNHANDLED, counter
+
+            handled, asked_id = await say(GROUP, MEMBER_TG, "бот сколько у нас ремонтов")
+            check("asked in the work group by anyone there, the bot answers in a reply with the list and links, link previews off",
+                  handled and len(sent) == 1 and sent[0]["chat"] == GROUP and sent[0]["reply_to"] == asked_id and sent[0]["preview_off"]
+                  and "Ремонтов не выдано: 4" in sent[0]["text"] and f"https://t.me/c/4478000111/5/{100 + fresh}" in sent[0]["text"])
+            await say(GROUP, MEMBER_TG, "Бот, какие готовы?")
+            check("«какие готовы?» gives only the ready ones", "Ремонтов: 1" in sent[0]["text"] and "Redmi Note 12" in sent[0]["text"] and "iPhone 13" not in sent[0]["text"])
+            await say(OWNER_TG, OWNER_TG, "бот ремонты в работе")
+            check("in the DM a staff member gets the same, for his точка", len(sent) == 1 and "В работе — 2" in sent[0]["text"] and "Новый" not in sent[0]["text"])
+            await say(887999, 887999, "бот сколько ремонтов")
+            check("a stranger in the DM gets nothing", sent == [])
+            await say(-1009990009990, MEMBER_TG, "бот сколько ремонтов")
+            check("nor does a group that isn't ours", sent == [])
+            await say(GROUP, MEMBER_TG, "бот, привет")
+            check("addressed about something it can't do, it says what it can", len(sent) == 1 and "Пока умею" in sent[0]["text"])
+            await say(GROUP, MEMBER_TG, "ботинок порвался, сколько ремонтов таких было")
+            check("a message that merely starts with «бот…» is none of its business", sent == [])
+            with get_conn(db_path) as conn:
+                before = len(repair_notes.list_notes(conn, fresh))
+            await say(GROUP, MEMBER_TG, "бот, сколько ремонтов", reply_to=100 + fresh)
+            with get_conn(db_path) as conn:
+                check("sent as a reply to a card it is still a question — answered, not filed as a note",
+                      len(sent) == 1 and "Ремонтов не выдано" in sent[0]["text"] and len(repair_notes.list_notes(conn, fresh)) == before)
+
+        asyncio.run(run())
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         db_path = os.path.join(tmp, "test.sqlite3")
@@ -7166,6 +7306,7 @@ def main() -> None:
     scenario_overview()
     scenario_bot_dispatch()
     scenario_repair_notes()
+    scenario_bot_questions()
     if os.path.exists(_WEBAPP_TEST_DB):
         os.remove(_WEBAPP_TEST_DB)
 

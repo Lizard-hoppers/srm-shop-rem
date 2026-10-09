@@ -14,6 +14,7 @@ from aiogram.types import (
 )
 
 from bot.config import BOT_TOKEN, MINIAPP_URL
+from bot.assistant_chat import router as assistant_chat_router
 from bot.buyback_flow import router as buyback_flow_router
 from bot.fallback import router as fallback_router
 from bot.channel_orders import router as channel_orders_router
@@ -50,6 +51,9 @@ def build_dispatcher() -> Dispatcher:
     # link or not — see bot/channel_orders.py.
     dp.include_router(channel_orders_router)
     dp.include_router(router)
+    # «Бот, …» — a question to the bot itself (bot/assistant_chat.py): ahead
+    # of the note handler, so it is answered even when sent as a reply.
+    dp.include_router(assistant_chat_router)
     # Before quick_actions: that router ends in a catch-all for every FSM
     # state (TransferFlow's included), which would otherwise take this
     # flow's text steps first.
