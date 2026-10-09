@@ -21,6 +21,7 @@ DEFAULT_LANGUAGE = "ru"
 
 _STRINGS: dict[str, dict[str, str]] = {
     "ru": {
+        "repair_stage_label": "стадия",
         "repair_notes_title": "Заметки из чата",
         "repair_note_original": "как было сказано",
         "repair_notes_hint": "Сюда попадает всё, что написано или сказано голосом в ответ на карточку ремонта в рабочей группе.",
@@ -752,6 +753,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "no_rate_hint": "Ставка не задана — выплата не считается.",
     },
     "uk": {
+        "repair_stage_label": "стадія",
         "repair_notes_title": "Нотатки з чату",
         "repair_note_original": "як було сказано",
         "repair_notes_hint": "Сюди потрапляє все, що написано або сказано голосом у відповідь на картку ремонту в робочій групі.",

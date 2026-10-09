@@ -6763,7 +6763,7 @@ def scenario_repair_notes() -> None:
 
     from aiogram import Bot
     from aiogram.dispatcher.event.bases import UNHANDLED
-    from aiogram.types import Chat, File, Message, Update, User, Voice
+    from aiogram.types import CallbackQuery, Chat, File, Message, Update, User, Voice
 
     from core import ai_notes, notify, repair_notes
 
@@ -6772,7 +6772,6 @@ def scenario_repair_notes() -> None:
             "заднюю крышку если будет в наличии, согласен доплатить до восьмисот гривен, предоплату 500 уже внёс")
 
     # ---- the model helpers on their own
-    check("a short message is its own short version — no model is asked", ai_notes.shorten("  готово,   можно выдавать ") == "готово, можно выдавать")
     calls: list[dict] = []
 
     class _Resp:
@@ -6782,13 +6781,18 @@ def scenario_repair_notes() -> None:
         def json(self):
             return self._payload
 
+    def _openai(content: str):
+        return _Resp({"choices": [{"message": {"content": content}}]})
+
+    answer = {"value": '{"summary": "Заберёт в пятницу после 18:00; задняя крышка до 800 грн; предоплата 500 внесена", "stage": "ждёт клиента до пятницы", "status": null}'}
+
     def _post(url, **kwargs):
         calls.append({"url": url, **kwargs})
         if "audio/transcriptions" in url:
             return _Resp({"text": "  Экран заменил, осталось проклеить  "})
         if "anthropic" in url:
-            return _Resp({"content": [{"type": "text", "text": "«Заберёт в пятницу после 18:00; крышка до 800 грн; предоплата 500»"}]})
-        return _Resp({"choices": [{"message": {"content": "Заберёт в пятницу после 18:00; задняя крышка до 800 грн; предоплата 500 внесена"}}]})
+            return _Resp({"content": [{"type": "text", "text": "Вот:\n```json\n" + answer["value"] + "\n```"}]})
+        return _openai(answer["value"])
 
     orig_post = httpx.post
     saved_env = {k: os.environ.get(k) for k in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY")}
@@ -6796,25 +6800,40 @@ def scenario_repair_notes() -> None:
     os.environ["OPENAI_API_KEY"] = "sk-test"
     os.environ.pop("ANTHROPIC_API_KEY", None)
     try:
-        short = ai_notes.shorten(LONG)
-        check("a long message is cut to one short line by the model (OpenAI when there is no Claude key), the whole text sent to it",
-              short == "Заберёт в пятницу после 18:00; задняя крышка до 800 грн; предоплата 500 внесена"
-              and calls[-1]["url"].endswith("/chat/completions") and calls[-1]["json"]["messages"][1]["content"] == LONG)
+        read = ai_notes.analyze(LONG, "В работе")
+        check("a long message is read by the model (OpenAI when there is no Claude key): one short line and the stage; the whole text and the current status go to it",
+              read == {"summary": "Заберёт в пятницу после 18:00; задняя крышка до 800 грн; предоплата 500 внесена",
+                       "stage": "ждёт клиента до пятницы", "status": None, "price": None}
+              and calls[-1]["url"].endswith("/chat/completions") and calls[-1]["json"]["messages"][1]["content"] == LONG
+              and "«В работе»" in calls[-1]["json"]["messages"][0]["content"] and "цена для клиента: не известна" in calls[-1]["json"]["messages"][0]["content"])
         os.environ["ANTHROPIC_API_KEY"] = "sk-ant-test"
-        check("with a Claude key the shortening goes to Claude; stray quotes are dropped",
-              ai_notes.shorten(LONG) == "Заберёт в пятницу после 18:00; крышка до 800 грн; предоплата 500" and "anthropic" in calls[-1]["url"])
+        check("with a Claude key the reading goes to Claude; the JSON is taken out of whatever surrounds it",
+              ai_notes.analyze(LONG)["stage"] == "ждёт клиента до пятницы" and "anthropic" in calls[-1]["url"])
         os.environ.pop("ANTHROPIC_API_KEY", None)
+        answer["value"] = '{"summary": "Ремонт завершён, устройство готово к выдаче клиенту", "stage": "готов, ждёт клиента", "status": "ready"}'
+        check("a short message stays its own short version — only the stage and the status are taken from the model",
+              ai_notes.analyze("  готово,   можно выдавать ") == {"summary": "готово, можно выдавать", "stage": "готов, ждёт клиента", "status": "ready", "price": None})
+        answer["value"] = '{"summary": "' + LONG + ' и ещё много лишних слов сверху", "stage": "", "status": "done"}'
+        check("a «summary» longer than the message is dropped, an empty stage is no stage, an unknown status is no status",
+              ai_notes.analyze(LONG) == {"summary": LONG if len(LONG) <= ai_notes.MAX_SUMMARY else LONG[: ai_notes.MAX_SUMMARY - 1] + "…", "stage": None, "status": None, "price": None})
+        for raw, current, expected, label in (
+            ("3000", 2500, 3000, "a new price comes back as a number"),
+            ("3000.0", 2500, 3000, "…a whole one as an int"),
+            ("2500", 2500, None, "the price it already is is no change"),
+            ("0", 2500, None, "zero is not a price"), ("-100", 2500, None, "nor a negative"),
+            ('"три тысячи"', 2500, None, "nor words"), ("true", 2500, None, "nor a boolean"), ("99999999", 2500, None, "nor an absurd figure"),
+        ):
+            answer["value"] = '{"summary": "x", "stage": null, "status": null, "price": ' + raw + "}"
+            check(f"price: {label}", ai_notes.analyze("Нашли ещё поломку, выйдет дороже", "В работе", current)["price"] == expected)
+        check("the model is told the current price (it needs it for «плюс 500»)", "цена для клиента: 2500 грн" in calls[-1]["json"]["messages"][0]["content"])
         check("a voice message is transcribed (as an audio file upload)",
               ai_notes.transcribe(b"ogg-bytes") == "Экран заменил, осталось проклеить"
               and calls[-1]["files"]["file"][1] == b"ogg-bytes")
-        httpx.post = lambda url, **kw: _Resp({"choices": [{"message": {"content": LONG + " и ещё много лишних слов сверху"}}]})
-        check("an «answer» longer than the message is not a summary — the message itself is kept (cut to the ceiling)",
-              ai_notes.shorten(LONG) == (LONG if len(LONG) <= ai_notes.MAX_SUMMARY else LONG[: ai_notes.MAX_SUMMARY - 1] + "…"))
         for bad, label in ((lambda url, **kw: _Resp({}, 500), "a model error"), (lambda url, **kw: _Resp({"choices": []}), "a malformed answer"),
-                           (lambda url, **kw: _Resp({"choices": [{"message": {"content": "  "}}]}), "an empty answer")):
+                           (lambda url, **kw: _openai("не json"), "an answer that isn't JSON"), (lambda url, **kw: _openai("[1, 2]"), "JSON that isn't an object")):
             httpx.post = bad
             try:
-                ai_notes.shorten(LONG)
+                ai_notes.analyze(LONG)
                 check(f"{label} raises NoteAiError", False)
             except ai_notes.NoteAiError:
                 check(f"{label} raises NoteAiError", True)
@@ -6857,10 +6876,18 @@ def scenario_repair_notes() -> None:
             async def __call__(self, method, request_timeout=None):
                 name = type(method).__name__
                 if name == "SendMessage":
-                    sent.append({"kind": "message", "text": method.text, "reply_to": getattr(method.reply_parameters, "message_id", None)})
+                    markup = getattr(method, "reply_markup", None)
+                    sent.append({"kind": "message", "text": method.text, "reply_to": getattr(method.reply_parameters, "message_id", None),
+                                 "buttons": [b.callback_data for row in getattr(markup, "inline_keyboard", None) or [] for b in row]})
                     return Message(message_id=9000 + len(sent), date=datetime.datetime.now(), chat=Chat(id=method.chat_id, type="supergroup"), text="x")
                 if name == "SetMessageReaction":
                     sent.append({"kind": "reaction", "emoji": method.reaction[0].emoji, "message_id": method.message_id})
+                if name == "EditMessageText":
+                    sent.append({"kind": "edit", "text": method.text, "message_id": method.message_id})
+                if name == "DeleteMessage":
+                    sent.append({"kind": "delete", "message_id": method.message_id})
+                if name == "AnswerCallbackQuery":
+                    sent.append({"kind": "answer", "text": method.text, "alert": bool(method.show_alert)})
                 if name == "GetFile":
                     return File(file_id="v", file_unique_id="u", file_path="voice/file.oga")
                 return True
@@ -6868,8 +6895,22 @@ def scenario_repair_notes() -> None:
             async def download_file(self, file_path, destination=None, **kwargs):
                 return io.BytesIO(b"ogg-bytes")
 
-        orig = (ai_notes.shorten, ai_notes.transcribe, notify.sync_repair_cards)
-        ai_notes.shorten = lambda text: text if len(text) <= ai_notes.SHORT_ENOUGH else "Заберёт в пятницу после 18:00; крышка до 800 грн; предоплата 500"
+        orig = (ai_notes.analyze, ai_notes.transcribe, notify.sync_repair_cards)
+        read_statuses: list[str] = []
+
+        def _read(text, status_label="", price=None):
+            read_statuses.append((status_label, price))
+            summary = text if len(text) <= ai_notes.SHORT_ENOUGH else "Заберёт в пятницу после 18:00; крышка до 800 грн; предоплата 500"
+            lowered = text.lower()
+            if "готово" in lowered:
+                return {"summary": summary, "stage": "готов, ждёт клиента", "status": "ready", "price": None}
+            if "жду запчасть" in lowered:
+                return {"summary": summary, "stage": "ждём запчасть до понедельника", "status": None, "price": None}
+            if "выйдет" in lowered:
+                return {"summary": summary, "stage": "нашли ещё поломку", "status": None, "price": 4200}
+            return {"summary": summary, "stage": None, "status": None, "price": None}
+
+        ai_notes.analyze = _read
         ai_notes.transcribe = lambda audio, filename="voice.ogg": "Экран заменил, осталось проклеить и проверить сенсор, к вечеру отдам на выдачу, клиенту можно звонить"
         notify.sync_repair_cards = lambda messages, text, keyboard=None: synced.append(text)
 
@@ -6941,15 +6982,18 @@ def scenario_repair_notes() -> None:
                       len(repair_notes.list_notes(conn, repair_id)) == 4 and quiet)
 
             # сбои модели
-            def _down(text):
+            def _down(text, status_label="", price=None):
                 raise ai_notes.NoteAiError("нет связи")
 
-            ai_notes.shorten = _down
+            ai_notes.analyze = _down
             await post(MASTER_TG, "Эдик", CARD_MESSAGE, text=LONG)
             with get_conn(db_path) as conn:
                 note = repair_notes.list_notes(conn, repair_id)[-1]
             check("if the model is down the note is saved all the same — in full, with no short version",
                   note["summary"] is None and note["text"] == LONG)
+            await post(MASTER_TG, "Эдик", CARD_MESSAGE, text="перезвонить завтра")
+            with get_conn(db_path) as conn:
+                check("…and a short one keeps itself as its short version", repair_notes.list_notes(conn, repair_id)[-1]["summary"] == "перезвонить завтра")
 
             def _deaf(audio, filename="voice.ogg"):
                 raise ai_notes.NoteAiError("не разобрать")
@@ -6958,17 +7002,97 @@ def scenario_repair_notes() -> None:
             _handled, deaf_msg = await post(MASTER_TG, "Эдик", CARD_MESSAGE, voice=Voice(file_id="v", file_unique_id="u", duration=3, file_size=900))
             with get_conn(db_path) as conn:
                 check("a voice message that can't be transcribed saves nothing and says so",
-                      len(repair_notes.list_notes(conn, repair_id)) == 5 and "Не смог расшифровать" in sent[0]["text"] and sent[0]["reply_to"] == deaf_msg)
+                      len(repair_notes.list_notes(conn, repair_id)) == 6 and "Не смог расшифровать" in sent[0]["text"] and sent[0]["reply_to"] == deaf_msg)
+
+            # ---- стадия и статус из сообщения
+            ai_notes.analyze = _read
+            await post(MASTER_TG, "Эдик", CARD_MESSAGE, text="Жду запчасть до понедельника")
+            with get_conn(db_path) as conn:
+                check("a message about the course of the repair sets its «Стадия» — on the record and on the group card",
+                      repairs.get_repair(conn, repair_id)["stage_note"] == "ждём запчасть до понедельника"
+                      and "Стадия: <b>ждём запчасть до понедельника</b>" in synced[-1])
+            check("the model is told the repair's current status and price", read_statuses[-1] == ("Новый", 3000))
+            check("a stage alone needs no confirmation — just the ✍", [m["kind"] for m in sent] == ["reaction"])
+            await post(MASTER_TG, "Эдик", CARD_MESSAGE, text="Готово, можно выдавать")
+            with get_conn(db_path) as conn:
+                repair = repairs.get_repair(conn, repair_id)
+                check("«готово» about a repair nobody has taken into work changes nothing and offers nothing (not a step the CRM has)",
+                      repair["status"] == "new" and [m["kind"] for m in sent] == ["reaction"]
+                      and repair_notes.list_notes(conn, repair_id)[-1]["suggested_status"] == "ready")
+                repairs.claim_repair(conn, repair_id, master)
+                check("taking the repair into work clears the old «Стадия»", repairs.get_repair(conn, repair_id)["stage_note"] is None)
+            _handled, ready_msg = await post(MASTER_TG, "Эдик", CARD_MESSAGE, text="Готово, можно выдавать")
+            with get_conn(db_path) as conn:
+                repair = repairs.get_repair(conn, repair_id)
+            hint = next((m for m in sent if m["kind"] == "message"), None)
+            check("«готово» about a repair in work: the bot does NOT change the status itself…", repair["status"] == "in_progress" and repair["stage_note"] == "готов, ждёт клиента")
+            check("…it says what it understood and offers the one button that confirms it — the card's own «✅ Готово»",
+                  hint is not None and hint["reply_to"] == ready_msg and f"РК-{repair_id:03d}: похоже, готов" in hint["text"] and "«В работе»" in hint["text"]
+                  and hint["buttons"] == [f"repair_done:{repair_id}"])
+
+            # ---- цена из разговора
+            async def press(user_id: int, name: str, data: str, message_id: int) -> None:
+                nonlocal counter
+                counter += 1
+                sent.clear()
+                group = Chat(id=GROUP, type="supergroup")
+                update = Update(update_id=counter, callback_query=CallbackQuery(
+                    id=str(counter), from_user=User(id=user_id, is_bot=False, first_name=name), chat_instance="c", data=data,
+                    message=Message(message_id=message_id, date=datetime.datetime.now(), chat=group, text="?")))
+                await dp.feed_update(bot, update)
+                await asyncio.sleep(0.05)
+
+            _handled, price_msg = await post(OUTSIDER_TG, "Сергей Аутсорс", CARD_MESSAGE, text="Нашли ещё поломку, выйдет 4200")
+            question = next((m for m in sent if m["kind"] == "message"), None)
+            with get_conn(db_path) as conn:
+                check("a message naming a new price changes NOTHING by itself — it is only recorded on the note",
+                      repairs.current_price(repairs.get_repair(conn, repair_id)) == 3000
+                      and repair_notes.list_notes(conn, repair_id)[-1]["suggested_price"] == 4200)
+            check("the bot asks in the chat: «сменить на 4200 грн?» — да / нет, naming the price as it stands",
+                  question is not None and question["reply_to"] == price_msg and "сейчас 3000 грн" in question["text"] and "<b>4200 грн</b>" in question["text"]
+                  and question["buttons"] == [f"rprice:{repair_id}:4200", f"rprice_no:{repair_id}"])
+            await press(OUTSIDER_TG, "Сергей Аутсорс", f"rprice:{repair_id}:4200", 9500)
+            with get_conn(db_path) as conn:
+                check("someone who isn't staff in the CRM can't confirm a price — he is told so and the price stays",
+                      repairs.current_price(repairs.get_repair(conn, repair_id)) == 3000
+                      and sent == [{"kind": "answer", "text": "Цену меняет сотрудник, подключённый к CRM.", "alert": True}])
+            await press(MASTER_TG, "Эдик", f"rprice_no:{repair_id}", 9500)
+            with get_conn(db_path) as conn:
+                check("«Нет» removes the question and leaves the price alone",
+                      repairs.current_price(repairs.get_repair(conn, repair_id)) == 3000 and sent[0] == {"kind": "delete", "message_id": 9500})
+            await press(MASTER_TG, "Эдик", f"rprice:{repair_id}:4200", 9501)
+            with get_conn(db_path) as conn:
+                repair = repairs.get_repair(conn, repair_id)
+                trail = repair_notes.list_notes(conn, repair_id)[-1]
+                check("«Да» from a staff member changes the price — the estimate, and the journal document's amount with it",
+                      repair["price_estimate"] == 4200 and repair["price_final"] is None and documents.get_for(conn, "repair", repair_id)["amount"] == 4200)
+                check("the change is left in the repair's notes with who made it", trail["text"] == "Цена изменена: 3000 → 4200 грн" and trail["author"] == "Эдик")
+            check("the question turns into the record of what was done, and the group card shows the new price",
+                  any(m["kind"] == "edit" and "3000 → <b>4200 грн</b> (Эдик)" in m["text"] for m in sent) and "Цена: 4200 грн" in synced[-1])
+            with get_conn(db_path) as conn:
+                repairs.set_price(conn, repair_id, 4200, 4200)
+                repairs.change_price(conn, repair_id, 4500, master)
+                check("when a final price was already set it moves too", repairs.get_repair(conn, repair_id)["price_final"] == 4500)
+                repairs.declare_no_parts(conn, repair_id)
+                repairs.complete_repair(conn, repair_id, master)
+                repairs.update_status(conn, repair_id, "issued", owner)
+            await press(MASTER_TG, "Эдик", f"rprice:{repair_id}:9000", 9502)
+            with get_conn(db_path) as conn:
+                check("once the repair is выдан a stale «Да» can't move the price",
+                      repairs.current_price(repairs.get_repair(conn, repair_id)) == 4500 and sent[0]["alert"] is True and "Выдан" in sent[0]["text"])
+            _handled, _id = await post(MASTER_TG, "Эдик", CARD_MESSAGE, text="Клиент сказал выйдет дорого")
+            check("and a closed repair is not asked about its price at all", [m["kind"] for m in sent] == ["reaction"])
 
         try:
             asyncio.run(run())
         finally:
-            ai_notes.shorten, ai_notes.transcribe, notify.sync_repair_cards = orig
+            ai_notes.analyze, ai_notes.transcribe, notify.sync_repair_cards = orig
 
         with get_conn(db_path) as conn:
             text, _keyboard = repairs.card(conn, repair_id)
+            total_notes = len(repair_notes.list_notes(conn, repair_id))
             check("the group card shows the count and the latest three, each cut to fit",
-                  "📝 <b>Заметки (5)</b>" in text and text.count("\n• ") == 3 and "…" in text and "Запчасть приехала" not in text
+                  f"📝 <b>Заметки ({total_notes})</b>" in text and total_notes == 13 and text.count("\n• ") == 3 and "…" in text and "Запчасть приехала" not in text
                   and len(text) < 1024)
         token = make_token(owner, "1")
         import webapp.main

@@ -19,16 +19,27 @@ KINDS = ("text", "voice", "photo")
 def add_note(
     conn: sqlite3.Connection, order_id: int, kind: str, original_text: str, summary: str | None, *,
     staff_id: int | None = None, author_name: str | None = None, chat_id: str | None = None,
-    message_id: int | None = None,
+    message_id: int | None = None, stage: str | None = None, suggested_status: str | None = None,
+    suggested_price=None,
 ) -> int:
+    """`stage` — where the repair stands according to this message, if it
+    says: it becomes the repair's current «Стадия». `suggested_status` —
+    the status the message points to, `suggested_price` — the new price
+    it states; both only recorded here, a person confirms them."""
     if kind not in KINDS:
         raise ValueError(f"неизвестный вид заметки: {kind}")
-    return conn.execute(
-        """INSERT INTO repair_notes (order_id, kind, original_text, summary, staff_id, author_name, chat_id, message_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+    stage = (stage or "").strip() or None
+    note_id = conn.execute(
+        """INSERT INTO repair_notes
+           (order_id, kind, original_text, summary, staff_id, author_name, chat_id, message_id, stage,
+            suggested_status, suggested_price)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (order_id, kind, original_text.strip(), (summary or "").strip() or None, staff_id,
-         (author_name or "").strip() or None, chat_id, message_id),
+         (author_name or "").strip() or None, chat_id, message_id, stage, suggested_status, suggested_price),
     ).lastrowid
+    if stage:
+        conn.execute("UPDATE repair_orders SET stage_note = ? WHERE id = ?", (stage, order_id))
+    return note_id
 
 
 def list_notes(conn: sqlite3.Connection, order_id: int) -> list[sqlite3.Row]:

@@ -975,6 +975,14 @@ def init_db(db_path: str = DB_PATH) -> None:
         _ensure_column(conn, "staff", "master_kind", "master_kind TEXT NOT NULL DEFAULT 'staff'")
         _ensure_column(conn, "staff", "skills", "skills TEXT")
         _ensure_column(conn, "repair_orders", "no_parts", "no_parts INTEGER NOT NULL DEFAULT 0")
+        # «Стадия» (09.10): where the repair stands in a few words, as
+        # read from the latest chat note about it (core.ai_notes) — a
+        # free-text line next to the status, cleared when the status
+        # changes. And what each note itself said.
+        _ensure_column(conn, "repair_orders", "stage_note", "stage_note TEXT")
+        _ensure_column(conn, "repair_notes", "stage", "stage TEXT")
+        _ensure_column(conn, "repair_notes", "suggested_status", "suggested_status TEXT")
+        _ensure_column(conn, "repair_notes", "suggested_price", "suggested_price REAL")
         try:
             # One phone = one контрагент. Partial: a walk-in with no phone
             # on record is fine, any number of them.

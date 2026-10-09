@@ -157,6 +157,10 @@ def update_status(conn: sqlite3.Connection, order_id: int, new_status: str, staf
         "INSERT INTO repair_status_history (order_id, status, changed_by, comment) VALUES (?, ?, ?, ?)",
         (order_id, new_status, staff_id, comment),
     )
+    # «Стадия» described the repair as it stood under the old status
+    # («ждём запчасть») — once the status moves, it no longer does.
+    if previous_status != new_status:
+        conn.execute("UPDATE repair_orders SET stage_note = NULL WHERE id = ?", (order_id,))
     # «Выдан» is when the repair earns: the master's share is accrued and
     # the document gets its profit. Moving it back out of «Выдан» undoes both.
     if new_status == "issued" and previous_status != "issued":
@@ -398,7 +402,7 @@ def claim_repair(conn: sqlite3.Connection, order_id: int, staff_id: int) -> bool
     the second one simply loses, rather than silently overwriting the
     first's claim."""
     cur = conn.execute(
-        """UPDATE repair_orders SET status = 'in_progress', master_id = ?, started_at = datetime('now')
+        """UPDATE repair_orders SET status = 'in_progress', stage_note = NULL, master_id = ?, started_at = datetime('now')
            WHERE id = ? AND status = 'new' AND (master_id IS NULL OR master_id = ?)""",
         (staff_id, order_id, staff_id),
     )
@@ -417,12 +421,12 @@ def complete_repair(conn: sqlite3.Connection, order_id: int, staff_id: int, over
     `override` (admin/owner closing on someone else's behalf)."""
     if override:
         cur = conn.execute(
-            "UPDATE repair_orders SET status = 'ready', completed_at = datetime('now') WHERE id = ? AND status = 'in_progress'",
+            "UPDATE repair_orders SET status = 'ready', stage_note = NULL, completed_at = datetime('now') WHERE id = ? AND status = 'in_progress'",
             (order_id,),
         )
     else:
         cur = conn.execute(
-            """UPDATE repair_orders SET status = 'ready', completed_at = datetime('now')
+            """UPDATE repair_orders SET status = 'ready', stage_note = NULL, completed_at = datetime('now')
                WHERE id = ? AND status = 'in_progress' AND master_id = ?""",
             (order_id, staff_id),
         )
@@ -446,12 +450,12 @@ def cancel_repair(conn: sqlite3.Connection, order_id: int, staff_id: int, overri
     someone else's behalf)."""
     if override:
         cur = conn.execute(
-            "UPDATE repair_orders SET status = 'cancelled' WHERE id = ? AND status = 'in_progress'",
+            "UPDATE repair_orders SET status = 'cancelled', stage_note = NULL WHERE id = ? AND status = 'in_progress'",
             (order_id,),
         )
     else:
         cur = conn.execute(
-            "UPDATE repair_orders SET status = 'cancelled' WHERE id = ? AND status = 'in_progress' AND master_id = ?",
+            "UPDATE repair_orders SET status = 'cancelled', stage_note = NULL WHERE id = ? AND status = 'in_progress' AND master_id = ?",
             (order_id, staff_id),
         )
     if cur.rowcount == 0:
@@ -524,6 +528,32 @@ def set_price(conn: sqlite3.Connection, order_id: int, price_estimate: int | Non
         _documents.update_for(conn, "repair", order_id, amount=price_final or price_estimate)
 
 
+def current_price(repair: sqlite3.Row):
+    """What the client is to pay as things stand: the final price, or the
+    estimate until there is one."""
+    return repair["price_final"] or repair["price_estimate"]
+
+
+def change_price(conn: sqlite3.Connection, order_id: int, new_price, staff_id: int | None, author_name: str | None = None):
+    """The price changed while the repair is under way («нашли ещё
+    поломку»): the estimate becomes the new figure — and the final price
+    too, if one had already been set. The change is left in the repair's
+    notes, so the card says who moved it and from what. Returns the old
+    price. Refused once the repair is closed: the money has been taken."""
+    repair = get_repair(conn, order_id)
+    if not repair:
+        raise RepairPartError("Ремонт не найден.")
+    if repair["status"] in ("issued", "cancelled"):
+        raise RepairPartError(f"Ремонт уже в статусе «{STATUS_LABELS[repair['status']]}» — цену так не поменять.")
+    old = current_price(repair)
+    set_price(conn, order_id, new_price, new_price if repair["price_final"] else None)
+    _notes.add_note(
+        conn, order_id, "text", f"Цена изменена: {old or '—'} → {new_price} грн", None,
+        staff_id=staff_id, author_name=author_name,
+    )
+    return old
+
+
 def set_warranty(conn: sqlite3.Connection, order_id: int, warranty_until: str | None) -> None:
     conn.execute("UPDATE repair_orders SET warranty_until = ? WHERE id = ?", (warranty_until, order_id))
 
@@ -587,6 +617,8 @@ def render_card_text(repair: sqlite3.Row, parts: list | None = None, notes: list
     if repair["defect_description"]:
         lines.append(f"Работа: {html.escape(repair['defect_description'])}")
     lines.append(f"Ответственный: {master_label}")
+    if repair["stage_note"]:
+        lines.append(f"Стадия: <b>{html.escape(repair['stage_note'])}</b>")
     if parts:
         lines.append("Запчасть: " + "; ".join(
             f"{html.escape(p['product_name'])} × {p['qty']}" + (f" (партия {p['batch_id']})" if p["batch_id"] else "")

@@ -1,17 +1,19 @@
 """The language-model half of «заметки по ремонту» (core.repair_notes):
-turn a voice message into text and a long message into one short line.
+turn a voice message into text, a long message into one short line, and
+read from it where the repair stands.
 
 Both are helpers around what a person said — the caller keeps the
 original next to the result, and treats any failure here as «no short
 version», never as a reason to lose the message.
 
 Speech-to-text is OpenAI's (the only provider configured that takes
-audio). Shortening goes to Claude when ANTHROPIC_API_KEY is set, OpenAI
+audio). Reading the text goes to Claude when ANTHROPIC_API_KEY is set, OpenAI
 otherwise — the same rule as core.vision_ocr. Keys are read at call time,
 so adding one to .env needs only a restart, no code change.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 
@@ -25,12 +27,38 @@ SHORT_ENOUGH = 70
 # Hard ceiling on what a «short» line may be, whatever the model returned.
 MAX_SUMMARY = 200
 
+# What the model may say about where the repair stands. These are the
+# CRM's own statuses a message can point to; «new» is never a destination.
+STATUSES = ("in_progress", "ready", "issued", "cancelled")
+MAX_STAGE = 80
+
 _PROMPT = (
-    "Ты помогаешь вести карточку ремонта в мастерской электроники. Ниже — сообщение сотрудника "
-    "из рабочего чата по одному ремонту. Перепиши его одной короткой фразой (до 15 слов) на том же "
-    "языке, на котором оно написано. Сохрани все факты: суммы, сроки, названия деталей и моделей, "
-    "имена, договорённости с клиентом. Ничего не добавляй и не додумывай, не используй кавычки и "
-    "вводные слова. Ответь только этой фразой."
+    "Ты помогаешь вести карточку ремонта в мастерской электроники. Ниже — сообщение сотрудника из "
+    "рабочего чата по одному ремонту. Сейчас ремонт в системе в статусе «{status}», цена для клиента: "
+    "{price}.\n"
+    'Верни СТРОГО JSON: {{"summary": "...", "stage": "..." или null, "status": "in_progress" | "ready" | '
+    '"issued" | "cancelled" | null, "price": <число> или null}}.\n'
+    "summary — то же сообщение одной короткой фразой (до 15 слов) на том же языке, на котором оно "
+    "написано. Сохрани все факты: суммы, сроки, названия деталей и моделей, имена, договорённости с "
+    "клиентом. Ничего не добавляй и не додумывай.\n"
+    "stage — если из сообщения понятно, на какой стадии сейчас ремонт, назови её короткой фразой (до 8 "
+    "слов) на языке сообщения: например «ждём запчасть до понедельника», «разобран, идёт диагностика», "
+    "«согласовываем цену с клиентом», «собран, осталось проклеить». Формулируй по самому сообщению, "
+    "не подставляй примеры; что уже сделано и что осталось — это тоже стадия. Если сообщение не о ходе "
+    "ремонта (вопрос, просьба, разговор о клиенте) — null.\n"
+    "status — только если сообщение ПРЯМО говорит об этом: мастер взял или начал ремонт — in_progress; "
+    "ремонт закончен и устройство можно выдавать — ready; устройство уже отдали клиенту — issued; "
+    "починить не получилось или клиент отказался от ремонта — cancelled. Планы, вопросы и ожидание "
+    "(«завтра доделаю», «жду запчасть») статусом не являются. Сомневаешься — null.\n"
+    "price — новая ПОЛНАЯ стоимость этого ремонта для клиента в гривнах, числом, только если сообщение "
+    "прямо говорит, что цена ремонта изменилась или теперь такая: «ремонт будет 3000», «выходит 4500 "
+    "вместо 3000», «нашли ещё поломку, плюс 500» (тогда прибавь к текущей цене). Короткое сообщение, "
+    "которое просто называет сумму за ремонт, — «ремонт 3000», «цена 3000», «3000 за всё», «итого 3000» "
+    "— это тоже новая цена. Цена запчасти или "
+    "закупки, предоплата, сколько клиент уже заплатил, вопрос о цене, предположение («может выйти "
+    "дороже») — это НЕ новая цена: null. Если цена не известна и сообщение называет только доплату — "
+    "null. Сомневаешься — null.\n"
+    "Ничего кроме JSON в ответе быть не должно."
 )
 
 
@@ -70,13 +98,13 @@ def transcribe(audio: bytes, filename: str = "voice.ogg") -> str:
     return text
 
 
-def _ask_claude(text: str) -> str:
+def _ask_claude(prompt: str, text: str) -> str:
     resp = httpx.post(
         "https://api.anthropic.com/v1/messages",
         headers={"x-api-key": os.environ["ANTHROPIC_API_KEY"], "anthropic-version": "2023-06-01"},
         json={
-            "model": os.environ.get("ANTHROPIC_NOTES_MODEL", "claude-haiku-4-5-20251001"), "max_tokens": 200,
-            "system": _PROMPT, "messages": [{"role": "user", "content": text}],
+            "model": os.environ.get("ANTHROPIC_NOTES_MODEL", "claude-haiku-4-5-20251001"), "max_tokens": 300,
+            "system": prompt, "messages": [{"role": "user", "content": text}],
         },
         timeout=30,
     )
@@ -85,13 +113,14 @@ def _ask_claude(text: str) -> str:
     return "".join(block.get("text", "") for block in resp.json()["content"] if block.get("type") == "text")
 
 
-def _ask_openai(text: str) -> str:
+def _ask_openai(prompt: str, text: str) -> str:
     resp = httpx.post(
         "https://api.openai.com/v1/chat/completions",
         headers={"Authorization": f"Bearer {_openai_key()}"},
         json={
-            "model": os.environ.get("OPENAI_NOTES_MODEL", "gpt-4o-mini"), "max_tokens": 200, "temperature": 0,
-            "messages": [{"role": "system", "content": _PROMPT}, {"role": "user", "content": text}],
+            "model": os.environ.get("OPENAI_NOTES_MODEL", "gpt-4o-mini"), "max_tokens": 300, "temperature": 0,
+            "response_format": {"type": "json_object"},
+            "messages": [{"role": "system", "content": prompt}, {"role": "user", "content": text}],
         },
         timeout=30,
     )
@@ -100,24 +129,62 @@ def _ask_openai(text: str) -> str:
     return resp.json()["choices"][0]["message"]["content"]
 
 
-def shorten(text: str) -> str:
-    """One short line saying what the message says. A message that is
-    already short comes back as it is. Raises NoteAiError when the model
-    can't be reached or answers nonsense — the caller then shows the
-    original."""
+def _clean(value) -> str:
+    return " ".join(str(value or "").split()).strip("«»\"' ")
+
+
+MAX_PRICE = 1_000_000
+
+
+def analyze(text: str, status_label: str = "", price=None) -> dict:
+    """What a message about a repair says, four ways:
+
+      summary  one short line (the message itself when it is already
+               short, or when the model's «summary» came out longer);
+      stage    where the repair stands now, in a few words — or None if
+               the message isn't about that;
+      status   the CRM status the message plainly points to (STATUSES) —
+               or None. A hint for a person to confirm, never applied by
+               itself: «Готов» has its own checks and «Выдан» takes money.
+
+      price    the repair's new full price for the client, if the message
+               plainly states one (`price` passed in is the current one —
+               the model needs it for «плюс 500») — or None. Also only a
+               hint: a person confirms before the price changes.
+
+    Raises NoteAiError when the model can't be reached or answers
+    nonsense — the caller then keeps the original and knows no stage."""
     text = " ".join((text or "").split())
-    if len(text) <= SHORT_ENOUGH:
-        return text
+    prompt = _PROMPT.format(status=status_label or "неизвестен", price=f"{price} грн" if price else "не известна")
     try:
-        answer = _ask_claude(text) if os.environ.get("ANTHROPIC_API_KEY") else _ask_openai(text)
+        answer = _ask_claude(prompt, text) if os.environ.get("ANTHROPIC_API_KEY") else _ask_openai(prompt, text)
+        # OpenAI is held to a JSON object; Claude is asked for one — take
+        # the outermost object either way.
+        data = json.loads(answer[answer.index("{"): answer.rindex("}") + 1])
     except httpx.HTTPError as exc:
         raise NoteAiError("Не удалось связаться с моделью") from exc
     except (KeyError, IndexError, TypeError, ValueError) as exc:
         raise NoteAiError("Не смог разобрать ответ модели") from exc
-    answer = " ".join((answer or "").split()).strip("«»\"' ")
-    if not answer:
-        raise NoteAiError("Модель вернула пустой ответ")
-    # A «summary» longer than what it summarises is not one.
-    if len(answer) >= len(text):
-        return text if len(text) <= MAX_SUMMARY else text[: MAX_SUMMARY - 1] + "…"
-    return answer if len(answer) <= MAX_SUMMARY else answer[: MAX_SUMMARY - 1] + "…"
+    if not isinstance(data, dict):
+        raise NoteAiError("Не смог разобрать ответ модели")
+
+    summary = _clean(data.get("summary"))
+    # A short message is its own short version, and a «summary» longer
+    # than what it summarises is not one.
+    if len(text) <= SHORT_ENOUGH or not summary or len(summary) >= len(text):
+        summary = text
+    if len(summary) > MAX_SUMMARY:
+        summary = summary[: MAX_SUMMARY - 1] + "…"
+    stage = _clean(data.get("stage")) or None
+    if stage and len(stage) > MAX_STAGE:
+        stage = stage[: MAX_STAGE - 1] + "…"
+    status = data.get("status") if data.get("status") in STATUSES else None
+    new_price = data.get("price")
+    # bool is an int in Python — «true» is not a price.
+    if isinstance(new_price, bool) or not isinstance(new_price, (int, float)) or not 0 < new_price < MAX_PRICE:
+        new_price = None
+    elif new_price == int(new_price):
+        new_price = int(new_price)
+    if new_price is not None and price and new_price == price:
+        new_price = None
+    return {"summary": summary, "stage": stage, "status": status, "price": new_price}
