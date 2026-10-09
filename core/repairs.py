@@ -9,6 +9,7 @@ import uuid
 from core import clients as _clients
 from core import device_catalog as _device_catalog
 from core import documents as _documents
+from core import repair_notes as _notes
 from core import inventory as _inventory
 from core import locations as _locations
 from core import masters as _masters
@@ -551,7 +552,13 @@ def get_used_parts(conn: sqlite3.Connection, order_id: int) -> list[sqlite3.Row]
     ).fetchall()
 
 
-def render_card_text(repair: sqlite3.Row, parts: list | None = None) -> str:
+# How many notes the group card shows, and how long each may be — a card
+# with a photo is a caption, and Telegram cuts those at 1024 characters.
+CARD_NOTES = 3
+CARD_NOTE_LEN = 110
+
+
+def render_card_text(repair: sqlite3.Row, parts: list | None = None, notes: list | None = None) -> str:
     """HTML-formatted staff-group/topic card for a repair — shared by the
     web panel (on intake) and the bot (after a button press edits it in
     place), so the two channels never drift apart on wording. Escapes
@@ -596,13 +603,27 @@ def render_card_text(repair: sqlite3.Row, parts: list | None = None) -> str:
     if timestamp_label and timestamp_col and repair[timestamp_col]:
         lines.append(f"{timestamp_label}: {kyiv_datetime(repair[timestamp_col])}")
 
+    # What was said about this repair in the chat (core.repair_notes) —
+    # the latest few, short; all of them are on the repair's page.
+    if notes:
+        lines.append("")
+        lines.append(f"📝 <b>Заметки ({len(notes)})</b>")
+        if len(notes) > CARD_NOTES:
+            lines.append("…")
+        for note in notes[-CARD_NOTES:]:
+            text = note["text"] if len(note["text"]) <= CARD_NOTE_LEN else note["text"][: CARD_NOTE_LEN - 1] + "…"
+            lines.append(f"• {html.escape(text)} — <i>{html.escape(note['author'])}</i>")
+
     return "\n".join(lines)
 
 
 def card(conn: sqlite3.Connection, order_id: int) -> tuple[str, dict]:
     """(text, keyboard) of a repair's card as it should look right now."""
     repair = get_repair(conn, order_id)
-    return render_card_text(repair, get_used_parts(conn, order_id)), render_keyboard(order_id, repair["status"])
+    return (
+        render_card_text(repair, get_used_parts(conn, order_id), _notes.list_notes(conn, order_id)),
+        render_keyboard(order_id, repair["status"]),
+    )
 
 
 def render_keyboard(order_id: int, status: str) -> dict:

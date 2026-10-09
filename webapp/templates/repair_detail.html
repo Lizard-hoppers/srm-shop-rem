@@ -136,6 +136,22 @@
     </div>
     {% endif %}
 
+    {% if notes %}
+    <div class="panel-box" style="margin-top: 16px;">
+      <h3>📝 {{ t('repair_notes_title') }} · {{ notes | length }}</h3>
+      {% for n in notes %}
+      <div style="padding: 8px 0; {% if not loop.first %}border-top: 1px solid var(--border);{% endif %}">
+        <div>{% if n.kind == 'voice' %}🎤 {% elif n.kind == 'photo' %}📷 {% endif %}{{ n.text }}</div>
+        <div class="meta">{{ n.author }} · {{ n.created_at | kyiv }}</div>
+        {% if n.summary and n.summary != n.original_text %}
+        <details><summary class="meta">{{ t('repair_note_original') }}</summary><div class="meta" style="white-space: pre-wrap;">{{ n.original_text }}</div></details>
+        {% endif %}
+      </div>
+      {% endfor %}
+      <p class="meta" style="margin-bottom:0;">{{ t('repair_notes_hint') }}</p>
+    </div>
+    {% endif %}
+
     {% if attachments %}
     <div class="panel-box" style="margin-top: 16px;">
       <h3>📎 {{ t('attachments_title') }}</h3>

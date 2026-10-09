@@ -97,6 +97,28 @@ CREATE TABLE IF NOT EXISTS repair_order_messages (
 );
 CREATE INDEX IF NOT EXISTS idx_repair_order_messages_order ON repair_order_messages(order_id);
 
+-- Заметки по ремонту из рабочего чата (09.10): a text or voice message
+-- sent in reply to the repair's card (core.repair_notes). original_text
+-- is what was written / what the voice message was transcribed as;
+-- summary — the short line a language model made of it (NULL when there
+-- is none — the original is shown then). chat_id + message_id are the
+-- message itself: a reply to it lands in the same repair, and a
+-- redelivered update doesn't make a second note.
+CREATE TABLE IF NOT EXISTS repair_notes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id INTEGER NOT NULL REFERENCES repair_orders(id),
+    kind TEXT NOT NULL DEFAULT 'text',
+    original_text TEXT NOT NULL,
+    summary TEXT,
+    staff_id INTEGER REFERENCES staff(id),
+    author_name TEXT,
+    chat_id TEXT,
+    message_id INTEGER,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_repair_notes_order ON repair_notes(order_id);
+CREATE INDEX IF NOT EXISTS idx_repair_notes_message ON repair_notes(chat_id, message_id);
+
 -- Photos staff reply with directly on a repair's card in the group
 -- (bot/repair_attachments.py) — a lightweight documentation trail per
 -- repair (parts, damage, whatever's worth a photo), not a formal receipt.

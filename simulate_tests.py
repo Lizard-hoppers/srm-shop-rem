@@ -6653,6 +6653,20 @@ def scenario_overview() -> None:
         httpx.post, vision_ocr._ANTHROPIC_KEY = orig_post, orig_key
 
 
+_dispatcher_singleton = None
+
+
+def _the_dispatcher():
+    """bot.bot.build_dispatcher(), once per run — aiogram lets a router be
+    attached to a dispatcher only once."""
+    global _dispatcher_singleton
+    if _dispatcher_singleton is None:
+        import bot.bot as bot_module
+
+        _dispatcher_singleton = bot_module.build_dispatcher()
+    return _dispatcher_singleton
+
+
 def scenario_bot_dispatch() -> None:
     """Every keyboard button through the REAL dispatcher — routers in
     their order, filters, middleware. The other bot scenarios call handler
@@ -6698,7 +6712,7 @@ def scenario_bot_dispatch() -> None:
 
         async def run() -> None:
             bot = _FakeBot(token="123456:test-bot-token-not-real")
-            dp = bot_module.build_dispatcher()
+            dp = _the_dispatcher()
             counter = 0
 
             async def tap(text: str, user_id: int = TG) -> tuple[bool, list[str]]:
@@ -6738,6 +6752,233 @@ def scenario_bot_dispatch() -> None:
             check("a stranger's text gets nothing", replies == [])
 
         asyncio.run(run())
+
+
+def scenario_repair_notes() -> None:
+    """Заметки по ремонту: ответ на карточку в рабочей группе — текстом или
+    голосом — остаётся в ремонте, коротко, с оригиналом рядом."""
+    print("scenario: заметки по ремонту из чата — текст и голос в ответ на карточку")
+    import asyncio
+    import datetime
+
+    from aiogram import Bot
+    from aiogram.dispatcher.event.bases import UNHANDLED
+    from aiogram.types import Chat, File, Message, Update, User, Voice
+
+    from core import ai_notes, notify, repair_notes
+
+    GROUP, CARD_MESSAGE, MASTER_TG, OUTSIDER_TG = -100886, 4101, 886002, 886003
+    LONG = ("Клиент звонил, сказал что заберёт только в пятницу после шести вечера, просил ещё поменять "
+            "заднюю крышку если будет в наличии, согласен доплатить до восьмисот гривен, предоплату 500 уже внёс")
+
+    # ---- the model helpers on their own
+    check("a short message is its own short version — no model is asked", ai_notes.shorten("  готово,   можно выдавать ") == "готово, можно выдавать")
+    calls: list[dict] = []
+
+    class _Resp:
+        def __init__(self, payload, status=200):
+            self.status_code, self._payload, self.text = status, payload, "x"
+
+        def json(self):
+            return self._payload
+
+    def _post(url, **kwargs):
+        calls.append({"url": url, **kwargs})
+        if "audio/transcriptions" in url:
+            return _Resp({"text": "  Экран заменил, осталось проклеить  "})
+        if "anthropic" in url:
+            return _Resp({"content": [{"type": "text", "text": "«Заберёт в пятницу после 18:00; крышка до 800 грн; предоплата 500»"}]})
+        return _Resp({"choices": [{"message": {"content": "Заберёт в пятницу после 18:00; задняя крышка до 800 грн; предоплата 500 внесена"}}]})
+
+    orig_post = httpx.post
+    saved_env = {k: os.environ.get(k) for k in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY")}
+    httpx.post = _post
+    os.environ["OPENAI_API_KEY"] = "sk-test"
+    os.environ.pop("ANTHROPIC_API_KEY", None)
+    try:
+        short = ai_notes.shorten(LONG)
+        check("a long message is cut to one short line by the model (OpenAI when there is no Claude key), the whole text sent to it",
+              short == "Заберёт в пятницу после 18:00; задняя крышка до 800 грн; предоплата 500 внесена"
+              and calls[-1]["url"].endswith("/chat/completions") and calls[-1]["json"]["messages"][1]["content"] == LONG)
+        os.environ["ANTHROPIC_API_KEY"] = "sk-ant-test"
+        check("with a Claude key the shortening goes to Claude; stray quotes are dropped",
+              ai_notes.shorten(LONG) == "Заберёт в пятницу после 18:00; крышка до 800 грн; предоплата 500" and "anthropic" in calls[-1]["url"])
+        os.environ.pop("ANTHROPIC_API_KEY", None)
+        check("a voice message is transcribed (as an audio file upload)",
+              ai_notes.transcribe(b"ogg-bytes") == "Экран заменил, осталось проклеить"
+              and calls[-1]["files"]["file"][1] == b"ogg-bytes")
+        httpx.post = lambda url, **kw: _Resp({"choices": [{"message": {"content": LONG + " и ещё много лишних слов сверху"}}]})
+        check("an «answer» longer than the message is not a summary — the message itself is kept (cut to the ceiling)",
+              ai_notes.shorten(LONG) == (LONG if len(LONG) <= ai_notes.MAX_SUMMARY else LONG[: ai_notes.MAX_SUMMARY - 1] + "…"))
+        for bad, label in ((lambda url, **kw: _Resp({}, 500), "a model error"), (lambda url, **kw: _Resp({"choices": []}), "a malformed answer"),
+                           (lambda url, **kw: _Resp({"choices": [{"message": {"content": "  "}}]}), "an empty answer")):
+            httpx.post = bad
+            try:
+                ai_notes.shorten(LONG)
+                check(f"{label} raises NoteAiError", False)
+            except ai_notes.NoteAiError:
+                check(f"{label} raises NoteAiError", True)
+        httpx.post = lambda url, **kw: _Resp({"text": ""})
+        try:
+            ai_notes.transcribe(b"x")
+            check("silence in a voice message raises NoteAiError", False)
+        except ai_notes.NoteAiError:
+            check("silence in a voice message raises NoteAiError", True)
+        os.environ.pop("OPENAI_API_KEY", None)
+        try:
+            ai_notes.transcribe(b"x")
+            check("no key raises NoteAiError", False)
+        except ai_notes.NoteAiError:
+            check("no key raises NoteAiError", True)
+    finally:
+        httpx.post = orig_post
+        for key, value in saved_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    # ---- the whole path through the real dispatcher
+    with tempfile.TemporaryDirectory() as tmp, _separate_base(tmp, "notes.sqlite3", ("Мастерская",)) as db_path:
+        with get_conn(db_path) as conn:
+            conn.execute("UPDATE locations SET staff_group_chat_id = ? WHERE id = 1", (GROUP,))
+            owner = auth.create_staff(conn, "rn-owner", "pass", "Владелец", "owner")
+            master = auth.create_master(conn, "Эдик", MASTER_TG, None, None)
+            client_id = clients.get_or_create_by_phone(conn, "Клиент", "+380671234999", source="offline")
+            repair_id = repairs.create_repair(conn, client_id, "Смартфон", "Apple", "iPhone 13", None, "Замена дисплея", "offline", master, 3000, owner, location_id=1)
+            other_repair = repairs.create_repair(conn, client_id, "Смартфон", None, "A54", None, "Чистка", "offline", master, 400, owner, location_id=1)
+            conn.execute("INSERT INTO repair_order_messages (order_id, chat_id, message_id, kind) VALUES (?, ?, ?, 'staff')", (repair_id, str(GROUP), CARD_MESSAGE))
+            check("a repair with no notes has no notes block on its card", "Заметки" not in repairs.card(conn, repair_id)[0])
+
+        sent: list[dict] = []
+        synced: list[str] = []
+
+        class _FakeBot(Bot):
+            async def __call__(self, method, request_timeout=None):
+                name = type(method).__name__
+                if name == "SendMessage":
+                    sent.append({"kind": "message", "text": method.text, "reply_to": getattr(method.reply_parameters, "message_id", None)})
+                    return Message(message_id=9000 + len(sent), date=datetime.datetime.now(), chat=Chat(id=method.chat_id, type="supergroup"), text="x")
+                if name == "SetMessageReaction":
+                    sent.append({"kind": "reaction", "emoji": method.reaction[0].emoji, "message_id": method.message_id})
+                if name == "GetFile":
+                    return File(file_id="v", file_unique_id="u", file_path="voice/file.oga")
+                return True
+
+            async def download_file(self, file_path, destination=None, **kwargs):
+                return io.BytesIO(b"ogg-bytes")
+
+        orig = (ai_notes.shorten, ai_notes.transcribe, notify.sync_repair_cards)
+        ai_notes.shorten = lambda text: text if len(text) <= ai_notes.SHORT_ENOUGH else "Заберёт в пятницу после 18:00; крышка до 800 грн; предоплата 500"
+        ai_notes.transcribe = lambda audio, filename="voice.ogg": "Экран заменил, осталось проклеить и проверить сенсор, к вечеру отдам на выдачу, клиенту можно звонить"
+        notify.sync_repair_cards = lambda messages, text, keyboard=None: synced.append(text)
+
+        async def run() -> None:
+            bot = _FakeBot(token="123456:test-bot-token-not-real")
+            dp = _the_dispatcher()
+            counter = 100
+
+            async def post(user_id: int, name: str, reply_to: int | None, **content) -> tuple[bool, int]:
+                nonlocal counter
+                counter += 1
+                sent.clear()
+                group = Chat(id=GROUP, type="supergroup")
+                replied = Message(message_id=reply_to, date=datetime.datetime.now(), chat=group, text="card") if reply_to else None
+                update = Update(update_id=counter, message=Message(
+                    message_id=counter, date=datetime.datetime.now(), chat=group,
+                    from_user=User(id=user_id, is_bot=False, first_name=name), reply_to_message=replied, **content))
+                result = await dp.feed_update(bot, update)
+                await asyncio.sleep(0.05)
+                return result is not UNHANDLED, counter
+
+            # текст — коротко как есть
+            handled, short_msg = await post(MASTER_TG, "Эдик", CARD_MESSAGE, text="Запчасть приехала, начинаю")
+            with get_conn(db_path) as conn:
+                notes = repair_notes.list_notes(conn, repair_id)
+            check("a short text reply to the card is saved as it is, under the staff member's name, and acknowledged with a reaction — no chat noise",
+                  handled and [(n["kind"], n["text"], n["author"], n["original_text"]) for n in notes]
+                  == [("text", "Запчасть приехала, начинаю", "Эдик", "Запчасть приехала, начинаю")]
+                  and sent == [{"kind": "reaction", "emoji": "✍", "message_id": short_msg}])
+            check("the group card is brought up to date with it", bool(synced) and "📝 <b>Заметки (1)</b>" in synced[-1] and "Запчасть приехала, начинаю — <i>Эдик</i>" in synced[-1])
+
+            # длинный текст — сокращён, оригинал рядом; автор не из CRM
+            _handled, long_msg = await post(OUTSIDER_TG, "Сергей Аутсорс", CARD_MESSAGE, text=LONG)
+            with get_conn(db_path) as conn:
+                note = repair_notes.list_notes(conn, repair_id)[-1]
+            check("a long reply is stored short with the original next to it; someone not linked to a staff card is recorded under his Telegram name",
+                  note["text"] == "Заберёт в пятницу после 18:00; крышка до 800 грн; предоплата 500" and note["original_text"] == LONG
+                  and note["author"] == "Сергей Аутсорс" and note["staff_id"] is None)
+
+            # голос
+            handled, voice_msg = await post(MASTER_TG, "Эдик", CARD_MESSAGE, voice=Voice(file_id="v", file_unique_id="u", duration=12, file_size=4000))
+            with get_conn(db_path) as conn:
+                note = repair_notes.list_notes(conn, repair_id)[-1]
+            check("a voice reply is transcribed, shortened and saved as a voice note with the transcript as its original",
+                  handled and note["kind"] == "voice" and note["original_text"].startswith("Экран заменил, осталось проклеить")
+                  and note["text"] == "Заберёт в пятницу после 18:00; крышка до 800 грн; предоплата 500")
+            check("what was heard is said back in a reply, so the sender can check it",
+                  sent[0]["kind"] == "message" and sent[0]["reply_to"] == voice_msg and f"🎤 РК-{repair_id:03d}:" in sent[0]["text"])
+
+            # ответ на ответ — тот же ремонт; повтор — не дубль
+            await post(OUTSIDER_TG, "Сергей Аутсорс", long_msg, text="Крышка есть, 650")
+            before = counter
+            with get_conn(db_path) as conn:
+                check("a reply to an earlier note lands in the same repair", [n["text"] for n in repair_notes.list_notes(conn, repair_id)][-1] == "Крышка есть, 650"
+                      and repair_notes.list_notes(conn, other_repair) == [])
+                check("the same message delivered twice is one note", repair_notes.exists(conn, str(GROUP), before) and len(repair_notes.list_notes(conn, repair_id)) == 4)
+            counter = before - 1
+            await post(OUTSIDER_TG, "Сергей Аутсорс", long_msg, text="Крышка есть, 650")
+            with get_conn(db_path) as conn:
+                check("…checked: still four", len(repair_notes.list_notes(conn, repair_id)) == 4)
+
+            # не наше
+            handled, _id = await post(MASTER_TG, "Эдик", 777777, text="это ответ на чужое сообщение")
+            handled_plain, _id = await post(MASTER_TG, "Эдик", None, text="просто сообщение в группе")
+            quiet = sent == []
+            await post(MASTER_TG, "Эдик", CARD_MESSAGE, text="/chatid")
+            with get_conn(db_path) as conn:
+                check("a reply to something else, a plain message and a command leave no note — and the bot stays silent on the first two",
+                      len(repair_notes.list_notes(conn, repair_id)) == 4 and quiet)
+
+            # сбои модели
+            def _down(text):
+                raise ai_notes.NoteAiError("нет связи")
+
+            ai_notes.shorten = _down
+            await post(MASTER_TG, "Эдик", CARD_MESSAGE, text=LONG)
+            with get_conn(db_path) as conn:
+                note = repair_notes.list_notes(conn, repair_id)[-1]
+            check("if the model is down the note is saved all the same — in full, with no short version",
+                  note["summary"] is None and note["text"] == LONG)
+
+            def _deaf(audio, filename="voice.ogg"):
+                raise ai_notes.NoteAiError("не разобрать")
+
+            ai_notes.transcribe = _deaf
+            _handled, deaf_msg = await post(MASTER_TG, "Эдик", CARD_MESSAGE, voice=Voice(file_id="v", file_unique_id="u", duration=3, file_size=900))
+            with get_conn(db_path) as conn:
+                check("a voice message that can't be transcribed saves nothing and says so",
+                      len(repair_notes.list_notes(conn, repair_id)) == 5 and "Не смог расшифровать" in sent[0]["text"] and sent[0]["reply_to"] == deaf_msg)
+
+        try:
+            asyncio.run(run())
+        finally:
+            ai_notes.shorten, ai_notes.transcribe, notify.sync_repair_cards = orig
+
+        with get_conn(db_path) as conn:
+            text, _keyboard = repairs.card(conn, repair_id)
+            check("the group card shows the count and the latest three, each cut to fit",
+                  "📝 <b>Заметки (5)</b>" in text and text.count("\n• ") == 3 and "…" in text and "Запчасть приехала" not in text
+                  and len(text) < 1024)
+        token = make_token(owner, "1")
+        import webapp.main
+
+        with TestClient(webapp.main.app) as client:
+            page = client.get(f"/repairs/{repair_id}?t={token}").text
+            check("the repair's page lists every note: the short text, who and when, the original behind «как было сказано», a mark on voice",
+                  "Заметки из чата" in page and "Запчасть приехала, начинаю" in page and "Сергей Аутсорс" in page
+                  and "как было сказано" in page and "согласен доплатить до восьмисот гривен" in page and "🎤" in page)
+            check("a repair nobody wrote about has no such block", "Заметки из чата" not in client.get(f"/repairs/{other_repair}?t={token}").text)
 
 
 def main() -> None:
@@ -6800,6 +7041,7 @@ def main() -> None:
     scenario_sale_chat()
     scenario_overview()
     scenario_bot_dispatch()
+    scenario_repair_notes()
     if os.path.exists(_WEBAPP_TEST_DB):
         os.remove(_WEBAPP_TEST_DB)
 

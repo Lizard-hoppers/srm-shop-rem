@@ -190,7 +190,7 @@ def list_sales(
             LEFT JOIN clients ON clients.id = sales_orders.client_id
             LEFT JOIN staff ON staff.id = sales_orders.staff_id
             {where_sql}
-            ORDER BY sales_orders.created_at DESC
+            ORDER BY sales_orders.created_at DESC, sales_orders.id DESC
             LIMIT ?""",
         [*params, limit],
     ).fetchall()
@@ -203,7 +203,7 @@ def list_sales_by_client(conn: sqlite3.Connection, client_id: int) -> list[sqlit
            FROM sales_orders
            LEFT JOIN staff ON staff.id = sales_orders.staff_id
            WHERE sales_orders.client_id = ?
-           ORDER BY sales_orders.created_at DESC""",
+           ORDER BY sales_orders.created_at DESC, sales_orders.id DESC""",
         (client_id,),
     ).fetchall()
 

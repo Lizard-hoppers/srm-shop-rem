@@ -16,6 +16,7 @@ from core import device_catalog
 from core import documents as core_documents
 from core import inventory as core_inventory
 from core import notify as core_notify
+from core import repair_notes as core_repair_notes
 from core import repairs as core_repairs
 from core import vision_ocr
 from core.inventory import InsufficientStockError
@@ -264,6 +265,7 @@ def _detail_context(conn, order_id: int, location_id: int | None = None) -> dict
         "history": core_repairs.get_status_history(conn, order_id),
         "parts": core_repairs.get_used_parts(conn, order_id),
         "attachments": core_repairs.get_attachments(conn, order_id),
+        "notes": core_repair_notes.list_notes(conn, order_id),
         "masters": core_auth.list_staff(conn),
         "products": core_inventory.list_products(conn),
         "cells": core_inventory.list_cells(conn, location_id),
