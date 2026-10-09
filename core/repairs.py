@@ -525,32 +525,38 @@ def set_price(conn: sqlite3.Connection, order_id: int, price_estimate: int | Non
         "UPDATE repair_orders SET price_estimate = ?, price_final = ? WHERE id = ?",
         (price_estimate, price_final, order_id),
     )
-    if price_final or price_estimate:
-        _documents.update_for(conn, "repair", order_id, amount=price_final or price_estimate)
+    amount = price_final if price_final is not None else price_estimate
+    if amount is not None:
+        _documents.update_for(conn, "repair", order_id, amount=amount)
 
 
 def current_price(repair: sqlite3.Row):
     """What the client is to pay as things stand: the final price, or the
     estimate until there is one."""
-    return repair["price_final"] or repair["price_estimate"]
+    if repair["price_final"] is not None:
+        return repair["price_final"]
+    return repair["price_estimate"]
 
 
 def change_price(conn: sqlite3.Connection, order_id: int, new_price, staff_id: int | None, author_name: str | None = None):
     """The price changed while the repair is under way («нашли ещё
     поломку»): the estimate becomes the new figure — and the final price
-    too, if one had already been set. The change is left in the repair's
-    notes, so the card says who moved it and from what. Returns the old
-    price. Refused once the repair is closed: the money has been taken."""
+    too, if one had already been set. Zero is a price too («стоимость
+    0» — done for free). The change goes into the repair's history
+    (who, from what to what), not into its notes — the price itself is
+    on the card. Returns the old price. Refused once the repair is
+    closed: the money has been taken."""
     repair = get_repair(conn, order_id)
     if not repair:
         raise RepairPartError("Ремонт не найден.")
     if repair["status"] in ("issued", "cancelled"):
         raise RepairPartError(f"Ремонт уже в статусе «{STATUS_LABELS[repair['status']]}» — цену так не поменять.")
     old = current_price(repair)
-    set_price(conn, order_id, new_price, new_price if repair["price_final"] else None)
-    _notes.add_note(
-        conn, order_id, "text", f"Цена изменена: {old or '—'} → {new_price} грн", None,
-        staff_id=staff_id, author_name=author_name,
+    set_price(conn, order_id, new_price, new_price if repair["price_final"] is not None else None)
+    who = "" if staff_id or not author_name else f" ({author_name})"
+    conn.execute(
+        "INSERT INTO repair_status_history (order_id, status, changed_by, comment) VALUES (?, ?, ?, ?)",
+        (order_id, repair["status"], staff_id, f"Цена изменена: {'—' if old is None else old} → {new_price} грн{who}"),
     )
     return old
 
@@ -691,7 +697,7 @@ def render_card_text(
     nobody has said what went in."""
     device = " ".join(filter(None, [repair["device_type"], repair["brand"], repair["model"]]))
     master_label = html.escape(repair["master_name"]) if repair["master_name"] else "не назначен"
-    price = repair["price_final"] or repair["price_estimate"]
+    price = current_price(repair)
     client = html.escape(repair["client_phone"] or "—")
     if repair["client_name"] and repair["client_name"] != repair["client_phone"]:
         client += f" · {html.escape(repair['client_name'])}"
@@ -716,7 +722,7 @@ def render_card_text(
         lines.append("Запчасть: без запчасти")
     elif repair["status"] in ("in_progress", "ready"):
         lines.append("Запчасть: <b>не указана</b>")
-    lines.append(f"Цена: {price} грн" if price else "Цена: не указана")
+    lines.append("Цена: не указана" if price is None else ("Цена: 0 грн (бесплатно)" if not price else f"Цена: {price} грн"))
 
     timestamp_label = _STATUS_TIMESTAMP_LABEL.get(repair["status"])
     timestamp_col = _TIMESTAMP_COLUMN.get(repair["status"])
@@ -743,7 +749,7 @@ def render_card_text(
 def card(conn: sqlite3.Connection, order_id: int) -> tuple[str, dict]:
     """(text, keyboard) of a repair's card as it should look right now."""
     repair = get_repair(conn, order_id)
-    parts, notes = get_used_parts(conn, order_id), _notes.list_notes(conn, order_id)
+    parts, notes = get_used_parts(conn, order_id), _notes.card_notes(conn, order_id)
     text = render_card_text(repair, parts, notes)
     # A card with a photo is a caption, cut by Telegram at 1024 characters
     # — and a cut that lands inside the notes' quote leaves broken markup,

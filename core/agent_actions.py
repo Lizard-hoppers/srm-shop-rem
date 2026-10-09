@@ -226,10 +226,10 @@ def new_repair(conn, ctx, a) -> dict:
 
 def set_repair_price(conn, ctx, a) -> dict:
     repair = _repair(conn, ctx, a.get("repair"))
-    price = _amount(a.get("price"), "цену")
+    price = 0 if str(a.get("price")).strip() in ("0", "0.0") else _amount(a.get("price"), "цену")
     old = _repairs.change_price(conn, repair["id"], price, ctx["staff"]["id"])
     label = _documents.label("repair", repair["id"])
-    _receipt(ctx, f"✅ <b>{label}</b>: цена {old or '—'} → <b>{price} грн</b>", undo=("price", repair["id"], old or 0), sync_repair=repair["id"])
+    _receipt(ctx, f"✅ <b>{label}</b>: цена {'—' if old is None else old} → <b>{price} грн</b>", undo=("price", repair["id"], old or 0), sync_repair=repair["id"])
     return {"done": True, "document": label}
 
 
@@ -257,6 +257,15 @@ def add_repair_note(conn, ctx, a) -> dict:
     _notes.add_note(conn, repair["id"], "text", text, text if len(text) <= 200 else None, staff_id=ctx["staff"]["id"])
     label = _documents.label("repair", repair["id"])
     _receipt(ctx, f"✅ <b>{label}</b>: заметка записана", sync_repair=repair["id"])
+    return {"done": True, "document": label}
+
+
+def clear_repair_notes(conn, ctx, a) -> dict:
+    repair = _repair(conn, ctx, a.get("repair"))
+    hidden = _notes.hide_from_card(conn, repair["id"])
+    label = _documents.label("repair", repair["id"])
+    _receipt(ctx, f"🧹 <b>{label}</b>: заметки убраны с карточки ({hidden})" if hidden else f"<b>{label}</b>: заметок на карточке и так нет",
+             sync_repair=repair["id"])
     return {"done": True, "document": label}
 
 
@@ -441,6 +450,8 @@ ACTIONS: dict[str, tuple] = {
     "assign_repair_master": (assign_repair_master, _INTAKE, "Назначить мастера на ремонт.", {"repair": _REPAIR, "master": _S}, ["repair", "master"]),
     "repair_without_parts": (repair_without_parts, _INTAKE, "Отметить, что ремонт сделан без запчасти.", {"repair": _REPAIR}, ["repair"]),
     "add_repair_note": (add_repair_note, _EVERYONE, "Записать заметку в карточку ремонта.", {"repair": _REPAIR, "text": _S}, ["repair", "text"]),
+    "clear_repair_notes": (clear_repair_notes, _EVERYONE, "Убрать блок заметок с карточки ремонта в чате (заметки остаются на странице ремонта в приложении).",
+        {"repair": _REPAIR}, ["repair"]),
     "add_expense": (add_expense, _CASH, "Записать расход из кассы (аренда, зарплата, закупка, прочее).",
         {"amount": _N, "category": {"type": "string", "enum": list(_cash.EXPENSE_CATEGORIES)}, "comment": {"type": "string", "description": "на что"}, "account": _ACCOUNT}, ["amount"]),
     "cash_correction": (cash_correction, _BOSS, "Внести деньги в кассу или изъять из неё (корректировка, не расход). Нужна причина.",
@@ -536,7 +547,7 @@ def undo(conn: sqlite3.Connection, what: tuple, staff) -> str:
         return f"↩️ <b>{label}</b> отменён."
     if kind == "price":
         try:
-            _repairs.change_price(conn, order_id, money(float(what[2])) or None, staff["id"])
+            _repairs.change_price(conn, order_id, money(float(what[2])), staff["id"])
         except _repairs.RepairPartError as exc:
             raise Refused(str(exc)) from exc
         return f"↩️ <b>{label}</b>: цена возвращена — {what[2]} грн."

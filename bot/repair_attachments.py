@@ -35,6 +35,7 @@ import uuid
 
 import html
 import logging
+import re
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramAPIError
@@ -116,6 +117,7 @@ async def photo_reply_to_repair(message: Message) -> None:
 
 # ---- заметки: текст и голос в ответ на карточку ----
 
+STATUS_ONLY_LEN = 40
 _MAX_VOICE_BYTES = 20 * 1024 * 1024  # what a bot may download from Telegram at all
 
 
@@ -260,12 +262,19 @@ async def _save_note(message: Message, store, order_id: int, kind: str, original
         # Nothing to cut in a short message — it is its own short version.
         read = {"summary": original if len(original) <= ai_notes.SHORT_ENOUGH else None,
                 "stage": None, "status": None, "price": None, "payment": None}
-    with get_conn(store.db_path) as conn:
-        core_notes.add_note(
-            conn, order_id, kind, original, read["summary"], staff_id=staff["id"] if staff else None,
-            author_name=_author_name(message), chat_id=str(message.chat.id), message_id=message.message_id,
-            stage=read["stage"], suggested_status=read["status"], suggested_price=read["price"],
-        )
+    # A few words that only report a status («выдан», «готово», «взял в
+    # работу») are an instruction, not something to remember: the status
+    # moves and the repair's history records it — they don't pile up in
+    # the notes. Anything longer may carry more than the status and is kept.
+    only_status = (core_repairs.chat_move_allowed(current, read["status"]) and len(original) <= STATUS_ONLY_LEN
+                   and not read["stage"] and read["price"] is None)
+    if not only_status:
+        with get_conn(store.db_path) as conn:
+            core_notes.add_note(
+                conn, order_id, kind, original, read["summary"], staff_id=staff["id"] if staff else None,
+                author_name=_author_name(message), chat_id=str(message.chat.id), message_id=message.message_id,
+                stage=read["stage"], suggested_status=read["status"], suggested_price=read["price"],
+            )
     moved = apply_status(store, order_id, read["status"], staff, payment=read.get("payment"))
     _sync_after_change(order_id, store.db_path)
     # A price named in the same breath as «выдан» is what was paid, not a
@@ -314,6 +323,74 @@ async def price_decline(callback: CallbackQuery) -> None:
     await callback.answer("Цена не изменена")
 
 
+# ---- команды карточке: то, что меняет её саму, а не добавляет к ней слова ----
+
+# «сумма 3000», «цена 3000 грн», «стоимость 0», «3000 к оплате», «итого 4500» — a price said
+# to the card, nothing else in the message. Longer talk that mentions a
+# price («нашли ещё поломку, выйдет 4000») is not this — that one is read
+# by the model and asked about (_price_hint).
+_PRICE_WORDS = r"(?:сумма|сума|цена|ціна|стоимость|вартість|итого|разом|к\s+оплате|до\s+сплати|ремонт)"
+_PRICE_SAID = re.compile(
+    rf"^\s*(?:{_PRICE_WORDS}\s*(?:ремонта|ремонту)?\s*[:=—-]?\s*(\d[\d\s]{{0,8}})(?:[.,]\d+)?\s*(?:грн|гривен|гривень|₴)?"
+    rf"|(\d[\d\s]{{0,8}})\s*(?:грн|гривен|гривень|₴)?\s*{_PRICE_WORDS})\s*[.!]?\s*$",
+    re.IGNORECASE,
+)
+_HIDE_NOTES = re.compile(r"(?:убери|убрать|уберите|удали|удалить|очисти|очистить|скрой|скрыть|прибери|видали)\w*\s+(?:все\s+|всі\s+)?(?:заметк|нотатк|комментар|коментар)", re.IGNORECASE)
+
+
+def price_said(text: str | None):
+    """The price a message states to a card, if that is ALL it says — else None. Zero counts."""
+    match = _PRICE_SAID.match(text or "")
+    if not match:
+        return None
+    digits = re.sub(r"\s", "", match.group(1) or match.group(2))
+    return int(digits) if digits and int(digits) < ai_notes.MAX_PRICE else None
+
+
+def hide_notes_said(text: str | None) -> bool:
+    return bool(_HIDE_NOTES.search(text or ""))
+
+
+async def card_command(message: Message, store, order_id: int, staff, text: str) -> bool:
+    """A reply to a repair's card that is an instruction ABOUT the card:
+    «сумма 3000» sets the repair's price right there (it is not filed as a
+    note — the price on the card is the record), «убери заметки» takes
+    the notes block off the card. Returns True if the message was one of
+    these and has been dealt with. Also reached from «бот, …» sent as a
+    reply to a card (bot/assistant_chat.py)."""
+    label = core_documents.label("repair", order_id)
+    if hide_notes_said(text):
+        with get_conn(store.db_path) as conn:
+            hidden = core_notes.hide_from_card(conn, order_id)
+        _sync_after_change(order_id, store.db_path)
+        await message.reply(f"🧹 {label}: заметки убраны с карточки ({hidden})." if hidden else f"{label}: заметок на карточке и так нет.")
+        return True
+    price = price_said(text)
+    if price is None:
+        return False
+    if not staff:
+        # Not linked to the CRM: his word doesn't move a price by itself —
+        # the question goes to the chat for a staff member to answer.
+        with get_conn(store.db_path) as conn:
+            repair = core_repairs.get_repair(conn, order_id)
+        hint = _price_hint(order_id, repair["status"], core_repairs.current_price(repair), price)
+        if hint:
+            await message.reply(hint[0], reply_markup=hint[1])
+        return True
+    try:
+        with get_conn(store.db_path) as conn:
+            old = core_repairs.change_price(conn, order_id, price, staff["id"])
+    except core_repairs.RepairPartError as exc:
+        await message.reply(f"{label}: {html.escape(str(exc))}")
+        return True
+    _sync_after_change(order_id, store.db_path)
+    undo = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+        text="↩️ Вернуть", callback_data=f"aundo:price:{order_id}:{0 if old is None else old}",
+    )]])
+    await message.reply(f"✅ {label}: цена {'—' if old is None else old} → <b>{price} грн</b>", reply_markup=undo)
+    return True
+
+
 @router.message(F.reply_to_message, F.chat.type != "private", F.text | F.voice | F.audio)
 async def note_reply_to_repair(message: Message) -> None:
     """A text or voice message sent in reply to a repair's card (or to an
@@ -340,6 +417,8 @@ async def note_reply_to_repair(message: Message) -> None:
         kind, original = "text", message.text.strip()
         if not original:
             return
+        if await card_command(message, store, order_id, staff, original):
+            return
     else:
         kind, media = "voice", message.voice or message.audio
         if media.file_size and media.file_size > _MAX_VOICE_BYTES:
@@ -354,6 +433,10 @@ async def note_reply_to_repair(message: Message) -> None:
             await message.reply(f"Не смог расшифровать голосовое — в {label} ничего не записано. Напишите текстом.")
             return
 
+    if kind == "voice" and (price_said(original) is not None or hide_notes_said(original)):
+        await message.reply(f"🎤 {html.escape(original)}")
+        if await card_command(message, store, order_id, staff, original):
+            return
     shown, hints = await _save_note(message, store, order_id, kind, original, staff)
     if kind == "voice":
         # What was heard is said back: the sender can see at once whether

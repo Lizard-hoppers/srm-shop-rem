@@ -51,7 +51,7 @@ from bot import reminder_flow
 from bot.miniapp_links import crm_link
 from bot.quick_actions import _resolve_staff_for_dm
 from bot.repair_actions import _sync_after_change
-from bot.repair_attachments import apply_status
+from bot.repair_attachments import apply_status, card_command
 from core import agent_actions
 from core import agent_tools
 from core import ai_agent
@@ -322,6 +322,16 @@ async def _handle(message: Message, store, staff, question: str) -> None:
     if not question:
         await message.reply(_HELP)
         return
+    # «бот, убери заметки» / «бот, сумма 3000» sent as a reply to a repair's
+    # card is about THAT repair — no need to name it.
+    replied = message.reply_to_message
+    if replied and message.chat.type != "private":
+        with get_conn(store.db_path) as conn:
+            chat_id = str(message.chat.id)
+            order_id = (core_repairs.find_order_by_message(conn, chat_id, replied.message_id)
+                        or core_notes.find_order_by_note_message(conn, chat_id, replied.message_id))
+        if order_id and await card_command(message, store, order_id, staff, question):
+            return
     # «напомни …» — before anything else looks at the words: «напомни
     # отдать 13 про мах» must set a reminder, not hand the phone over.
     if reminder_flow.is_list_request(question):

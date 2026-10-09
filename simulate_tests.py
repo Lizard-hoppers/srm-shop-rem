@@ -7134,10 +7134,13 @@ def scenario_repair_notes() -> None:
             await press(MASTER_TG, "Эдик", f"rprice:{repair_id}:4200", 9501)
             with get_conn(db_path) as conn:
                 repair = repairs.get_repair(conn, repair_id)
-                trail = repair_notes.list_notes(conn, repair_id)[-1]
+                trail = repairs.get_status_history(conn, repair_id)[-1]
+                notes_now = [n["text"] for n in repair_notes.list_notes(conn, repair_id)]
                 check("«Да» from a staff member changes the price — the estimate, and the journal document's amount with it",
                       repair["price_estimate"] == 4200 and repair["price_final"] is None and documents.get_for(conn, "repair", repair_id)["amount"] == 4200)
-                check("the change is left in the repair's notes with who made it", trail["text"] == "Цена изменена: 3000 → 4200 грн" and trail["author"] == "Эдик")
+                check("the change is left in the repair's HISTORY with who made it — not in its notes",
+                      trail["comment"] == "Цена изменена: 3000 → 4200 грн" and trail["staff_name"] == "Эдик" and trail["status"] == repair["status"]
+                      and not any("Цена изменена" in text for text in notes_now))
             check("the question turns into the record of what was done, and the group card shows the new price",
                   any(m["kind"] == "edit" and "3000 → <b>4200 грн</b> (Эдик)" in m["text"] for m in sent) and "Цена: 4200 грн" in synced[-1])
             with get_conn(db_path) as conn:
@@ -7153,6 +7156,65 @@ def scenario_repair_notes() -> None:
                       repairs.current_price(repairs.get_repair(conn, repair_id)) == 4500 and sent[0]["alert"] is True and "Выдан" in sent[0]["text"])
             _handled, _id = await post(MASTER_TG, "Эдик", CARD_MESSAGE, text="Клиент сказал выйдет дорого")
             check("and a closed repair is not asked about its price at all", [m["kind"] for m in sent] == ["reaction"])
+
+            # ---- команды карточке: «сумма 3000», «стоимость 0», «убери заметки»
+            from bot import repair_attachments as ra
+            check("a price said to the card is recognised only when it is all the message says",
+                  [ra.price_said(t) for t in ("сумма 3000", "Сумма: 3 000 грн", "цена 3000", "стоимость 0", "3000 к оплате", "итого 4500 грн.", "ремонт 3000", "сума 2500")]
+                  == [3000, 3000, 3000, 0, 3000, 4500, 3000, 2500]
+                  and all(ra.price_said(t) is None for t in ("3000", "жду запчасть 3000", "нашли поломку, выйдет 4000", "цена запчасти 1800", "сумма 3000 наличными", None)))
+            check("«убери заметки» is recognised in its forms and not in its opposite",
+                  all(ra.hide_notes_said(t) for t in ("убери заметки", "удали все заметки", "очисти комментарии"))
+                  and not any(ra.hide_notes_said(t) for t in ("заметки не убирай", "убери его", None)))
+            with get_conn(db_path) as conn:
+                conn.execute("UPDATE staff SET telegram_id = ? WHERE id = ?", (MASTER_TG, master))
+                cmd_repair = repairs.create_repair(conn, client_id, "Смартфон", None, "Honor 90", None, "Экран", "offline", master, 1500, owner, location_id=1)
+                repairs.claim_repair(conn, cmd_repair, master)
+                conn.execute("INSERT INTO repair_order_messages (order_id, chat_id, message_id, kind) VALUES (?, ?, ?, 'staff')", (cmd_repair, str(GROUP), 4105))
+            ai_notes.analyze = _read
+            await post(MASTER_TG, "Эдик", 4105, text="клиент просил позвонить после 18")
+            _handled, price_reply = await post(MASTER_TG, "Эдик", 4105, text="сумма 3000")
+            with get_conn(db_path) as conn:
+                repair = repairs.get_repair(conn, cmd_repair)
+                check("«сумма 3000» in reply to the card CHANGES the repair's price right there — it is not filed as a note",
+                      repairs.current_price(repair) == 3000 and [n["text"] for n in repair_notes.list_notes(conn, cmd_repair)] == ["клиент просил позвонить после 18"]
+                      and documents.get_for(conn, "repair", cmd_repair)["amount"] == 3000)
+            told = next((m for m in sent if m["kind"] == "message"), None)
+            check("the bot says what changed, with «Вернуть»; the group card shows the new price",
+                  told is not None and told["reply_to"] == price_reply and f"РК-{cmd_repair:03d}: цена 1500 → <b>3000 грн</b>" in told["text"]
+                  and told["buttons"] == [f"aundo:price:{cmd_repair}:1500"] and "Цена: 3000 грн" in synced[-1])
+            await post(OUTSIDER_TG, "Сергей Аутсорс", 4105, text="цена 9999")
+            with get_conn(db_path) as conn:
+                check("from someone who isn't staff in the CRM the same words only raise the question for staff to answer",
+                      repairs.current_price(repairs.get_repair(conn, cmd_repair)) == 3000 and sent[0]["buttons"] == [f"rprice:{cmd_repair}:9999", f"rprice_no:{cmd_repair}"])
+            await post(MASTER_TG, "Эдик", 4105, text="стоимость 0")
+            with get_conn(db_path) as conn:
+                repair = repairs.get_repair(conn, cmd_repair)
+                check("«стоимость 0» makes it free: zero is a price, and the card says so",
+                      repairs.current_price(repair) == 0 and repair["price_estimate"] == 0 and "Цена: 0 грн (бесплатно)" in repairs.card(conn, cmd_repair)[0])
+            await post(MASTER_TG, "Эдик", 4105, text="Отдал клиенту")
+            with get_conn(db_path) as conn:
+                check("…and a free repair is handed over with no payment and no question",
+                      repairs.get_repair(conn, cmd_repair)["status"] == "issued" and any("без оплаты" in (m.get("text") or "") for m in sent))
+                repairs.undo_chat_status(conn, cmd_repair, "in_progress", None)
+                check("the card carries the note as a quote until asked otherwise", "<blockquote>клиент просил позвонить после 18" in repairs.card(conn, cmd_repair)[0])
+            await post(OUTSIDER_TG, "Сергей Аутсорс", 4105, text="убери заметки")
+            with get_conn(db_path) as conn:
+                text, _kb = repairs.card(conn, cmd_repair)
+                check("«убери заметки» takes the whole notes block off the card — nothing is deleted: the notes are still on the repair's record",
+                      "Заметки" not in text and "blockquote" not in text and len(repair_notes.list_notes(conn, cmd_repair)) == 1
+                      and "заметки убраны с карточки (1)" in sent[0]["text"] and "Заметки" not in synced[-1])
+            await post(OUTSIDER_TG, "Сергей Аутсорс", 4105, text="убери заметки")
+            check("asked again, it says there is nothing to take off", "и так нет" in sent[0]["text"])
+            await post(MASTER_TG, "Эдик", 4105, text="перезвонить завтра")
+            with get_conn(db_path) as conn:
+                text, _kb = repairs.card(conn, cmd_repair)
+                check("a note written afterwards shows on the card again — alone", "📝 <b>Заметки (1)</b>" in text and "перезвонить завтра" in text and "после 18" not in text)
+            ai_notes.transcribe = lambda audio, filename="voice.ogg": "Сумма 2500"
+            await post(MASTER_TG, "Эдик", 4105, voice=Voice(file_id="v", file_unique_id="u", duration=2, file_size=500))
+            with get_conn(db_path) as conn:
+                check("said by voice, «сумма 2500» does the same", repairs.current_price(repairs.get_repair(conn, cmd_repair)) == 2500
+                      and len(repair_notes.list_notes(conn, cmd_repair)) == 2)
 
         try:
             asyncio.run(run())
@@ -7977,6 +8039,13 @@ def scenario_agent_actions() -> None:
             fixed = repairs.get_repair(conn, repair_id)
             check("master, «без запчасти» and a note — by number or by words", fixed["master_name"] == "Сергей" and fixed["no_parts"] == 1
                   and repair_notes.list_notes(conn, repair_id)[-1]["text"] == "клиент просил позвонить после 18")
+
+            result, receipts = do(keeper_row, "clear_repair_notes", repair="про мах")
+            check("«бот, убери заметки с 13 про мах»: the block comes off the card, the note stays on record",
+                  "заметки убраны с карточки (1)" in receipts[0]["text"] and repair_notes.card_notes(conn, repair_id) == [] and len(repair_notes.list_notes(conn, repair_id)) == 1)
+            do(owner_row, "set_repair_price", repair=str(repair_id), price=0)
+            check("«поставь цену 0» is allowed — free", repairs.current_price(repairs.get_repair(conn, repair_id)) == 0)
+            do(owner_row, "set_repair_price", repair=str(repair_id), price=1500)
 
             # ---- продажа
             till = accounts.balance(conn, cash_uah)

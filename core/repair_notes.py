@@ -56,6 +56,20 @@ def list_notes(conn: sqlite3.Connection, order_id: int) -> list[sqlite3.Row]:
     ).fetchall()
 
 
+def card_notes(conn: sqlite3.Connection, order_id: int) -> list[sqlite3.Row]:
+    """The notes the chat card shows — list_notes minus the ones taken
+    off it by «убери заметки»."""
+    return [note for note in list_notes(conn, order_id) if not note["hidden"]]
+
+
+def hide_from_card(conn: sqlite3.Connection, order_id: int) -> int:
+    """«Убери заметки»: every note there is now comes off the repair's
+    chat card (the block disappears). They stay on the repair's page in
+    the Mini App, and a note written later shows on the card again.
+    Returns how many were taken off."""
+    return conn.execute("UPDATE repair_notes SET hidden = 1 WHERE order_id = ? AND hidden = 0", (order_id,)).rowcount
+
+
 def find_order_by_note_message(conn: sqlite3.Connection, chat_id: str, message_id: int) -> int | None:
     """The repair a note belongs to, given the chat message it came as —
     so a reply to someone's reply still lands in the same repair."""

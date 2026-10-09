@@ -1005,6 +1005,9 @@ def init_db(db_path: str = DB_PATH) -> None:
         _ensure_column(conn, "repair_notes", "stage", "stage TEXT")
         _ensure_column(conn, "repair_notes", "suggested_status", "suggested_status TEXT")
         _ensure_column(conn, "repair_notes", "suggested_price", "suggested_price REAL")
+        # «Убери заметки»: taken off the chat card on request (still on
+        # the repair's page — nothing said about a repair is deleted).
+        _ensure_column(conn, "repair_notes", "hidden", "hidden INTEGER NOT NULL DEFAULT 0")
         try:
             # One phone = one контрагент. Partial: a walk-in with no phone
             # on record is fine, any number of them.
