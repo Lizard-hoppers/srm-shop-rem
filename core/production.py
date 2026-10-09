@@ -424,12 +424,44 @@ def accept(conn: sqlite3.Connection, order_id: int, staff_id: int) -> int | None
     return transfer_id
 
 
-def cancel(conn: sqlite3.Connection, order_id: int, staff_id: int) -> None:
-    """Only while nothing has left its склад (draft): everything held is
-    let go and the order is closed."""
-    _require(conn, order_id, "draft")
+def cancel(conn: sqlite3.Connection, order_id: int, staff_id: int, *, mark_document: bool = True) -> int | None:
+    """Call the job off — any time before the result is accepted.
+
+    A draft: everything held is simply let go. Already with the master
+    (in_work / reported): the phone and EVERY part handed over go back
+    «Мастер → В пути → Точка» in one перемещение — nothing is written
+    off, the phone's cost doesn't change, nothing is accrued, and a report
+    already filed is disregarded. Returns that перемещение's id (None for
+    a draft); the точка still has to receive it.
+
+    An accepted order (done) can't be cancelled: the parts are spent and
+    the phone carries its new cost."""
+    order = _require(conn, order_id, "draft", "in_work", "reported")
+    transfer_id = None
+    if order["status"] != "draft":
+        master_wh = _warehouses.master_warehouse(conn, order["master_id"])
+        point = _warehouses.point_warehouse(conn, order["location_id"])
+        unit = _unit_line(conn, order["batch_id"])
+        if not master_wh or not point or not unit or unit["warehouse_id"] != master_wh["id"]:
+            raise ProductionError("Телефон не на складе мастера — вернуть его перемещением не получится.")
+        back = [(order["batch_id"], unit["cell_id"], 1)]
+        for part in get_parts(conn, order_id):
+            if _inventory.available_qty(conn, part["batch_id"], part["cell_id"], reserved_for=_ref(order_id)) < part["qty"]:
+                raise ProductionError(f"«{part['product_name']}» уже нет на складе мастера в нужном количестве.")
+            back.append((part["batch_id"], part["cell_id"], part["qty"]))
+        transfer_id = _transfers.send(
+            conn, master_wh["id"], point["id"], back, staff_id,
+            comment=f"{_documents.label('production', order_id)}: отмена, возврат от мастера", reserved_for=_ref(order_id),
+        )
     _inventory.release(conn, _REF, order_id)
-    conn.execute("UPDATE production_orders SET status = 'cancelled' WHERE id = ?", (order_id,))
-    doc = _documents.get_for(conn, "production", order_id)
-    if doc:
-        _documents.mark_cancelled(conn, doc["id"], staff_id, "заказ отменён до передачи мастеру")
+    conn.execute(
+        "UPDATE production_orders SET status = 'cancelled', return_transfer_id = ? WHERE id = ?", (transfer_id, order_id),
+    )
+    if mark_document:
+        doc = _documents.get_for(conn, "production", order_id)
+        if doc:
+            _documents.mark_cancelled(
+                conn, doc["id"], staff_id,
+                "заказ отменён, телефон и детали возвращаются от мастера" if transfer_id else "заказ отменён до передачи мастеру",
+            )
+    return transfer_id

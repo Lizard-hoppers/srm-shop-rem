@@ -33,7 +33,7 @@ from core.documents import DocumentError
 
 CANCELLABLE_TYPES = (
     "sale", "cash_out", "cash_adjust", "exchange", "money_transfer",
-    "receipt", "stock_in", "writeoff", "transfer", "buyback", "cash_in", "client_order",
+    "receipt", "stock_in", "writeoff", "transfer", "buyback", "cash_in", "client_order", "production",
 )
 
 
@@ -71,6 +71,15 @@ def _cancel_cash(conn: sqlite3.Connection, doc: sqlite3.Row, staff_id: int) -> N
         _masters.cancel_payout(conn, doc["ref_id"])
     else:
         _cash.cancel_transaction(conn, doc["ref_id"])
+
+
+def _cancel_production(conn: sqlite3.Connection, doc: sqlite3.Row, staff_id: int) -> None:
+    from core import production as _production  # local: production imports half of core
+
+    try:
+        _production.cancel(conn, doc["ref_id"], staff_id, mark_document=False)
+    except (_production.ProductionError, _stock_transfers.TransferError, _inventory.InsufficientStockError) as exc:
+        raise DocumentError(str(exc)) from exc
 
 
 def _cancel_client_order(conn: sqlite3.Connection, doc: sqlite3.Row, staff_id: int) -> None:
@@ -180,7 +189,7 @@ _REVERSERS = {
     "transfer": _cancel_manual_stock,
     "sale": _cancel_sale, "cash_out": _cancel_cash, "cash_adjust": _cancel_cash,
     "exchange": _cancel_exchange, "money_transfer": _cancel_transfer,
-    "cash_in": _cancel_cash, "client_order": _cancel_client_order,
+    "cash_in": _cancel_cash, "client_order": _cancel_client_order, "production": _cancel_production,
 }
 
 

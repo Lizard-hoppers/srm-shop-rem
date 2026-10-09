@@ -214,3 +214,48 @@ def cancel_money(conn: sqlite3.Connection, entry_id: int) -> None:
     conn.execute(
         "UPDATE client_ledger SET cancelled_at = datetime('now') WHERE id = ? AND cancelled_at IS NULL", (entry_id,)
     )
+
+
+def backfill(conn: sqlite3.Connection) -> None:
+    """Продажи and покупки made before the ledger existed (Заход 6) get
+    their rows, dated as the document itself, so «Сверка за период» and a
+    client's history go back to the beginning. Idempotent: a document that
+    already has rows is skipped; cancelled ones are left out.
+
+    Those sales were paid on the spot — «в долг» didn't exist yet — so
+    each is written as charged and paid in full: balances don't move."""
+    def insert(client_id, amount, kind, ref_type, ref_id, location_id, staff_id, comment, created_at) -> None:
+        if not amount:
+            return
+        conn.execute(
+            """INSERT INTO client_ledger
+               (client_id, amount, kind, ref_type, ref_id, location_id, staff_id, comment, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (client_id, amount, kind, ref_type, ref_id, location_id, staff_id, comment, created_at),
+        )
+
+    sales = conn.execute(
+        """SELECT sales_orders.*,
+                  (SELECT COALESCE(SUM(qty * price), 0) FROM sales_order_items WHERE order_id = sales_orders.id) AS total
+           FROM sales_orders
+           WHERE client_id IS NOT NULL AND status != 'cancelled'
+             AND NOT EXISTS (SELECT 1 FROM client_ledger WHERE ref_type = 'sales_order' AND ref_id = sales_orders.id)""",
+    ).fetchall()
+    for sale in sales:
+        label = _documents.label("sale", sale["id"])
+        args = ("sales_order", sale["id"], sale["location_id"], sale["staff_id"])
+        insert(sale["client_id"], money(sale["total"]), "sale", *args, label, sale["created_at"])
+        insert(sale["client_id"], -money(sale["total"]), "payment", *args, f"Оплата {label}", sale["created_at"])
+
+    purchases = conn.execute(
+        """SELECT buyback_orders.* FROM buyback_orders
+           WHERE NOT EXISTS (SELECT 1 FROM client_ledger WHERE ref_type = 'buyback_order' AND ref_id = buyback_orders.id)
+             AND NOT EXISTS (SELECT 1 FROM documents WHERE doc_type = 'buyback' AND ref_id = buyback_orders.id
+                             AND status = 'cancelled')""",
+    ).fetchall()
+    for order in purchases:
+        price = money(order["purchase_price_uah"] if order["purchase_price_uah"] is not None else order["purchase_price"])
+        label = _documents.label("buyback", order["id"])
+        args = ("buyback_order", order["id"], order["location_id"], order["staff_id"])
+        insert(order["client_id"], -price, "buyback", *args, f"{label}: {order['model'] or ''}".rstrip(": "), order["created_at"])
+        insert(order["client_id"], price, "payment", *args, f"Оплата {label}", order["created_at"])

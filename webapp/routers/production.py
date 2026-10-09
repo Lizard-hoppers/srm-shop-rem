@@ -276,7 +276,9 @@ def cancel_view(request: Request, order_id: int, staff=Depends(require_staff)):
         with get_conn() as conn:
             if not _can_manage(staff):
                 raise ProductionError("Отменить заказ может кладовщик, админ или владелец.")
-            core_production.cancel(conn, order_id, staff["id"])
-    except ProductionError as exc:
+            returning = core_production.cancel(conn, order_id, staff["id"])
+    except (ProductionError, TransferError, core_inventory.InsufficientStockError) as exc:
         return _error(request, staff, order_id, str(exc))
-    return RedirectResponse(link(request, "/production"), status_code=303)
+    # Cancelled after handover: stay on the order — it now points at the
+    # перемещение that brings everything back, which the точка must receive.
+    return RedirectResponse(link(request, f"/production/{order_id}" if returning else "/production"), status_code=303)

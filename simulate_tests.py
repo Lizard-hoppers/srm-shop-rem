@@ -5376,12 +5376,46 @@ def scenario_service_center() -> None:
                   and production.active_order_for_batch(conn, inventory.find_unit_by_imei(conn, "356000000000003")["id"]) is None)
             try:
                 production.cancel(conn, order_2, owner)
-                check("an order that has left the draft can't be cancelled this way", False)
+                check("an accepted order can't be cancelled — its parts are spent", False)
             except production.ProductionError:
-                check("an order that has left the draft can't be cancelled this way", True)
+                check("an accepted order can't be cancelled — its parts are spent", True)
+
+            # ---- отмена после передачи мастеру: всё едет обратно, ничего не списано
+            fourth_unit = inventory.find_unit_by_imei(conn, "356000000000003")
+            value_before, owed_before = inventory.stock_value(conn), masters.accrued_total(conn, sergey)
+            called_off = production.create_order(conn, imei="356000000000003", staff_id=owner, location_id=1)
+            a_line = next(l for l in production.available_parts(conn, called_off) if l["product_id"] == akb)
+            production.set_parts(conn, called_off, [(a_line["batch_id"], a_line["cell_id"], 1)], owner)
+            production.assign_master(conn, called_off, sergey, "500")
+            production.hand_over(conn, called_off, owner)
+            production.submit_report(conn, called_off, sergey, extras=[("Шлейф", "200")])
+            returning = production.cancel(conn, called_off, owner)
+            cancelled = production.get_order(conn, called_off)
+            check("cancelling after the handover sends the phone and EVERY part back in one перемещение",
+                  cancelled["status"] == "cancelled" and cancelled["return_transfer_id"] == returning
+                  and stock_transfers.get_transfer(conn, returning)["status"] == "sent"
+                  and sorted((i["product_id"], i["qty"]) for i in stock_transfers.get_items(conn, returning))
+                  == sorted([(fourth_unit["product_id"], 1), (akb, 1)]) and warehouses.total_qty(conn, sergey_wh) == 0)
+            check("nothing was written off, the phone's cost is unchanged, the master is owed nothing for it, no hold is left",
+                  inventory.stock_value(conn) == value_before and masters.accrued_total(conn, sergey) == owed_before
+                  and inventory.get_batch(conn, fourth_unit["id"])["unit_cost_uah"] == 3000
+                  and conn.execute("SELECT COUNT(*) AS n FROM stock_reservations WHERE ref_type = 'production' AND ref_id = ? AND released_at IS NULL", (called_off,)).fetchone()["n"] == 0
+                  and documents.get_for(conn, "production", called_off)["status"] == "cancelled" and _stock_is_consistent(conn))
+            stock_transfers.receive(conn, returning, owner)
+            via_journal = production.create_order(conn, imei="356000000000003", staff_id=owner, location_id=1)
+            production.assign_master(conn, via_journal, sergey, "500")
+            production.hand_over(conn, via_journal, owner)
+            doc_cancel.cancel_document(conn, documents.get_for(conn, "production", via_journal)["id"], owner, "передумали")
+            check("the same from the journal: the order is cancelled and the phone is on its way back",
+                  production.get_order(conn, via_journal)["status"] == "cancelled"
+                  and production.get_order(conn, via_journal)["return_transfer_id"] is not None)
+            try:
+                doc_cancel.cancel_document(conn, documents.get_for(conn, "production", order_2)["id"], owner, "поздно")
+                check("an accepted order can't be cancelled from the journal either", False)
+            except documents.DocumentError:
+                check("an accepted order can't be cancelled from the journal either", True)
             check("orders can be listed by status and by master",
-                  [o["id"] for o in production.list_orders(conn, statuses=("done",), master_id=sergey)] == [order_2, order_id]
-                  and production.list_orders(conn, statuses=production.ACTIVE_STATUSES) == [])
+                  [o["id"] for o in production.list_orders(conn, statuses=("done",), master_id=sergey)] == [order_2, order_id])
 
 
 def scenario_service_center_http() -> None:
@@ -5868,6 +5902,31 @@ def scenario_settlements() -> None:
             check("a покупка shows in the seller's сверка as owed and paid, net zero",
                   settlements.balance(conn, seller_id) == 0 and (st2["charged"], st2["paid"]) == (4000, 4000))
 
+            # ---- перенос старого: продажи и покупки до появления сверки
+            old_client = clients.get_or_create_by_phone(conn, "Давний", "+380671230009", source="offline")
+            case = inventory.create_product(conn, "Чехол", "ST-CASE", None, "шт", False, True, 0, 300)
+            purchases.create_receipt(conn, None, None, owner, [(case, cell, 2, 50)], location_id=1)
+            old_sale = sales.create_sale(conn, old_client, "offline", owner, [(case, 1, 300)], location_id=1)
+            old_cancelled = sales.create_sale(conn, old_client, "offline", owner, [(case, 1, 300)], location_id=1)
+            doc_cancel.cancel_document(conn, documents.get_for(conn, "sale", old_cancelled)["id"], owner, "ошибка")
+            conn.execute("DELETE FROM client_ledger WHERE client_id IN (?, ?)", (old_client, seller_id))
+            conn.execute("UPDATE sales_orders SET created_at = '2026-08-18 10:00:00' WHERE id = ?", (old_sale,))
+            check("before the transfer those documents are not in the сверка at all",
+                  settlements.statement(conn, old_client, "2026-08-01", today)["rows"] == [])
+            settlements.backfill(conn)
+            settlements.backfill(conn)
+            old_statement = settlements.statement(conn, old_client, "2026-08-18", "2026-08-18")
+            check("the old sale is now in the сверка on its own date — charged and paid, once, balance untouched",
+                  (old_statement["charged"], old_statement["paid"], len(old_statement["rows"])) == (300, 300, 2)
+                  and settlements.balance(conn, old_client) == 0 and old_statement["rows"][0]["source"] == f"ПД-{old_sale:03d}")
+            check("a cancelled sale is not carried over",
+                  conn.execute("SELECT COUNT(*) AS n FROM client_ledger WHERE ref_type = 'sales_order' AND ref_id = ?", (old_cancelled,)).fetchone()["n"] == 0)
+            carried = settlements.statement(conn, seller_id, today, today)
+            check("the old покупка is carried over too: we owed 4000 and paid 4000",
+                  (carried["charged"], carried["paid"]) == (4000, 4000) and settlements.balance(conn, seller_id) == 0)
+            check("a document that already has rows is left alone", settlements.balance(conn, anna) == -600
+                  and len(settlements.statement(conn, anna, today, today)["rows"]) == 5)
+
             # ---- заказ: резерв 24 ч, «Оплатить» и «Выдать» отдельно
             boris = clients.get_or_create_by_phone(conn, "Борис", "+380671230003", source="offline")
             for items, needle, label in (
@@ -6245,6 +6304,10 @@ def scenario_sale_chat() -> None:
             await sf.sale_got_price(say("дорого"), state)
             check("a price that isn't a number is a nudge", "Введите цену числом" in screen()["text"])
             await sf.sale_got_price(say("6500"), state)
+            check("the priced item lands «В чеке» with a total and the choice: ещё товар or дальше",
+                  "В чеке" in screen()["text"] and "Итого: <b>6500 грн</b>" in screen()["text"]
+                  and _buttons(screen()["markup"]) == ["sl_more", "sl_next", "sl_cancel"])
+            await sf.sale_next(tap("sl_next"), state)
             check("then the client's phone — mandatory", "Номер телефона клиента" in screen()["text"] and "Обязательно" in screen()["text"])
             await sf.sale_got_phone(say("абв"), state)
             check("not a phone number is a nudge", "Не похоже на номер" in screen()["text"])
@@ -6285,6 +6348,7 @@ def scenario_sale_chat() -> None:
             check("a non-serial product is one option with its free quantity and the card price on a button",
                   "Кабель Lightning" in screen()["text"] and _buttons(screen()["markup"]) == ["sl_price_default"])
             await sf.sale_price_default(tap("sl_price_default"), state)
+            await sf.sale_next(tap("sl_next"), state)
             await sf.sale_got_phone(say("0671110088"), state)
             check("an unknown number → the name is asked", "Как его зовут" in screen()["text"] and "шаг 4 из 5" in screen()["text"])
             await sf.sale_got_name(say("Новый Клиент"), state)
@@ -6317,15 +6381,67 @@ def scenario_sale_chat() -> None:
             await fallback.unknown_text(stranger)
             check("someone who isn't staff gets nothing from it", len(chat.log) == before)
 
-            # ---- отмена с карточки
+            # ---- несколько товаров в одном чеке
             await sf.sale_start(say(qa.BTN_SALE), state)
+            await sf.sale_got_item(say("кабель"), state)
+            await sf.sale_price_default(tap("sl_price_default"), state)
+            await sf.sale_more(tap("sl_more"), state)
+            check("«➕ Ещё товар» asks for the next one and keeps the чек in view",
+                  "Ещё товар" in screen()["text"] and "В чеке: Кабель Lightning — 300 грн" in screen()["text"])
+            await sf.sale_got_item(say("кабель"), state)
+            await sf.sale_price_default(tap("sl_price_default"), state)
+            check("the same product at the same price is one line × 2", "Кабель Lightning × 2 — 600 грн" in screen()["text"])
+            await sf.sale_more(tap("sl_more"), state)
             await sf.sale_got_item(say("358000000000002"), state)
             await sf.sale_got_price(say("7000"), state)
+            check("a phone joins the same чек: total 7600", "Итого: <b>7600 грн</b>" in screen()["text"] and "IMEI 358000000000002" in screen()["text"])
+            await sf.sale_more(tap("sl_more"), state)
+            await sf.sale_got_item(say("358000000000002"), state)
+            check("the same phone can't be added twice", "уже в чеке" in screen()["text"])
+            await sf.sale_got_item(say("кабель"), state)
+            await sf.sale_price_default(tap("sl_price_default"), state)
+            await sf.sale_more(tap("sl_more"), state)
+            await sf.sale_got_item(say("кабель"), state)
+            await sf.sale_price_default(tap("sl_price_default"), state)
+            await sf.sale_more(tap("sl_more"), state)
+            await sf.sale_got_item(say("кабель"), state)
+            check("…and no more of a product than is free (4 left on the shelf)", "уже в чеке" in screen()["text"])
+            with get_conn(db_path) as conn:
+                conn.execute("UPDATE stock SET qty = qty WHERE 1 = 0")  # nothing sold yet — the чек is only a draft
+                check("nothing has left the shelf while the чек is being put together",
+                      inventory.product_total_qty(conn, cable, 1) == 4 and inventory.find_unit_by_imei(conn, "358000000000002") is not None)
+            # back out of «ещё товар» the only way there is: finish the чек from a fresh pick
+            await sf.sale_got_item(say("нет такого"), state)
+            await state.set_state(qa.SaleFlow.cart)
+            await sf.sale_next(tap("sl_next"), state)
+            await sf.sale_got_phone(say("0671110077"), state)
+            check("the payment step asks for the whole total", "Куда оплата — 8200 грн" in screen()["text"])
+            await sf.sale_pick_pay(tap(f"sl_pay:{cash_uah}"), state)
+            check("the confirm card lists every line", "Кабель Lightning × 4 — 1200 грн" in screen()["text"] and "Итого: <b>8200 грн</b>" in screen()["text"])
+            posted.clear()
+            await sf.sale_confirm(tap("sl_confirm"), state)
+            await asyncio.sleep(0.1)
+            with get_conn(db_path) as conn:
+                multi = sales.list_sales(conn)[0]
+                check("one sale, two lines: 4 cables and the phone, 8200 into the касса",
+                      sorted((i["qty"], i["price"]) for i in sales.get_sale_items(conn, multi["id"])) == [(1, 7000), (4, 300)]
+                      and inventory.product_total_qty(conn, cable, 1) == 0 and inventory.find_unit_by_imei(conn, "358000000000002") is None
+                      and accounts.balance(conn, cash_uah) == till + 6500 + 8200)
+            check("the group card lists both lines", len(posted) == 1 and "Кабель Lightning × 4" in posted[0]["text"] and "Итого: 8200 грн" in posted[0]["text"])
+
+            # ---- отмена с карточки
+            with get_conn(db_path) as conn:
+                buyback.create_purchase(conn, seller_phone="0671110001", model="iPhone 12", imei="358000000000003",
+                                        comment=None, price="4000", staff_id=owner, location_id=1)
+            await sf.sale_start(say(qa.BTN_SALE), state)
+            await sf.sale_got_item(say("358000000000003"), state)
+            await sf.sale_got_price(say("7000"), state)
+            await sf.sale_next(tap("sl_next"), state)
             await sf.sale_got_phone(say("0671110077"), state)
             await qa.quick_cancel_callback(tap("sl_cancel"), state)
             with get_conn(db_path) as conn:
                 check("❌ Отмена on the payment step sells nothing and leaves the chat clean",
-                      inventory.find_unit_by_imei(conn, "358000000000002") is not None and await state.get_state() is None
+                      inventory.find_unit_by_imei(conn, "358000000000003") is not None and await state.get_state() is None
                       and not [m for m in chat.log if "Куда оплата" in (m["text"] or "")])
 
         try:

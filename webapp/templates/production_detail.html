@@ -94,6 +94,10 @@
 {% endif %}
 {% endif %}
 
+{% if order.status == 'cancelled' and order.return_transfer_id %}
+<p class="meta">{{ t('production_cancelled_return_hint') }} <a href="{{ link('/transfers/' ~ order.return_transfer_id) }}">{{ t('transfers_title') }} №{{ order.return_transfer_id }} →</a></p>
+{% endif %}
+
 {# ---------------- in_work / reported: отчёт мастера ---------------- #}
 {% if order.status in ('in_work', 'reported') %}
 <h2>{{ t('production_report_title') }}</h2>
@@ -125,6 +129,13 @@
   <button type="submit">{{ t('production_accept_btn') }}</button>
 </form>
 {% endif %}
+{% endif %}
+
+{% if order.status in ('in_work', 'reported') and can_manage %}
+<form method="post" action="{{ link('/production/' ~ order.id ~ '/cancel') }}" class="edit-form" style="margin-top: 12px;">
+  <button type="submit" class="danger">{{ t('production_cancel_return_btn') }}</button>
+</form>
+<p class="meta">{{ t('production_cancel_return_hint') }}</p>
 {% endif %}
 
 {# ---------------- done: что пошло в телефон ---------------- #}

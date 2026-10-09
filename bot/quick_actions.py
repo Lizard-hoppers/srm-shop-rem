@@ -231,6 +231,7 @@ class SaleFlow(StatesGroup):
     asked only for a phone number the base doesn't know yet."""
     item = State()
     price = State()
+    cart = State()
     phone = State()
     name = State()
     pay = State()
@@ -571,10 +572,14 @@ def _steps_sale(data: dict) -> list[str]:
 
 def _summary_sale(data: dict) -> list[str]:
     lines = []
+    items = data.get("items") or []
+    for item in items:
+        qty = f" × {item['qty']}" if item["qty"] > 1 else ""
+        lines.append(f"В чеке: {html.escape(item['label'])}{qty} — {money(item['qty'] * item['price'])} грн")
+    if len(items) > 1:
+        lines.append(f"Итого: {money(sum(i['qty'] * i['price'] for i in items))} грн")
     if data.get("item_label"):
         lines.append(f"Товар: {html.escape(data['item_label'])}")
-    if data.get("price"):
-        lines.append(f"Цена: {data['price']} грн")
     lines.append(_client_line("Клиент", data))
     return [line for line in lines if line]
 

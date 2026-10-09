@@ -1,16 +1,17 @@
-"""«🛍 Продажа» in the bot DM (Заход 6) — one item, four short steps,
-ending in the same document the Mini App's sale form creates
+"""«🛍 Продажа» in the bot DM (Заход 6; several items since 07.10) —
+short steps ending in the same document the Mini App's sale form creates
 (core.sales.create_sale):
 
-  что продаём (IMEI или часть названия) → цена → телефон клиента
-  (обязателен; имя спросим только у нового номера) → куда оплата →
-  «Проверьте и продайте» → карточка в рабочую группу.
+  что продаём (IMEI или часть названия) → цена → «В чеке» (➕ ещё товар
+  — the same two steps again — or дальше) → телефон клиента (обязателен;
+  имя спросим только у нового номера) → куда оплата → «Проверьте и
+  продайте» → карточка в рабочую группу.
 
-Payment here is one tap: the whole price onto one гривневый счёт of the
-точка, or «В долг» — the whole price onto the client's balance
-(core.settlements). A sale of several items, a split across accounts or
-a foreign-currency payment is the Mini App's form — the payment step
-links straight to it with the client already filled in.
+Payment here is one tap: the whole total onto one гривневый счёт of the
+точка, or «В долг» — the whole total onto the client's balance
+(core.settlements). A split across accounts or a foreign-currency
+payment is the Mini App's form — the payment step links straight to it
+with the client already filled in.
 
 Reuses bot.quick_actions' Clean-Chat helpers and shift gate; the FSM
 states (SaleFlow) are declared there so its shared ❌ Отмена and fallback
@@ -38,6 +39,7 @@ from core import documents as core_documents
 from core import inventory as core_inventory
 from core import notify as core_notify
 from core import sales as core_sales
+from core.accounts import money
 from core.storage import get_conn
 from core.stores import get_store
 
@@ -108,10 +110,10 @@ async def sale_start(message: Message, state: FSMContext) -> None:
         return
     await qa._reset(message, state)
     await state.set_state(qa.SaleFlow.item)
-    await state.update_data(store_id=store.id, store_name=store.name)
+    await state.update_data(store_id=store.id, store_name=store.name, items=[])
     await qa._send_prompt(
         message, state,
-        "Что продаём? Введите IMEI или часть названия.\n<i>Несколько товаров сразу — в приложении, раздел «Продажи».</i>",
+        "Что продаём? Введите IMEI или часть названия.",
     )
 
 
@@ -121,6 +123,17 @@ def _price_question(option: dict) -> tuple[str, InlineKeyboardMarkup | None]:
             InlineKeyboardButton(text=f"{option['price']} грн — как в карточке", callback_data="sl_price_default"),
         ]])
     return "Цена продажи, грн?", None
+
+
+def _in_cart(data: dict, option: dict) -> int:
+    """How many of this option the чек already holds."""
+    return sum(i["qty"] for i in data.get("items", []) if (i["kind"], i["id"]) == (option["kind"], option["id"]))
+
+
+def _takeable(data: dict, options: list[dict]) -> list[dict]:
+    """Options that can still go into the чек: a unit only once, a
+    product only up to its free quantity."""
+    return [o for o in options if _in_cart(data, o) < (1 if o["kind"] == "u" else o["free"])]
 
 
 async def _choose(state: FSMContext, option: dict) -> tuple[str, InlineKeyboardMarkup | None]:
@@ -133,6 +146,56 @@ async def _choose(state: FSMContext, option: dict) -> tuple[str, InlineKeyboardM
     return _price_question(option)
 
 
+def _total(data: dict):
+    return money(sum(i["qty"] * i["price"] for i in data.get("items", [])))
+
+
+def _item_lines(data: dict) -> list[str]:
+    return [
+        f"• {html.escape(i['label'])}" + (f" × {i['qty']}" if i["qty"] > 1 else "") + f" — {money(i['qty'] * i['price'])} грн"
+        for i in data.get("items", [])
+    ]
+
+
+async def _to_cart(state: FSMContext, price) -> tuple[str, InlineKeyboardMarkup]:
+    """The item just priced goes into the чек (one more of a product
+    already there at the same price is the same line), and the «В чеке»
+    screen is what comes next."""
+    data = await state.get_data()
+    items = [dict(i) for i in data.get("items", [])]
+    same = next((i for i in items if (i["kind"], i["id"], i["price"]) == (data["item_kind"], data["item_id"], price)), None)
+    if same:
+        same["qty"] += 1
+    else:
+        items.append({
+            "kind": data["item_kind"], "id": data["item_id"], "product_id": data["product_id"],
+            "label": data["item_label"], "price": price, "qty": 1,
+        })
+    data = await state.update_data(items=items, item_kind=None, item_id=None, item_label=None, default_price=None)
+    await state.set_state(qa.SaleFlow.cart)
+    text = "\n".join(["🛍 <b>В чеке</b>", *_item_lines(data), f"Итого: <b>{_total(data)} грн</b>"])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Ещё товар", callback_data="sl_more")],
+        [InlineKeyboardButton(text="➡️ Дальше: клиент", callback_data="sl_next")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="sl_cancel")],
+    ])
+    return text, keyboard
+
+
+@router.callback_query(F.data == "sl_more", qa.SaleFlow.cart)
+async def sale_more(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(qa.SaleFlow.item)
+    await qa._advance_callback(callback, state, "Ещё товар: введите IMEI или часть названия.")
+    await callback.answer()
+
+
+@router.callback_query(F.data == "sl_next", qa.SaleFlow.cart)
+async def sale_next(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(qa.SaleFlow.phone)
+    await qa._advance_callback(callback, state, _PHONE_QUESTION)
+    await callback.answer()
+
+
 @router.message(qa.SaleFlow.item, F.text, ~F.text.in_(qa._ENTRY_BUTTONS))
 async def sale_got_item(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
@@ -143,9 +206,11 @@ async def sale_got_item(message: Message, state: FSMContext) -> None:
         await state.clear()
         return
     query = message.text.strip()
-    options = await asyncio.to_thread(_find, store, query) if len(query) >= 2 else []
+    found = await asyncio.to_thread(_find, store, query) if len(query) >= 2 else []
+    options = _takeable(data, found)
     if not options:
-        await qa._nudge(message, state, f"На складе точки ничего не нашлось по «{html.escape(query)}» (или всё в резерве).")
+        hint = "уже в чеке — больше свободного нет" if found else "на складе точки ничего не нашлось (или всё в резерве)"
+        await qa._nudge(message, state, f"«{html.escape(query)}»: {hint}.")
         return
     if len(options) == 1:
         question, keyboard = await _choose(state, options[0])
@@ -164,7 +229,7 @@ async def sale_pick(callback: CallbackQuery, state: FSMContext) -> None:
     ctx = await _context(callback, state)
     if not ctx:
         return
-    store, _staff, _data = ctx
+    store, _staff, data = ctx
     _prefix, kind, raw_id = callback.data.split(":")
     with get_conn(store.db_path) as conn:
         if kind == "u":
@@ -174,6 +239,7 @@ async def sale_pick(callback: CallbackQuery, state: FSMContext) -> None:
             row = core_inventory.get_product(conn, int(raw_id))
             query = row["name"] if row else ""
     options = [o for o in await asyncio.to_thread(_find, store, query) if (o["kind"], o["id"]) == (kind, int(raw_id))] if query else []
+    options = _takeable(data, options)
     if not options:
         await callback.answer("Этого товара уже нет в свободном остатке.", show_alert=True)
         return
@@ -191,9 +257,8 @@ async def sale_got_price(message: Message, state: FSMContext) -> None:
     if not price:
         await qa._nudge(message, state, "Введите цену числом, например 6500.")
         return
-    await state.update_data(price=price)
-    await state.set_state(qa.SaleFlow.phone)
-    await qa._advance(message, state, _PHONE_QUESTION)
+    text, keyboard = await _to_cart(state, price)
+    await qa._advance(message, state, text, keyboard)
 
 
 @router.callback_query(F.data == "sl_price_default", qa.SaleFlow.price)
@@ -202,9 +267,8 @@ async def sale_price_default(callback: CallbackQuery, state: FSMContext) -> None
     if not data.get("default_price"):
         await callback.answer("Введите цену числом.", show_alert=True)
         return
-    await state.update_data(price=data["default_price"])
-    await state.set_state(qa.SaleFlow.phone)
-    await qa._advance_callback(callback, state, _PHONE_QUESTION)
+    text, keyboard = await _to_cart(state, data["default_price"])
+    await qa._advance_callback(callback, state, text, keyboard)
     await callback.answer()
 
 
@@ -218,7 +282,7 @@ def _pay_screen(store, staff_id: int, data: dict) -> tuple[str, InlineKeyboardMa
         text="🧮 Несколько счетов / валюта — в приложении", web_app=WebAppInfo(url=crm_link(form, staff_id, store.id)),
     )])
     rows.append([InlineKeyboardButton(text="❌ Отмена", callback_data="sl_cancel")])
-    return f"Куда оплата — {data['price']} грн?", InlineKeyboardMarkup(inline_keyboard=rows)
+    return f"Куда оплата — {_total(data)} грн?", InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def _to_pay(message: Message, state: FSMContext, store) -> None:
@@ -273,8 +337,8 @@ async def sale_got_name(message: Message, state: FSMContext) -> None:
 def _confirm_text(data: dict) -> str:
     return "\n".join([
         "🛍 <b>Проверьте и продайте</b>",
-        f"Товар: {html.escape(data['item_label'])}",
-        f"Цена: <b>{data['price']} грн</b>",
+        *_item_lines(data),
+        f"Итого: <b>{_total(data)} грн</b>",
         f"Оплата: {html.escape(data['pay_label'])}",
         f"Клиент: {html.escape(data.get('client_name') or '')} · {html.escape(data['client_phone'])}",
     ])
@@ -311,16 +375,16 @@ def _create(store, staff, data: dict, key: str) -> tuple[int, str]:
     in_debt = data.get("pay_account") is None
     with get_conn(store.db_path) as conn:
         client_id = core_clients.get_or_create_by_phone(conn, data.get("client_name") or "", data["client_phone"], source="offline")
-        batch_id = data["item_id"] if data["item_kind"] == "u" else None
         sale_id = core_sales.create_sale(
-            conn, client_id, "offline", staff["id"], [(data["product_id"], 1, data["price"], batch_id)],
+            conn, client_id, "offline", staff["id"],
+            [(i["product_id"], i["qty"], i["price"], i["id"] if i["kind"] == "u" else None) for i in data["items"]],
             location_id=store.location_id, key=key,
-            payments=[] if in_debt else [(data["pay_account"], data["price"], None)], allow_debt=in_debt,
+            payments=[] if in_debt else [(data["pay_account"], _total(data), None)], allow_debt=in_debt,
         )
     card = "\n".join([
         f"🛍 <b>{core_documents.label('sale', sale_id)} • Продажа</b>",
-        f"Товар: {html.escape(data['item_label'])}",
-        f"Цена: {data['price']} грн",
+        *_item_lines(data),
+        f"Итого: {_total(data)} грн",
         f"Оплата: {html.escape(data['pay_label'])}",
         f"Клиент: {html.escape(data['client_phone'])}",
         f"Продавец: {html.escape(staff['name'])}",
@@ -328,14 +392,14 @@ def _create(store, staff, data: dict, key: str) -> tuple[int, str]:
     return sale_id, card
 
 
-def _after_sale(store, product_id: int, card: str) -> None:
+def _after_sale(store, product_ids: list[int], card: str) -> None:
     """Off the event loop: the card into the staff group («Продажи»
     topic if the точка has one) and the sales channel brought in line."""
     if store.staff_group_chat_id:
         core_notify.notify_staff_group(
             card, message_thread_id=store.sales_topic_id, staff_group_chat_id=store.staff_group_chat_id,
         )
-    channel_posts.sync_products([product_id], store.id, store.db_path)
+    channel_posts.sync_products(product_ids, store.id, store.db_path)
 
 
 @router.callback_query(F.data == "sl_confirm", qa.SaleFlow.confirm)
@@ -361,4 +425,4 @@ async def sale_confirm(callback: CallbackQuery, state: FSMContext) -> None:
         )]]),
     )
     await callback.answer("Продано")
-    asyncio.create_task(asyncio.to_thread(_after_sale, store, data["product_id"], card))
+    asyncio.create_task(asyncio.to_thread(_after_sale, store, [i["product_id"] for i in data["items"]], card))

@@ -973,6 +973,11 @@ def init_db(db_path: str = DB_PATH) -> None:
         _accounts.ensure_default_accounts(conn)
         _accounts.backfill_transactions(conn)
         _documents.backfill(conn)
+        # Local import: settlements sits above storage in the import
+        # order (it uses cash → accounts → …), storage only calls it here.
+        from core import settlements as _settlements
+
+        _settlements.backfill(conn)
         conn.commit()
     finally:
         conn.close()
