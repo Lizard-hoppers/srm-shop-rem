@@ -7372,7 +7372,7 @@ def scenario_bot_questions() -> None:
             orig_post, orig_key = httpx.post, os.environ.get("OPENAI_API_KEY")
             httpx.post, os.environ["OPENAI_API_KEY"] = _post, "sk-test"
             try:
-                text, actions = ai_agent.ask(conn, "найди заказ по 13 айфону и пришли в чат", location_id=1, point_name="Мастерская",
+                text, actions, _receipts = ai_agent.ask(conn, "найди заказ по 13 айфону и пришли в чат", location_id=1, point_name="Мастерская",
                                              can_money=False, chat_id=str(GROUP), topics={str(GROUP): TOPIC})
                 check("the model asks for tools, gets their results, and its last message is the answer; what it asked to post comes back as actions",
                       text == "Нашёл РК, карточку прислал." and actions == [("repair_card", fresh)] and len(rounds) == 3)
@@ -7390,18 +7390,18 @@ def scenario_bot_questions() -> None:
                     {"content": None, "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "find_repairs", "arguments": '{"query": "13 айфон"}'}}]},
                     {"content": "Нашёл: Apple iPhone 13, вот ссылка."},
                 ]
-                _text, actions = ai_agent.ask(conn, "найди заказ по 13 айфону и пришли в чат", location_id=1, point_name="М", can_money=False)
+                _text, actions, _receipts = ai_agent.ask(conn, "найди заказ по 13 айфону и пришли в чат", location_id=1, point_name="М", can_money=False)
                 check("asked to SEND and the search came down to one repair — its card goes even if the model only described it",
                       actions == [("repair_card", fresh)])
                 rounds.clear()
-                _text, actions = ai_agent.ask(conn, "что с 13 айфоном", location_id=1, point_name="М", can_money=False)
+                _text, actions, _receipts = ai_agent.ask(conn, "что с 13 айфоном", location_id=1, point_name="М", can_money=False)
                 check("…but a plain question about it sends nothing", actions == [])
                 rounds.clear()
                 script[:] = [
                     {"content": None, "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "find_repairs", "arguments": "{}"}}]},
                     {"content": "Вот все четыре."},
                 ]
-                _text, actions = ai_agent.ask(conn, "пришли ремонт", location_id=1, point_name="М", can_money=False)
+                _text, actions, _receipts = ai_agent.ask(conn, "пришли ремонт", location_id=1, point_name="М", can_money=False)
                 check("…nor does «пришли» when several repairs fit — the bot doesn't guess which", actions == [])
                 rounds.clear()
                 script[:] = [{"content": None, "tool_calls": [{"id": "x", "type": "function", "function": {"name": "problems", "arguments": "{}"}}]}] * 20
@@ -7458,7 +7458,7 @@ def scenario_bot_questions() -> None:
             asked_questions.append({"question": question, **kwargs})
             if plan["fail"]:
                 raise ai_agent.AgentError("нет связи")
-            return plan["answer"]
+            return (*plan["answer"], plan.get("receipts", []))
 
         orig_ask, orig_transcribe, orig_analyze = ai_agent.ask, ai_notes.transcribe, ai_notes.analyze
         ai_agent.ask = _fake_ask
@@ -7855,6 +7855,331 @@ def scenario_reminders() -> None:
             ai_notes.parse_reminder, ai_notes.analyze = orig_parse, orig_analyze
 
 
+def scenario_agent_actions() -> None:
+    """«Бот, запиши расход…», «бот, прими ремонт…», «бот, продай…» — the
+    assistant fills in a form, code decides and does, a receipt with
+    «Вернуть» reports it."""
+    print("scenario: действия по просьбе боту — расход, ремонт, продажа, деньги, склад; чек и «Вернуть»")
+    import asyncio
+    import datetime as dt
+
+    from aiogram import Bot
+    from aiogram.types import CallbackQuery, Chat, Message, Update, User
+
+    from bot import assistant_chat
+    from core import agent_actions, ai_agent, notify, orders, repair_notes, settlements
+
+    GROUP, OWNER_TG, KEEPER_TG, STRANGER_TG = -1004480000111, 889001, 889002, 889003
+
+    with tempfile.TemporaryDirectory() as tmp, _separate_base(tmp, "actions.sqlite3", ("Мастерская", "Магазин")) as db_path:
+        with get_conn(db_path) as conn:
+            conn.execute("UPDATE locations SET staff_group_chat_id = ? WHERE id = 1", (GROUP,))
+            owner = auth.create_staff(conn, "aa-owner", "pass", "Павел", "owner")
+            auth.link_staff_telegram(conn, "aa-owner", OWNER_TG)
+            keeper = auth.create_staff(conn, "aa-keeper", "pass", "Кладовщик", "storekeeper", location_id=1)
+            auth.link_staff_telegram(conn, "aa-keeper", KEEPER_TG)
+            master = auth.create_master(conn, "Эдик", None, "percent", 50)
+            auth.create_master(conn, "Сергей", None, None, None)
+            cell = inventory.create_cell(conn, "AA-1", None, None, location_id=1)
+            cable = inventory.create_product(conn, "Кабель Lightning", "AA-CBL", None, "шт", False, True, 0, 300)
+            glass = inventory.create_product(conn, "Стекло iPhone 13", "AA-GLS", None, "шт", True, True, 0, None)
+            purchases.create_receipt(conn, None, None, owner, [(cable, cell, 10, 100), (glass, cell, 4, 50)], location_id=1)
+            cash.record_adjustment(conn, 20000, "старт", owner, location_id=1)
+            buyback.create_purchase(conn, seller_phone="0671237000", model="iPhone 12", imei="359000000000001", comment=None, price="4000", staff_id=owner, location_id=1)
+            buyback.create_purchase(conn, seller_phone="0671237000", model="Redmi 12", imei="359000000000002", comment=None, price="2000", staff_id=owner, location_id=1)
+            buyback.create_purchase(conn, seller_phone="0671237000", model="Redmi 12", imei="359000000000003", comment=None, price="2000", staff_id=owner, location_id=1)
+            anna = clients.get_or_create_by_phone(conn, "Анна", "+380671237001", source="offline")
+            repair_id = repairs.create_repair(conn, anna, "Смартфон", None, "13 про мах", None, "Экран", "offline", None, 1500, owner, location_id=1)
+            acc = {(a["kind"], a["currency"]): a["id"] for a in accounts.list_accounts(conn, 1)}
+            cash_uah, card_uah = acc[("cash", "UAH")], acc[("card", "UAH")]
+            masters.accrue(conn, master, "repair", "repair_order", 1, 1000, comment="РК-001")
+            owner_row, keeper_row = auth.get_staff_by_telegram_id(conn, OWNER_TG), auth.get_staff_by_telegram_id(conn, KEEPER_TG)
+
+            def ctx_for(staff) -> dict:
+                return {"location_id": 1, "can_money": bool(staff) and staff["role"] in ("owner", "admin"), "chat_id": str(GROUP), "topics": {},
+                        "actions": [], "last_found": [], "staff": staff, "receipts": [], "done": set()}
+
+            def do(staff, action, **args):
+                ctx = ctx_for(staff)
+                return agent_actions.run(conn, ctx, action, args), ctx["receipts"]
+
+            # ---- кто что может
+            check("someone who isn't staff in the CRM is offered no actions at all", agent_actions.schemas(None) == [] and "refused" in do(None, "add_expense", amount=100)[0])
+            check("an action is offered only to the roles that may do it in the Mini App",
+                  {"cash_correction", "master_payout", "cancel_document"} <= set(agent_actions.available(owner_row))
+                  and not {"cash_correction", "master_payout", "cancel_document", "new_repair"} & set(agent_actions.available(keeper_row))
+                  and "add_expense" in agent_actions.available(keeper_row))
+            check("…and is refused if called anyway", do(keeper_row, "master_payout", master="Эдик", amount=100)[0] == {"refused": "Это действие вам недоступно."})
+            check("no such action is a refusal, not an exception", "refused" in do(owner_row, "launch_rocket")[0])
+
+            # ---- смена: без неё деньги не двигаются
+            result, receipts = do(owner_row, "add_expense", amount=500, comment="вода")
+            check("money doesn't move before the shift is opened — the refusal says what to do",
+                  "Смена сегодня не открыта" in result["refused"] and receipts == [] and accounts.balance(conn, cash_uah) == 12000)
+            shifts.open_shift(conn, owner, 1)
+            shifts.open_shift(conn, keeper, 1)
+            till = accounts.balance(conn, cash_uah)
+
+            # ---- расход
+            result, receipts = do(keeper_row, "add_expense", amount="500", category="other", comment="вода")
+            doc = conn.execute("SELECT * FROM documents WHERE doc_type = 'cash_out' ORDER BY id DESC LIMIT 1").fetchone()
+            check("«запиши расход 500 на воду»: an РКО is made, the cash goes down, the receipt is written by code with the document's number",
+                  result == {"done": True, "document": documents.doc_label(doc)} and accounts.balance(conn, cash_uah) == till - 500
+                  and receipts[0]["text"] == f"✅ <b>{documents.doc_label(doc)}</b> расход 500 грн · Прочее · Наличные · вода" and receipts[0]["undo"] == ("doc", doc["id"]))
+            check("«Вернуть» by the person who did it cancels the document and puts the money back",
+                  "отменён" in agent_actions.undo(conn, ("doc", str(doc["id"])), keeper_row) and accounts.balance(conn, cash_uah) == till)
+            result, receipts = do(owner_row, "add_expense", amount=700, category="rent", account="карта")
+            doc_card = conn.execute("SELECT * FROM documents WHERE doc_type = 'cash_out' ORDER BY id DESC LIMIT 1").fetchone()
+            check("the account is found by a word; money that left an account which didn't have it is flagged on the receipt",
+                  accounts.balance(conn, card_uah) == -700 and "Аренда · Карта" in receipts[0]["text"] and "теперь -700 грн — меньше нуля" in receipts[0]["text"])
+            try:
+                agent_actions.undo(conn, ("doc", str(doc_card["id"])), keeper_row)
+                check("a storekeeper can't undo the owner's document", False)
+            except agent_actions.Refused:
+                check("a storekeeper can't undo the owner's document", True)
+            for bad, needle in (({"amount": "много"}, "числом"), ({"amount": -5}, "числом"), ({"amount": 100, "account": "биткоин"}, "На какой счёт"),
+                                ({"amount": 100, "account": "доллары"}, "валютный")):
+                check(f"expense with {bad} is refused with a question", needle in do(owner_row, "add_expense", **bad)[0]["refused"])
+            check("refusals wrote nothing", accounts.balance(conn, cash_uah) == till and accounts.balance(conn, card_uah) == -700)
+
+            # ---- касса: внести / изъять
+            check("a cash correction needs a reason", "причину" in do(owner_row, "cash_correction", direction="in", amount=1000, comment="")[0]["refused"])
+            do(owner_row, "cash_correction", direction="out", amount=1000, comment="инкассация")
+            check("«изъять 1000, инкассация» is a КР, not an expense", accounts.balance(conn, cash_uah) == till - 1000
+                  and conn.execute("SELECT COUNT(*) AS n FROM documents WHERE doc_type = 'cash_adjust'").fetchone()["n"] == 2)
+
+            # ---- ремонт: приём, цена, мастер, без запчасти, заметка
+            result, receipts = do(owner_row, "new_repair", client_phone="067 123 70 02", client_name="Борис", device="iPhone 13 Pro", defect="не заряжается", price=2500, master="эдик")
+            new_id = max(r["id"] for r in repairs.list_repairs(conn))
+            new_repair = repairs.get_repair(conn, new_id)
+            check("«прими ремонт: айфон 13 про, не заряжается, 2500, клиент 067…, мастер Эдик»: client created by phone, repair on record",
+                  result["document"] == f"РК-{new_id:03d}" and new_repair["client_phone"] == "+380671237002" and new_repair["client_name"] == "Борис"
+                  and new_repair["model"] == "iPhone 13 Pro" and new_repair["price_estimate"] == 2500 and new_repair["master_id"] == master
+                  and new_repair["defect_description"] == "не заряжается" and new_repair["status"] == "new")
+            check("the receipt carries what the bot has to do after the write is committed — post the new card to the groups — and how to undo it",
+                  receipts[0]["after"][:2] == ("notify_repair", new_id) and receipts[0]["undo"] == ("repair_new", new_id) and "принят: iPhone 13 Pro · 2500 грн" in receipts[0]["text"])
+            for bad, needle in (({"client_phone": "0671237002"}, "Какое устройство"), ({"device": "iPhone"}, "Какой клиент"),
+                                ({"client_phone": "12", "device": "iPhone"}, "Не похоже на номер"), ({"client_phone": "0671237002", "device": "X", "master": "Вася"}, "Какой мастер")):
+                check(f"a repair with {sorted(bad)} only is refused with the question to ask", needle in do(owner_row, "new_repair", **bad)[0]["refused"])
+            check("refused intakes created nothing", max(r["id"] for r in repairs.list_repairs(conn)) == new_id)
+            agent_actions.undo(conn, ("repair_new", str(new_id)), owner_row)
+            check("«Вернуть» on a repair just taken in cancels it", repairs.get_repair(conn, new_id)["status"] == "cancelled")
+
+            result, receipts = do(owner_row, "set_repair_price", repair="13 про мах", price=3000)
+            check("«поставь цену 3000 на 13 про мах»: done, with the old price kept for «Вернуть»",
+                  repairs.current_price(repairs.get_repair(conn, repair_id)) == 3000 and receipts[0]["undo"] == ("price", repair_id, 1500) and "1500 → <b>3000 грн</b>" in receipts[0]["text"])
+            agent_actions.undo(conn, ("price", str(repair_id), "1500"), owner_row)
+            check("…and back", repairs.current_price(repairs.get_repair(conn, repair_id)) == 1500)
+            check("a repair that isn't there is refused with the list of open ones", "Сейчас открыты: РК-" in do(owner_row, "set_repair_price", repair="самсунг", price=100)[0]["refused"])
+            do(owner_row, "assign_repair_master", repair=f"РК-{repair_id}", master="Сергей")
+            do(owner_row, "repair_without_parts", repair=str(repair_id))
+            do(keeper_row, "add_repair_note", repair="про мах", text="клиент просил позвонить после 18")
+            fixed = repairs.get_repair(conn, repair_id)
+            check("master, «без запчасти» and a note — by number or by words", fixed["master_name"] == "Сергей" and fixed["no_parts"] == 1
+                  and repair_notes.list_notes(conn, repair_id)[-1]["text"] == "клиент просил позвонить после 18")
+
+            # ---- продажа
+            till = accounts.balance(conn, cash_uah)
+            result, receipts = do(keeper_row, "sell", product="кабель", qty=2, client_phone="0671237001")
+            sale = sales.list_sales(conn)[0]
+            check("«продай 2 кабеля клиенту 067…»: price from the product's card, cash by default, the client on the sale",
+                  sale["total"] == 600 and sale["client_name"] == "Анна" and accounts.balance(conn, cash_uah) == till + 600 and inventory.product_total_qty(conn, cable, 1) == 8
+                  and "продажа: Кабель Lightning × 2 — 600 грн · Наличные · Анна" in receipts[0]["text"] and result["sold_product_id"] == cable)
+            agent_actions.undo(conn, receipts[0]["undo"], keeper_row)
+            check("«Вернуть» on a sale puts the goods and the money back", inventory.product_total_qty(conn, cable, 1) == 10 and accounts.balance(conn, cash_uah) == till)
+            do(keeper_row, "sell", product="кабель", price=250, client_phone="0671237001", account="в долг")
+            check("«в долг»: nothing into the касса, the client owes it", accounts.balance(conn, cash_uah) == till and settlements.client_position(conn, anna)["they_owe"] == 250)
+            for bad, needle in (({"product": "кабель", "account": "в долг"}, "только клиенту"), ({"product": "стекло"}, "нет цены"),
+                                ({"product": "айфон"}, "несколько"), ({"product": "редми"}, "Назовите IMEI"), ({"product": "чехол"}, "в каталоге нет"),
+                                ({"product": "кабель", "qty": 500}, "")):
+                refusal = do(keeper_row, "sell", **bad)[0].get("refused")
+                check(f"sale {bad} is refused, never guessed", refusal is not None and needle in refusal)
+            do(keeper_row, "sell", product="359000000000001", price=6500, account="карта")
+            check("a phone is sold by its IMEI", inventory.find_unit_by_imei(conn, "359000000000001") is None and accounts.balance(conn, card_uah) == -700 + 6500)
+            do(keeper_row, "sell", product="айфон 12", price=6500)
+            check("…and a serial product with nothing left on the shelf is refused", inventory.find_unit_by_imei(conn, "359000000000001") is None)
+
+            # ---- деньги клиента, выплата мастеру
+            result, receipts = do(keeper_row, "client_money", direction="in", client_phone="0671237001", amount=250)
+            check("«Анна принесла 250»: ПКО, her debt is gone, the receipt says where she stands",
+                  settlements.balance(conn, anna) == 0 and "принято от Анна: 250 грн · Наличные · теперь взаиморасчёты 0" in receipts[0]["text"])
+            check("handing money out is the owner's call", "владелец или админ" in do(keeper_row, "client_money", direction="out", client_name="Анна", amount=100)[0]["refused"])
+            do(owner_row, "client_money", direction="out", client_name="анна", amount=100, comment="возврат")
+            check("the owner may; a client is found by name when only one fits", settlements.client_position(conn, anna)["they_owe"] == 100)
+            check("an unknown client is not created by a money move", "в базе нет" in do(owner_row, "client_money", direction="in", client_phone="0509990000", amount=5)[0]["refused"])
+            result, receipts = do(owner_row, "master_payout", master="эдик", amount=600)
+            check("«выплати Эдику 600»: РКО, and the receipt says what is still owed", masters.owed(conn, master) == 400 and "осталось должны 400 грн" in receipts[0]["text"])
+
+            # ---- склад, резерв, клиент, отмена документа
+            check("a write-off needs a reason", "причину" in do(keeper_row, "stock_write_off", product="кабель", qty=1, comment="")[0]["refused"])
+            do(keeper_row, "stock_write_off", product="кабель", qty=2, comment="брак")
+            do(keeper_row, "stock_add", product="стекло", qty=3)
+            check("«спиши 2 кабеля, брак» and «оприходуй 3 стекла»", inventory.product_total_qty(conn, cable, 1) == 7 and inventory.product_total_qty(conn, glass, 1) == 7)
+            check("devices by IMEI are not written off or added this way", "IMEI" in do(keeper_row, "stock_write_off", product="359000000000002", qty=1, comment="x")[0]["refused"]
+                  and "IMEI" in do(keeper_row, "stock_add", product="редми", qty=1)[0].get("refused", ""))
+            result, receipts = do(keeper_row, "reserve_for_client", product="кабель", qty=3, client_phone="0671237005", client_name="Вика")
+            check("«отложи 3 кабеля для 067…»: a заказ with a 24-hour hold", orders.list_orders(conn, statuses=("reserved",))[0]["total"] == 900
+                  and "отложено на 24 часа" in receipts[0]["text"])
+            do(keeper_row, "add_client", name="Глеб", phone="0671237006")
+            check("a new client is recorded; the same number twice is refused", clients.get_by_phone(conn, "+380671237006")["name"] == "Глеб"
+                  and "уже есть" in do(keeper_row, "add_client", name="Глеб", phone="0671237006")[0]["refused"])
+            sale_label = documents.doc_label(documents.get_for(conn, "sale", sales.list_sales(conn)[0]["id"]))
+            check("cancelling a document needs a reason and a number that exists",
+                  "причину" in do(owner_row, "cancel_document", number=sale_label, reason="")[0]["refused"]
+                  and "не найден" in do(owner_row, "cancel_document", number="ПД-999", reason="x")[0]["refused"]
+                  and "Какой документ" in do(owner_row, "cancel_document", number="что-то", reason="x")[0]["refused"])
+            do(owner_row, "cancel_document", number=sale_label.lower(), reason="клиент вернул")
+            check("«отмени ПД-…, клиент вернул»", documents.get_for(conn, "sale", sales.list_sales(conn)[0]["id"])["status"] == "cancelled")
+
+            # ---- не дважды; чужая точка; целостность
+            ctx = ctx_for(owner_row)
+            first = agent_actions.run(conn, ctx, "add_expense", {"amount": 50, "comment": "скотч"})
+            again = agent_actions.run(conn, ctx, "add_expense", {"comment": "скотч", "amount": 50})
+            check("the same request twice in one turn is carried out once", first.get("done") and "уже сделано" in again["refused"] and len(ctx["receipts"]) == 1)
+            check("an action that fails halfway leaves nothing behind (the write is rolled back to before it)", _stock_is_consistent(conn))
+
+        # ---- цикл модели с действием и весь путь через диспетчер
+        rounds: list[dict] = []
+        script: list[dict] = []
+
+        class _R:
+            status_code, text = 200, "ok"
+
+            def __init__(self, message):
+                self._m = message
+
+            def json(self):
+                return {"choices": [{"message": self._m}]}
+
+        def _post(url, **kwargs):
+            rounds.append(kwargs["json"])
+            if len(rounds) > len(script):   # the script ran out: the model «goes down»
+                return type("Down", (), {"status_code": 500, "text": "boom"})()
+            return _R(script[len(rounds) - 1])
+
+        sent: list[dict] = []
+        posted_cards: list[int] = []
+
+        class _FakeBot(Bot):
+            async def __call__(self, method, request_timeout=None):
+                name = type(method).__name__
+                if name == "SendMessage":
+                    markup = getattr(method, "reply_markup", None)
+                    sent.append({"text": method.text, "reply_to": getattr(method.reply_parameters, "message_id", None),
+                                 "buttons": [b.callback_data for row in getattr(markup, "inline_keyboard", None) or [] for b in row]})
+                    return Message(message_id=8800 + len(sent), date=dt.datetime.now(), chat=Chat(id=method.chat_id, type="supergroup"), text="x")
+                if name == "EditMessageText":
+                    sent.append({"edit": method.text})
+                if name == "AnswerCallbackQuery":
+                    sent.append({"answer": method.text, "alert": bool(method.show_alert)})
+                return True
+
+        from core import ai_notes
+
+        orig_post, orig_key, orig_notify, orig_analyze = httpx.post, os.environ.get("OPENAI_API_KEY"), repairs.notify_and_save, ai_notes.analyze
+        httpx.post, os.environ["OPENAI_API_KEY"] = _post, "sk-test"
+        repairs.notify_and_save = lambda store, order_id, text, keyboard, photo: posted_cards.append(order_id)
+        # None of these requests reports a status; the reading that looks for one is out of the way here.
+        ai_notes.analyze = lambda text, status_label="", price=None: {"summary": text, "stage": None, "status": None, "price": None, "payment": None}
+
+        def tool(name: str, **args) -> dict:
+            return {"content": None, "tool_calls": [{"id": f"c{len(script)}", "type": "function", "function": {"name": name, "arguments": json.dumps(args, ensure_ascii=False)}}]}
+
+        async def run() -> None:
+            bot = _FakeBot(token="123456:test-bot-token-not-real")
+            dp = _the_dispatcher()
+            counter = 900
+
+            async def say(user_id: int, text: str, reply_to_bot: int | None = None) -> int:
+                nonlocal counter
+                counter += 1
+                sent.clear()
+                rounds.clear()
+                chat = Chat(id=GROUP, type="supergroup")
+                replied = Message(message_id=reply_to_bot, date=dt.datetime.now(), chat=chat, text="?", from_user=User(id=123456, is_bot=True, first_name="bot")) if reply_to_bot else None
+                await dp.feed_update(bot, Update(update_id=counter, message=Message(
+                    message_id=counter, date=dt.datetime.now(), chat=chat, reply_to_message=replied,
+                    from_user=User(id=user_id, is_bot=False, first_name="T"), text=text)))
+                await asyncio.sleep(0.05)
+                return counter
+
+            with get_conn(db_path) as conn:
+                till = accounts.balance(conn, cash_uah)
+            script[:] = [tool("add_expense", amount=300, comment="такси", category="other"), {"content": "Записал расход."}]
+            asked = await say(KEEPER_TG, "бот запиши расход 300 на такси")
+            with get_conn(db_path) as conn:
+                doc = conn.execute("SELECT * FROM documents WHERE doc_type = 'cash_out' ORDER BY id DESC LIMIT 1").fetchone()
+                check("«бот, запиши расход 300 на такси»: done at once — no question, no trip to the app",
+                      accounts.balance(conn, cash_uah) == till - 300 and doc["title"] is not None)
+            check("the model's line comes as the reply, and the receipt — written by code — as its own message with «Вернуть»",
+                  sent[0]["text"] == "Записал расход." and sent[0]["reply_to"] == asked
+                  and sent[1]["text"].startswith(f"✅ <b>{documents.doc_label(doc)}</b> расход 300 грн") and sent[1]["buttons"] == [f"aundo:doc:{doc['id']}"])
+            names = {t["function"]["name"] for t in rounds[0]["tools"]}
+            check("a storekeeper's model is offered the actions he may do and no others, and is told to act without asking back",
+                  "add_expense" in names and "master_payout" not in names and "cash_state" not in names
+                  and "не переспрашивай" in rounds[0]["messages"][0]["content"])
+            fed = [m for m in rounds[1]["messages"] if m["role"] == "tool"][0]["content"]
+            check("the model is told the action went through, with the document's number", '"done": true' in fed and documents.doc_label(doc) in fed)
+
+            counter += 1
+            sent.clear()
+            await dp.feed_update(bot, Update(update_id=counter, callback_query=CallbackQuery(
+                id=str(counter), from_user=User(id=KEEPER_TG, is_bot=False, first_name="T"), chat_instance="c", data=f"aundo:doc:{doc['id']}",
+                message=Message(message_id=8802, date=dt.datetime.now(), chat=Chat(id=GROUP, type="supergroup"), text="?"))))
+            with get_conn(db_path) as conn:
+                check("«Вернуть» under the receipt undoes it", accounts.balance(conn, cash_uah) == till and any("отменён" in (m.get("edit") or "") for m in sent))
+
+            # не хватает данных — вопрос, и ответ на него без слова «бот»
+            script[:] = [tool("add_expense", comment="вода"), {"content": "Назовите сумму числом."}]
+            await say(KEEPER_TG, "бот запиши расход на воду")
+            with get_conn(db_path) as conn:
+                check("with the amount missing nothing is written — the bot asks for it", accounts.balance(conn, cash_uah) == till and sent[0]["text"] == "Назовите сумму числом." and len(sent) == 1)
+            script[:] = [tool("add_expense", amount=120, comment="вода"), {"content": "Готово."}]
+            await say(KEEPER_TG, "120", reply_to_bot=8803)
+            with get_conn(db_path) as conn:
+                check("the answer, sent as a reply to the bot's question without the word «бот», finishes the request",
+                      accounts.balance(conn, cash_uah) == till - 120 and len(sent) == 2)
+            # (the list is the live one the loop went on appending tool calls to — only what was said counts)
+            history = [m["content"] for m in rounds[0]["messages"] if m["role"] in ("user", "assistant") and m.get("content") and not m.get("tool_calls")]
+            check("the model was given the conversation so far", history[-3:] == ["запиши расход на воду", "Назовите сумму числом.", "120"])
+            before = len(rounds)
+            await say(OWNER_TG, "500", reply_to_bot=8803)
+            check("someone the bot has no conversation with isn't taken for one by replying to its message", sent == [])
+
+            # приём ремонта: карточка в группы уходит после записи
+            script[:] = [tool("new_repair", client_phone="0671237009", device="Poco X5", defect="экран", price=1800), {"content": "Принял."}]
+            await say(OWNER_TG, "бот прими ремонт поко х5 экран 1800 клиент 0671237009")
+            with get_conn(db_path) as conn:
+                accepted = max(r["id"] for r in repairs.list_repairs(conn))
+            check("a repair taken in by request gets its card posted to the work groups, like one taken in the usual way",
+                  posted_cards == [accepted] and f"РК-{accepted:03d}</b> принят: Poco X5 · 1800 грн" in sent[1]["text"] and sent[1]["buttons"] == [f"aundo:repair_new:{accepted}"])
+
+            # не сотрудник
+            script[:] = [{"content": "Для этого нужно привязать ваш Telegram в карточке сотрудника."}]
+            await say(STRANGER_TG, "бот запиши расход 100")
+            check("someone in the group who isn't CRM staff gets no actions — the model isn't even offered them and is told why",
+                  not any(t["function"]["name"] in agent_actions.ACTIONS for t in rounds[0]["tools"]) and "не подключён к CRM" in rounds[0]["messages"][0]["content"])
+
+            # сбой модели после действия — ничего не остаётся
+            with get_conn(db_path) as conn:
+                till_now = accounts.balance(conn, cash_uah)
+            script[:] = [tool("add_expense", amount=999, comment="сбой")]
+            await say(KEEPER_TG, "бот запиши расход 999")
+            with get_conn(db_path) as conn:
+                check("if the model fails after an action, the action is not kept — and no receipt is shown for it",
+                      accounts.balance(conn, cash_uah) == till_now and not any("999" in (m.get("text") or "") for m in sent))
+
+        try:
+            asyncio.run(run())
+        finally:
+            httpx.post, repairs.notify_and_save, ai_notes.analyze = orig_post, orig_notify, orig_analyze
+            if orig_key is None:
+                os.environ.pop("OPENAI_API_KEY", None)
+            else:
+                os.environ["OPENAI_API_KEY"] = orig_key
+            assistant_chat._HISTORY.clear()
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         db_path = os.path.join(tmp, "test.sqlite3")
@@ -7918,6 +8243,7 @@ def main() -> None:
     scenario_repair_notes()
     scenario_bot_questions()
     scenario_reminders()
+    scenario_agent_actions()
     if os.path.exists(_WEBAPP_TEST_DB):
         os.remove(_WEBAPP_TEST_DB)
 

@@ -32,11 +32,13 @@ import html
 import logging
 import os
 import re
+import time
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import StateFilter
 from aiogram.types import (
+    CallbackQuery,
     FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -50,6 +52,7 @@ from bot.miniapp_links import crm_link
 from bot.quick_actions import _resolve_staff_for_dm
 from bot.repair_actions import _sync_after_change
 from bot.repair_attachments import apply_status
+from core import agent_actions
 from core import agent_tools
 from core import ai_agent
 from core import ai_notes
@@ -57,6 +60,7 @@ from core import auth as core_auth
 from core import documents as core_documents
 from core import notify as core_notify
 from core import repair_digest
+from core import repair_notes as core_notes
 from core import repairs as core_repairs
 from core.storage import get_conn
 from core.stores import store_for_chat_id
@@ -82,7 +86,12 @@ _HELP = (
     "• «бот, что с ремонтом Poco» · «бот, найди клиента 0671234567»\n"
     "• «бот, есть ли в наличии дисплей на iPhone 13»\n"
     "• «бот, напомни завтра в 10:20 позвонить клиенту» · «бот, какие напоминания»\n"
-    "• «бот, 13 про мах выдан, наличными» · «бот, РК-45 взял»"
+    "• «бот, 13 про мах выдан, наличными» · «бот, РК-45 взял»\n"
+    "• «бот, запиши расход 500 на воду» · «бот, внеси в кассу 2000, размен»\n"
+    "• «бот, прими ремонт: айфон 13, экран, 3000, клиент 0671234567»\n"
+    "• «бот, поставь цену 3500 на 13 про мах» · «бот, назначь Эдика на РК-45»\n"
+    "• «бот, продай кабель клиенту 0671234567» · «бот, отложи кабель для 067…»\n"
+    "• «бот, выплати Эдику 1000» · «бот, отмени РКО-3, ошибся суммой»"
 )
 _NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
@@ -118,12 +127,85 @@ def _topics(store) -> dict:
     return {str(store.staff_group_chat_id): store.repair_topic_id} if store.staff_group_chat_id else {}
 
 
-def _ask_blocking(store, question: str, can_money: bool, chat_id: int) -> tuple[str, list[tuple]]:
+# The last few turns with each person in each chat, kept in memory for a
+# quarter of an hour — so an answer to the bot's «на какой счёт?» is
+# understood, and a restart simply forgets them.
+_HISTORY: dict[tuple[int, int], tuple[float, list[dict]]] = {}
+_HISTORY_TTL = 15 * 60
+
+
+def _history(chat_id: int, user_id: int) -> list[dict]:
+    kept = _HISTORY.get((chat_id, user_id))
+    if not kept or time.monotonic() - kept[0] > _HISTORY_TTL:
+        _HISTORY.pop((chat_id, user_id), None)
+        return []
+    return kept[1]
+
+
+def _remember(chat_id: int, user_id: int, question: str, answer: str) -> None:
+    turns = _history(chat_id, user_id) + [{"role": "user", "content": question}, {"role": "assistant", "content": answer or "(сделано)"}]
+    _HISTORY[(chat_id, user_id)] = (time.monotonic(), turns[-ai_agent.HISTORY_TURNS * 2:])
+
+
+def _ask_blocking(store, question: str, staff, chat_id: int, history: list[dict]) -> tuple[str, list[tuple], list[dict]]:
+    """One transaction for the whole request: if the model fails halfway,
+    nothing it had done is kept (get_conn commits only on a clean exit)."""
     with get_conn(store.db_path) as conn:
         return ai_agent.ask(
-            conn, question, location_id=store.location_id, point_name=store.name, can_money=can_money,
-            chat_id=str(chat_id), topics=_topics(store),
+            conn, question, location_id=store.location_id, point_name=store.name,
+            can_money=bool(staff) and staff["role"] in _MONEY_ROLES, chat_id=str(chat_id), topics=_topics(store),
+            staff=staff, history=history,
         )
+
+
+def _undo_markup(undo: tuple | None) -> InlineKeyboardMarkup | None:
+    if not undo:
+        return None
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+        text="↩️ Вернуть", callback_data="aundo:" + ":".join(str(part) for part in undo),
+    )]])
+
+
+async def _show_receipts(message: Message, store, receipts: list[dict]) -> None:
+    """What was done, said by the code that did it — one message per
+    action, each with its own «Вернуть» — and whatever has to follow a
+    write once it is committed: the new repair's card into the groups, a
+    changed repair's cards brought up to date, the sales channel."""
+    for receipt in receipts:
+        await message.answer(receipt["text"], reply_markup=_undo_markup(receipt["undo"]))
+        if receipt["sync_repair"]:
+            _sync_after_change(receipt["sync_repair"], store.db_path)
+        after = receipt["after"]
+        if after and after[0] == "notify_repair":
+            _kind, order_id, card_text, keyboard = after
+            asyncio.create_task(asyncio.to_thread(core_repairs.notify_and_save, store, order_id, card_text, keyboard, None))
+
+
+@router.callback_query(F.data.startswith("aundo:"))
+async def undo_action(callback: CallbackQuery) -> None:
+    """«Вернуть» under a receipt."""
+    store = store_for_chat_id(callback.message.chat.id) if callback.message.chat.type != "private" else None
+    if store is None:
+        resolved = _resolve_staff_for_dm(callback.from_user.id)
+        store = resolved[0] if resolved else None
+    if store is None:
+        await callback.answer("Не понял, к какой точке это относится.", show_alert=True)
+        return
+    what = tuple(callback.data.split(":")[1:])
+    try:
+        with get_conn(store.db_path) as conn:
+            staff = core_auth.get_staff_by_telegram_id(conn, callback.from_user.id)
+            line = agent_actions.undo(conn, what, staff)
+    except agent_actions.Refused as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    try:
+        await callback.message.edit_text(line)
+    except TelegramAPIError:
+        pass
+    await callback.answer("Возвращено")
+    if what[0] in ("repair_new", "price", "master"):
+        _sync_after_change(int(what[1]), store.db_path)
 
 
 async def _send_list(message: Message, store, statuses: tuple[str, ...]) -> None:
@@ -250,13 +332,15 @@ async def _handle(message: Message, store, staff, question: str) -> None:
         return
     if await _status_said(message, store, staff, question):
         return
-    can_money = bool(staff) and staff["role"] in _MONEY_ROLES
     try:
         await message.bot.send_chat_action(message.chat.id, "typing", message_thread_id=message.message_thread_id)
     except TelegramAPIError:
         pass
+    user_id = message.from_user.id if message.from_user else 0
     try:
-        text, actions = await asyncio.to_thread(_ask_blocking, store, question, can_money, message.chat.id)
+        text, actions, receipts = await asyncio.to_thread(
+            _ask_blocking, store, question, staff, message.chat.id, _history(message.chat.id, user_id),
+        )
     except ai_agent.AgentError as exc:
         logger.warning("assistant unavailable (%s) — answering without it: %r", exc, question[:80])
         # Without the model: the one thing that needs none of it.
@@ -266,9 +350,11 @@ async def _handle(message: Message, store, staff, question: str) -> None:
         else:
             await message.reply("ИИ сейчас недоступен — попробуйте через минуту.\n\n" + _HELP)
         return
-    logger.info("assistant: %r -> %d chars, actions %s", question[:80], len(text), actions)
+    logger.info("assistant: %r -> %d chars, actions %s, done %d", question[:80], len(text), actions, len(receipts))
+    _remember(message.chat.id, user_id, question, text)
     if text:
         await message.reply(to_html(text), link_preview_options=_NO_PREVIEW)
+    await _show_receipts(message, store, receipts)
     for kind, value in actions:
         if kind == "open_repairs":
             await _send_list(message, store, value)
@@ -291,6 +377,41 @@ async def asked(message: Message) -> None:
         with get_conn(store.db_path) as conn:
             staff = core_auth.get_staff_by_telegram_id(conn, message.from_user.id)
     await _handle(message, store, staff, question_of(message.text) or "")
+
+
+def _is_followup(message: Message) -> bool:
+    """An answer to the bot's own question — «на какой счёт?» → «наличные»
+    — sent as a reply to that message, without the word «бот». Only while
+    there is a conversation going with this person, and never a reply to
+    a repair's card or a note on it (those are notes)."""
+    replied = message.reply_to_message
+    if not replied or not replied.from_user or not replied.from_user.is_bot or not message.from_user:
+        return False
+    if question_of(message.text) is not None or not _history(message.chat.id, message.from_user.id):
+        return False
+    if message.chat.type == "private":
+        return True
+    store = store_for_chat_id(message.chat.id)
+    if not store:
+        return False
+    with get_conn(store.db_path) as conn:
+        chat_id = str(message.chat.id)
+        return not (core_repairs.find_order_by_message(conn, chat_id, replied.message_id)
+                    or core_notes.find_order_by_note_message(conn, chat_id, replied.message_id))
+
+
+@router.message(F.reply_to_message, F.text, StateFilter(None), F.func(_is_followup))
+async def followed_up(message: Message) -> None:
+    if message.chat.type == "private":
+        resolved = _resolve_staff_for_dm(message.from_user.id)
+        if not resolved:
+            return
+        store, staff = resolved
+    else:
+        store = store_for_chat_id(message.chat.id)
+        with get_conn(store.db_path) as conn:
+            staff = core_auth.get_staff_by_telegram_id(conn, message.from_user.id)
+    await _handle(message, store, staff, message.text.strip())
 
 
 @router.message(F.voice, F.chat.type == "private", StateFilter(None))

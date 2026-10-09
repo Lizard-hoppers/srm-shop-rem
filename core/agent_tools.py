@@ -177,7 +177,8 @@ def send_repair_card(conn, ctx, args) -> dict:
     return {"sent_to_chat": True, "number": _documents.label("repair", repair_id)}
 
 
-_REPAIR_NUMBER = re.compile(r"(?:РК|PK|№)\s*-?\s*0*(\d+)", re.IGNORECASE)
+# «РК-48», «рк 48», «№48», «ремонт 43», «заказ №43» — a repair named by its number.
+_REPAIR_NUMBER = re.compile(r"(?:РК|PK|№|ремонт|заказ)\s*-?\s*№?\s*0*(\d{1,6})(?![\d.,]*\s*(?:грн|гривен|₴))", re.IGNORECASE)
 
 
 # Words of a status report that say what happened, not which repair it

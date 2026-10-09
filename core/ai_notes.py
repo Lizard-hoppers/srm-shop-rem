@@ -167,7 +167,7 @@ def analyze(text: str, status_label: str = "", price=None) -> dict:
         data = json.loads(answer[answer.index("{"): answer.rindex("}") + 1])
     except httpx.HTTPError as exc:
         raise NoteAiError("Не удалось связаться с моделью") from exc
-    except (KeyError, IndexError, TypeError, ValueError) as exc:
+    except (KeyError, IndexError, TypeError, ValueError, AttributeError) as exc:
         raise NoteAiError("Не смог разобрать ответ модели") from exc
     if not isinstance(data, dict):
         raise NoteAiError("Не смог разобрать ответ модели")
@@ -231,7 +231,7 @@ def parse_reminder(text: str, now) -> dict:
         data = json.loads(answer[answer.index("{"): answer.rindex("}") + 1])
     except httpx.HTTPError as exc:
         raise NoteAiError("Не удалось связаться с моделью") from exc
-    except (KeyError, IndexError, TypeError, ValueError) as exc:
+    except (KeyError, IndexError, TypeError, ValueError, AttributeError) as exc:
         raise NoteAiError("Не смог разобрать ответ модели") from exc
     if not isinstance(data, dict):
         raise NoteAiError("Не смог разобрать ответ модели")
