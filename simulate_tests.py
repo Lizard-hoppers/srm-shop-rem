@@ -6803,7 +6803,7 @@ def scenario_repair_notes() -> None:
         read = ai_notes.analyze(LONG, "В работе")
         check("a long message is read by the model (OpenAI when there is no Claude key): one short line and the stage; the whole text and the current status go to it",
               read == {"summary": "Заберёт в пятницу после 18:00; задняя крышка до 800 грн; предоплата 500 внесена",
-                       "stage": "ждёт клиента до пятницы", "status": None, "price": None}
+                       "stage": "ждёт клиента до пятницы", "status": None, "price": None, "payment": None}
               and calls[-1]["url"].endswith("/chat/completions") and calls[-1]["json"]["messages"][1]["content"] == LONG
               and "«В работе»" in calls[-1]["json"]["messages"][0]["content"] and "цена для клиента: не известна" in calls[-1]["json"]["messages"][0]["content"])
         os.environ["ANTHROPIC_API_KEY"] = "sk-ant-test"
@@ -6812,10 +6812,13 @@ def scenario_repair_notes() -> None:
         os.environ.pop("ANTHROPIC_API_KEY", None)
         answer["value"] = '{"summary": "Ремонт завершён, устройство готово к выдаче клиенту", "stage": "готов, ждёт клиента", "status": "ready"}'
         check("a short message stays its own short version — only the stage and the status are taken from the model",
-              ai_notes.analyze("  готово,   можно выдавать ") == {"summary": "готово, можно выдавать", "stage": "готов, ждёт клиента", "status": "ready", "price": None})
+              ai_notes.analyze("  готово,   можно выдавать ") == {"summary": "готово, можно выдавать", "stage": "готов, ждёт клиента", "status": "ready", "price": None, "payment": None})
         answer["value"] = '{"summary": "' + LONG + ' и ещё много лишних слов сверху", "stage": "", "status": "done"}'
         check("a «summary» longer than the message is dropped, an empty stage is no stage, an unknown status is no status",
-              ai_notes.analyze(LONG) == {"summary": LONG if len(LONG) <= ai_notes.MAX_SUMMARY else LONG[: ai_notes.MAX_SUMMARY - 1] + "…", "stage": None, "status": None, "price": None})
+              ai_notes.analyze(LONG) == {"summary": LONG if len(LONG) <= ai_notes.MAX_SUMMARY else LONG[: ai_notes.MAX_SUMMARY - 1] + "…", "stage": None, "status": None, "price": None, "payment": None})
+        for raw, expected in (('"card"', "card"), ('"cash"', "cash"), ('"bitcoin"', None), ("null", None)):
+            answer["value"] = '{"summary": "x", "stage": null, "status": "issued", "price": null, "payment": ' + raw + "}"
+            check(f"payment: {raw} -> {expected}", ai_notes.analyze("Отдал клиенту, оплатил", "Готов к выдаче", 2500)["payment"] == expected)
         for raw, current, expected, label in (
             ("3000", 2500, 3000, "a new price comes back as a number"),
             ("3000.0", 2500, 3000, "…a whole one as an int"),
@@ -6906,6 +6909,9 @@ def scenario_repair_notes() -> None:
                 return {"summary": summary, "stage": "готов, ждёт клиента", "status": "ready", "price": None}
             if "жду запчасть" in lowered:
                 return {"summary": summary, "stage": "ждём запчасть до понедельника", "status": None, "price": None}
+            if "отдал клиенту" in lowered:
+                return {"summary": summary, "stage": None, "status": "issued", "price": None,
+                        "payment": "card" if "картой" in lowered else None}
             if "выйдет" in lowered:
                 return {"summary": summary, "stage": "нашли ещё поломку", "status": None, "price": 4200}
             return {"summary": summary, "stage": None, "status": None, "price": None}
@@ -6940,7 +6946,7 @@ def scenario_repair_notes() -> None:
                   handled and [(n["kind"], n["text"], n["author"], n["original_text"]) for n in notes]
                   == [("text", "Запчасть приехала, начинаю", "Эдик", "Запчасть приехала, начинаю")]
                   and sent == [{"kind": "reaction", "emoji": "✍", "message_id": short_msg}])
-            check("the group card is brought up to date with it", bool(synced) and "📝 <b>Заметки (1)</b>" in synced[-1] and "Запчасть приехала, начинаю — <i>Эдик</i>" in synced[-1])
+            check("the group card is brought up to date with it", bool(synced) and "📝 <b>Заметки (1)</b>" in synced[-1] and "<blockquote>Запчасть приехала, начинаю — <i>Эдик</i></blockquote>" in synced[-1])
 
             # длинный текст — сокращён, оригинал рядом; автор не из CRM
             _handled, long_msg = await post(OUTSIDER_TG, "Сергей Аутсорс", CARD_MESSAGE, text=LONG)
@@ -7013,24 +7019,7 @@ def scenario_repair_notes() -> None:
                       and "Стадия: <b>ждём запчасть до понедельника</b>" in synced[-1])
             check("the model is told the repair's current status and price", read_statuses[-1] == ("Новый", 3000))
             check("a stage alone needs no confirmation — just the ✍", [m["kind"] for m in sent] == ["reaction"])
-            await post(MASTER_TG, "Эдик", CARD_MESSAGE, text="Готово, можно выдавать")
-            with get_conn(db_path) as conn:
-                repair = repairs.get_repair(conn, repair_id)
-                check("«готово» about a repair nobody has taken into work changes nothing and offers nothing (not a step the CRM has)",
-                      repair["status"] == "new" and [m["kind"] for m in sent] == ["reaction"]
-                      and repair_notes.list_notes(conn, repair_id)[-1]["suggested_status"] == "ready")
-                repairs.claim_repair(conn, repair_id, master)
-                check("taking the repair into work clears the old «Стадия»", repairs.get_repair(conn, repair_id)["stage_note"] is None)
-            _handled, ready_msg = await post(MASTER_TG, "Эдик", CARD_MESSAGE, text="Готово, можно выдавать")
-            with get_conn(db_path) as conn:
-                repair = repairs.get_repair(conn, repair_id)
-            hint = next((m for m in sent if m["kind"] == "message"), None)
-            check("«готово» about a repair in work: the bot does NOT change the status itself…", repair["status"] == "in_progress" and repair["stage_note"] == "готов, ждёт клиента")
-            check("…it says what it understood and offers the one button that confirms it — the card's own «✅ Готово»",
-                  hint is not None and hint["reply_to"] == ready_msg and f"РК-{repair_id:03d}: похоже, готов" in hint["text"] and "«В работе»" in hint["text"]
-                  and hint["buttons"] == [f"repair_done:{repair_id}"])
-
-            # ---- цена из разговора
+            # press() is used from here on — a tap on a button under one of the bot's messages
             async def press(user_id: int, name: str, data: str, message_id: int) -> None:
                 nonlocal counter
                 counter += 1
@@ -7042,6 +7031,88 @@ def scenario_repair_notes() -> None:
                 await dp.feed_update(bot, update)
                 await asyncio.sleep(0.05)
 
+            _handled, ready_msg = await post(MASTER_TG, "Эдик", CARD_MESSAGE, text="Готово, можно выдавать")
+            with get_conn(db_path) as conn:
+                repair = repairs.get_repair(conn, repair_id)
+            told = next((m for m in sent if m["kind"] == "message"), None)
+            check("«готово» in reply to the card moves the repair by itself — straight from «Новый» — nobody goes to the CRM",
+                  repair["status"] == "ready")
+            check("the bot says what it did, warns that no part was named, and leaves «Вернуть» under it",
+                  told is not None and told["reply_to"] == ready_msg and f"РК-{repair_id:03d}: Новый → <b>Готов к выдаче</b>" in told["text"]
+                  and "Запчасть не указана" in told["text"] and told["buttons"] == [f"rundo:{repair_id}:new"])
+            check("the group card follows", "• Готов к выдаче" in synced[-1])
+            await press(OUTSIDER_TG, "Сергей Аутсорс", f"rundo:{repair_id}:new", 9400)
+            with get_conn(db_path) as conn:
+                check("«Вернуть» puts it back — anyone in the group may press it",
+                      repairs.get_repair(conn, repair_id)["status"] == "new"
+                      and any(m["kind"] == "edit" and "возвращён из «Готов к выдаче» в <b>Новый</b>" in m["text"] for m in sent))
+            await press(OUTSIDER_TG, "Сергей Аутсорс", f"rundo:{repair_id}:new", 9400)
+            check("a second «Вернуть» has nothing to undo and says so", sent[0]["alert"] is True and "нечего" in sent[0]["text"])
+            await post(MASTER_TG, "Эдик", CARD_MESSAGE, text="Жду запчасть до понедельника")
+            with get_conn(db_path) as conn:
+                repairs.claim_repair(conn, repair_id, master)
+                check("taking the repair into work clears the old «Стадия»", repairs.get_repair(conn, repair_id)["stage_note"] is None)
+            await post(MASTER_TG, "Эдик", CARD_MESSAGE, text="Жду запчасть до понедельника")
+            check("a message that names no new status changes none", [m["kind"] for m in sent] == ["reaction"])
+
+            # ---- «выдан»: с оплатой, без похода в CRM
+            with get_conn(db_path) as conn:
+                acc = {(a["kind"], a["currency"]): a["id"] for a in accounts.list_accounts(conn, 1)}
+                paid_repair = repairs.create_repair(conn, client_id, "Смартфон", None, "Redmi 12", None, "Экран", "offline", master, 2000, owner, location_id=1)
+                conn.execute("UPDATE staff SET pay_type = 'percent', pay_value = 50 WHERE id = ?", (master,))
+                repairs.claim_repair(conn, paid_repair, master)
+                repairs.declare_no_parts(conn, paid_repair)
+                conn.execute("INSERT INTO repair_order_messages (order_id, chat_id, message_id, kind) VALUES (?, ?, ?, 'staff')", (paid_repair, str(GROUP), 4102))
+                card_before, cash_before = accounts.balance(conn, acc[("card", "UAH")]), accounts.balance(conn, acc[("cash", "UAH")])
+            _handled, out_msg = await post(MASTER_TG, "Эдик", 4102, text="Отдал клиенту, оплатил картой")
+            told = next((m for m in sent if m["kind"] == "message"), None)
+            with get_conn(db_path) as conn:
+                repair = repairs.get_repair(conn, paid_repair)
+                check("«отдал клиенту, оплатил картой»: выдан, the price is on the card account, the estimate became the final price",
+                      repair["status"] == "issued" and repair["price_final"] == 2000
+                      and accounts.balance(conn, acc[("card", "UAH")]) == card_before + 2000)
+                check("…the master's share is accrued and the document has its profit, exactly as from the CRM",
+                      masters.accrued_for(conn, "repair_order", paid_repair) == 1000 and documents.get_for(conn, "repair", paid_repair)["profit"] == 1000)
+            check("the bot reports it in one line with «Вернуть»",
+                  told is not None and f"РК-{paid_repair:03d} выдан · 2000 грн →" in told["text"] and told["buttons"] == [f"rundo:{paid_repair}:in_progress"])
+            await press(MASTER_TG, "Эдик", f"rundo:{paid_repair}:in_progress", 9401)
+            with get_conn(db_path) as conn:
+                check("«Вернуть» after «выдан» takes the money back out, and the accrual and profit with it",
+                      repairs.get_repair(conn, paid_repair)["status"] == "in_progress" and accounts.balance(conn, acc[("card", "UAH")]) == card_before
+                      and masters.accrued_for(conn, "repair_order", paid_repair) == 0 and documents.get_for(conn, "repair", paid_repair)["profit"] is None
+                      and any("Оплата снята с кассы" in (m.get("text") or "") for m in sent))
+            await post(MASTER_TG, "Эдик", 4102, text="Отдал клиенту")
+            asked = next((m for m in sent if m["kind"] == "message"), None)
+            with get_conn(db_path) as conn:
+                check("«отдал клиенту» with no word on how he paid: nothing moves yet — the bot asks the one thing it can't know, with a button per гривневый счёт",
+                      repairs.get_repair(conn, paid_repair)["status"] == "in_progress" and asked is not None and "Как оплатили <b>2000 грн</b>" in asked["text"]
+                      and f"rissue:{paid_repair}:{acc[('cash', 'UAH')]}" in asked["buttons"] and f"rissue:{paid_repair}:{acc[('cash', 'USD')]}" not in asked["buttons"])
+            await press(OUTSIDER_TG, "Сергей Аутсорс", f"rissue:{paid_repair}:{acc[('cash', 'UAH')]}", 9402)
+            with get_conn(db_path) as conn:
+                check("one tap on the account finishes it: выдан, 2000 in the cash drawer",
+                      repairs.get_repair(conn, paid_repair)["status"] == "issued" and accounts.balance(conn, acc[("cash", "UAH")]) == cash_before + 2000
+                      and any(m["kind"] == "edit" and "выдан · 2000 грн" in m["text"] for m in sent))
+            await press(OUTSIDER_TG, "Сергей Аутсорс", f"rissue:{paid_repair}:{acc[('cash', 'UAH')]}", 9402)
+            with get_conn(db_path) as conn:
+                check("a second tap doesn't take the money twice", accounts.balance(conn, acc[("cash", "UAH")]) == cash_before + 2000 and sent[0]["alert"] is True)
+                free_repair = repairs.create_repair(conn, client_id, "Смартфон", None, "Nokia", None, "Чистка", "offline", master, None, owner, location_id=1)
+                conn.execute("INSERT INTO repair_order_messages (order_id, chat_id, message_id, kind) VALUES (?, ?, ?, 'staff')", (free_repair, str(GROUP), 4103))
+            await post(MASTER_TG, "Эдик", 4103, text="Отдал клиенту")
+            with get_conn(db_path) as conn:
+                check("a repair with no price is handed over at once, with no payment and no question",
+                      repairs.get_repair(conn, free_repair)["status"] == "issued" and any("без оплаты" in (m.get("text") or "") for m in sent))
+            await post(MASTER_TG, "Эдик", 4103, text="Готово, можно выдавать")
+            with get_conn(db_path) as conn:
+                check("a message never drags a repair backwards", repairs.get_repair(conn, free_repair)["status"] == "issued"
+                      and [m["kind"] for m in sent] == ["reaction"])
+            with get_conn(db_path) as conn:
+                for bad_from, bad_to in (("issued", "ready"), ("ready", "in_progress"), ("cancelled", "ready"), ("new", "new"), ("new", None)):
+                    if repairs.chat_move_allowed(bad_from, bad_to):
+                        check(f"{bad_from} -> {bad_to} is not a chat move", False)
+                check("only forward moves are chat moves",
+                      repairs.chat_move_allowed("new", "issued") and repairs.chat_move_allowed("ready", "cancelled") and not repairs.chat_move_allowed("issued", "cancelled"))
+
+            # ---- цена из разговора
             _handled, price_msg = await post(OUTSIDER_TG, "Сергей Аутсорс", CARD_MESSAGE, text="Нашли ещё поломку, выйдет 4200")
             question = next((m for m in sent if m["kind"] == "message"), None)
             with get_conn(db_path) as conn:
@@ -7092,8 +7163,16 @@ def scenario_repair_notes() -> None:
             text, _keyboard = repairs.card(conn, repair_id)
             total_notes = len(repair_notes.list_notes(conn, repair_id))
             check("the group card shows the count and the latest three, each cut to fit",
-                  f"📝 <b>Заметки ({total_notes})</b>" in text and total_notes == 13 and text.count("\n• ") == 3 and "…" in text and "Запчасть приехала" not in text
+                  f"📝 <b>Заметки ({total_notes})</b> — последние:" in text and total_notes > 10 and "Запчасть приехала" not in text
+                  and text.count("<blockquote>") == 1 and text.split("<blockquote>")[1].split("</blockquote>")[0].count("\n") == 2
                   and len(text) < 1024)
+            conn.execute("UPDATE devices SET defect_description = ? WHERE id = ?", ("Очень подробное описание неисправности. " * 20, repairs.get_repair(conn, repair_id)["device_id"]))
+            long_text, _keyboard = repairs.card(conn, repair_id)
+            check("a card that would run past Telegram's caption limit shows fewer notes rather than markup cut in half",
+                  len(long_text) <= 1024 or "<blockquote>" not in long_text)
+            check("…and its quote, if any is left, is whole", long_text.count("<blockquote>") == long_text.count("</blockquote>")
+                  and f"Заметки ({total_notes})" in long_text)
+
         token = make_token(owner, "1")
         import webapp.main
 
@@ -7114,10 +7193,11 @@ def scenario_bot_questions() -> None:
 
     from aiogram import Bot
     from aiogram.dispatcher.event.bases import UNHANDLED
-    from aiogram.types import Chat, Message, Update, User
+    from aiogram.exceptions import TelegramBadRequest
+    from aiogram.types import Chat, File, Message, Update, User, Voice
 
     from bot import assistant_chat
-    from core import repair_digest, repair_notes
+    from core import ai_notes, repair_digest, repair_notes
 
     GROUP, MASTERS_GROUP, TOPIC, OWNER_TG, MEMBER_TG = -1004478000111, -1003820000222, 5, 887001, 887002
 
@@ -7127,6 +7207,9 @@ def scenario_bot_questions() -> None:
           and assistant_chat.question_of("бот") == "" and assistant_chat.question_of("ботинок порвался") is None
           and assistant_chat.question_of("робот сломался") is None and assistant_chat.question_of("скажи бот сколько") is None
           and assistant_chat.question_of(None) is None)
+    check("the assistant's answer becomes safe HTML: everything escaped, only a link to a repair card turned into a clickable name",
+          assistant_chat.to_html("**Нашёл** [13 про <мах>](https://t.me/c/4478202416/5/135)  \n[зло](https://evil.example/x) <b>x</b>")
+          == 'Нашёл <a href="https://t.me/c/4478202416/5/135">13 про &lt;мах&gt;</a>\n[зло](https://evil.example/x) &lt;b&gt;x&lt;/b&gt;')
     check("the question may narrow the list to a status",
           assistant_chat.statuses_asked("какие готовы") == ("ready",) and assistant_chat.statuses_asked("что в работе") == ("in_progress",)
           and assistant_chat.statuses_asked("новые ремонты") == ("new",) and assistant_chat.statuses_asked("сколько ремонтов") == repair_digest.OPEN_STATUSES)
@@ -7191,22 +7274,202 @@ def scenario_bot_questions() -> None:
             conn.execute("DELETE FROM repair_order_messages WHERE order_id > ?", (elsewhere,))
             conn.execute("UPDATE repair_orders SET status = 'cancelled' WHERE id > ?", (elsewhere,))
 
+        # ---- инструменты помощника
+        from core import agent_tools, ai_agent
+
+        check("how people type a model is matched to how it is written on the card",
+              agent_tools.matches("13 айфон", "Apple iPhone 13") and agent_tools.matches("редми ноут", "Redmi note 13")
+              and agent_tools.matches("айфон 13 про макс", "iPhone 13 Pro Max") and agent_tools.matches("poc", "Poco c65")
+              and not agent_tools.matches("3", "iPhone 13") and not agent_tools.matches("самсунг", "iPhone 13"))
+        ctx = {"location_id": 1, "can_money": False, "chat_id": str(GROUP), "topics": {str(GROUP): TOPIC}, "actions": []}
+        with get_conn(db_path) as conn:
+            by_model = agent_tools.call(conn, ctx, "find_repairs", {"query": "13 айфон"})
+            check("find_repairs: by model in the asker's words, open repairs of this точка only, each with its card link",
+                  [r["number"] for r in by_model["repairs"]] == [f"РК-{fresh:03d}"] and by_model["repairs"][0]["status"] == "Новый"
+                  and by_model["repairs"][0]["card_link"] == f"https://t.me/c/4478000111/5/{100 + fresh}" and by_model["repairs"][0]["price_uah"] == 3000)
+            check("…closed ones only when asked for", agent_tools.call(conn, ctx, "find_repairs", {"query": "айфон 11"})["total"] == 0
+                  and agent_tools.call(conn, ctx, "find_repairs", {"query": "айфон 11", "include_closed": True})["repairs"][0]["status"] == "Выдан")
+            check("…by document number and by the client's phone",
+                  [r["id"] for r in agent_tools.call(conn, ctx, "find_repairs", {"query": f"РК-{ready}"})["repairs"]] == [ready]
+                  and agent_tools.call(conn, ctx, "find_repairs", {"query": "067 123 50 00"})["total"] == 4)
+            close = agent_tools.call(conn, ctx, "find_repairs", {"query": "редми айфон"})
+            check("when nothing has every word, the closest come back marked as not exact",
+                  close["total"] == 0 and close["exact_match"] is False and {r["id"] for r in close["closest"]} == {fresh, ready})
+            detail = agent_tools.call(conn, ctx, "get_repair", {"repair_id": working})
+            check("get_repair: the notes from the chat are there; the money isn't for someone who may not see it",
+                  detail["notes"][0]["text"] == "жду запчасть" and detail["stage"] == "ждём запчасть до понедельника" and "finance" not in detail)
+            check("a repair of another точка is «not found» for an ordinary employee", agent_tools.call(conn, ctx, "get_repair", {"repair_id": elsewhere}) == {"error": "ремонт не найден"})
+            check("find_clients by phone", agent_tools.call(conn, ctx, "find_clients", {"query": "0671235000"})["clients"][0]["repairs"] >= 6)
+            check("money tools don't exist for an ordinary employee — neither in the list offered to the model nor when called by name",
+                  "cash_state" not in {t["function"]["name"] for t in agent_tools.schemas(False)}
+                  and "error" in agent_tools.call(conn, ctx, "profit", {}) and "error" in agent_tools.call(conn, ctx, "debts", {}))
+            boss = {**ctx, "can_money": True, "actions": []}
+            check("a period goes back to the model the way people read it, not as ГГГГ-ММ-ДД",
+                  agent_tools.call(conn, boss, "profit", {"date_from": "2026-10-01", "date_to": "2026-10-09"})["period"] == "01.10.2026 — 09.10.2026"
+                  and re.fullmatch(r"\d\d\.\d\d\.\d{4}", agent_tools.call(conn, boss, "cash_state", {})["period"]))
+            check("for an owner they do, and he may look at every точка at once",
+                  "accounts" in agent_tools.call(conn, boss, "cash_state", {}) and "net" in agent_tools.call(conn, boss, "profit", {"date_from": "2026-01-01"})
+                  and agent_tools.call(conn, boss, "find_repairs", {"query": "ipad", "all_points": True})["total"] == 1
+                  and agent_tools.call(conn, ctx, "find_repairs", {"query": "ipad", "all_points": True})["total"] == 0
+                  and "finance" in agent_tools.call(conn, boss, "get_repair", {"repair_id": working}))
+            agent_tools.call(conn, ctx, "send_repair_card", {"repair_id": fresh})
+            agent_tools.call(conn, ctx, "send_repair_card", {"repair_id": fresh})
+            agent_tools.call(conn, ctx, "show_open_repairs", {"statuses": ["ready", "bogus"]})
+            check("«send the card» and «show the list» only ask the bot to post — once each",
+                  ctx["actions"] == [("repair_card", fresh), ("open_repairs", ("ready",))]
+                  and agent_tools.call(conn, ctx, "send_repair_card", {"repair_id": 99999}) == {"error": "ремонт не найден"})
+            check("the model is given no tool that changes anything", not any("status" in name or "price" in name or "change" in name for name in agent_tools.TOOLS))
+            pick = lambda text, status: tuple([r["id"] for r in group] for group in agent_tools.repairs_for_status(conn, 1, text, status))
+            check("which repair a status is about is settled without the model: every word that could be a name is on the card, among repairs that can make that move",
+                  pick("галакси готов", "ready") == ([working], []) and pick("13 айфон взял в работу", "in_progress") == ([fresh], [])
+                  and pick("редми выдан, оплатил наличными", "issued") == ([ready], []) and pick("пиксель готов", "ready") == ([], []))
+            check("a near miss is never «the one»: «айфон 11 выдан» must not hand over the only open iPhone, a 13 — it is only shown as the closest",
+                  pick("айфон 11 выдан", "issued") == ([], [fresh]))
+            check("«РК-…» settles it outright; a number that can't make the move finds nothing",
+                  pick(f"РК-{working:03d} готов", "ready") == ([working], []) and pick(f"рк {working} готов", "ready") == ([working], [])
+                  and pick(f"РК-{issued} готов", "ready") == ([], []))
+            check("a word every repair shares leaves several exact — and none is picked; no name at all finds nothing",
+                  len(pick("смартфон выдан", "issued")[0]) > 1 and pick("выдан наличными", "issued") == ([], []))
+            check("a request that asks something is never a status report",
+                  all(assistant_chat.looks_like_question(q) for q in ("какие готовы", "сколько ремонтов выдано", "найди 13 айфон", "поко готов?", "пришли поко"))
+                  and not any(assistant_chat.looks_like_question(q) for q in ("13 про мах выдан", "поко взял в работу", "галакси готов")))
+            check("a broken call is an error for the model to read, never an exception",
+                  "error" in agent_tools.call(conn, ctx, "no_such_tool", {}) and "error" in agent_tools.call(conn, ctx, "get_repair", {"repair_id": "abc"})
+                  and "error" not in agent_tools.call(conn, ctx, "find_products", "not a dict"))
+            probe_args = {"repair_id": fresh, "client_id": client_id, "query": "iphone"}
+            for name in agent_tools.available(True):
+                result = agent_tools.call(conn, {**boss, "actions": []}, name, probe_args)
+                if "error" in result:
+                    check(f"tool {name} runs on real data", False)
+                    break
+            else:
+                check("every tool runs on real data and returns something JSON can carry",
+                      all(json.dumps(agent_tools.call(conn, {**boss, "actions": []}, name, probe_args),
+                                     ensure_ascii=False, default=str) for name in agent_tools.available(True)))
+
+            # ---- цикл «модель ↔ инструменты»
+            rounds: list[dict] = []
+            script = [
+                {"content": None, "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "find_repairs", "arguments": '{"query": "13 айфон"}'}}]},
+                {"content": None, "tool_calls": [{"id": "c2", "type": "function", "function": {"name": "send_repair_card", "arguments": json.dumps({"repair_id": fresh})}},
+                                                 {"id": "c3", "type": "function", "function": {"name": "profit", "arguments": "{}"}}]},
+                {"content": "Нашёл РК, карточку прислал."},
+            ]
+
+            class _R:
+                status_code, text = 200, "ok"
+
+                def __init__(self, message):
+                    self._m = message
+
+                def json(self):
+                    return {"choices": [{"message": self._m}]}
+
+            def _post(url, **kwargs):
+                rounds.append(kwargs["json"])
+                return _R(script[len(rounds) - 1])
+
+            orig_post, orig_key = httpx.post, os.environ.get("OPENAI_API_KEY")
+            httpx.post, os.environ["OPENAI_API_KEY"] = _post, "sk-test"
+            try:
+                text, actions = ai_agent.ask(conn, "найди заказ по 13 айфону и пришли в чат", location_id=1, point_name="Мастерская",
+                                             can_money=False, chat_id=str(GROUP), topics={str(GROUP): TOPIC})
+                check("the model asks for tools, gets their results, and its last message is the answer; what it asked to post comes back as actions",
+                      text == "Нашёл РК, карточку прислал." and actions == [("repair_card", fresh)] and len(rounds) == 3)
+                fed = [m for m in rounds[1]["messages"] if m["role"] == "tool"]
+                check("it was given the real row from the base", f"РК-{fresh:03d}" in fed[0]["content"] and "Apple iPhone 13" in fed[0]["content"])
+                denied = [m for m in rounds[2]["messages"] if m["role"] == "tool" and m["tool_call_id"] == "c3"]
+                check("a money tool it wasn't offered is refused even if it calls it by name", "недоступен" in denied[0]["content"])
+                check("the model is told who is asking, the moment in Kyiv time, and to write dates as ДД.ММ.ГГГГ ЧЧ:ММ",
+                      "не владелец и не админ" in rounds[0]["messages"][0]["content"] and timefmt.kyiv_today() in rounds[0]["messages"][0]["content"]
+                      and re.search(r"Сейчас \d\d\.\d\d\.\d{4} \d\d:\d\d по Киеву", rounds[0]["messages"][0]["content"])
+                      and "ДД.ММ.ГГГГ ЧЧ:ММ" in rounds[0]["messages"][0]["content"]
+                      and "cash_state" not in json.dumps(rounds[0]["tools"]))
+                rounds.clear()
+                script[:] = [
+                    {"content": None, "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "find_repairs", "arguments": '{"query": "13 айфон"}'}}]},
+                    {"content": "Нашёл: Apple iPhone 13, вот ссылка."},
+                ]
+                _text, actions = ai_agent.ask(conn, "найди заказ по 13 айфону и пришли в чат", location_id=1, point_name="М", can_money=False)
+                check("asked to SEND and the search came down to one repair — its card goes even if the model only described it",
+                      actions == [("repair_card", fresh)])
+                rounds.clear()
+                _text, actions = ai_agent.ask(conn, "что с 13 айфоном", location_id=1, point_name="М", can_money=False)
+                check("…but a plain question about it sends nothing", actions == [])
+                rounds.clear()
+                script[:] = [
+                    {"content": None, "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "find_repairs", "arguments": "{}"}}]},
+                    {"content": "Вот все четыре."},
+                ]
+                _text, actions = ai_agent.ask(conn, "пришли ремонт", location_id=1, point_name="М", can_money=False)
+                check("…nor does «пришли» when several repairs fit — the bot doesn't guess which", actions == [])
+                rounds.clear()
+                script[:] = [{"content": None, "tool_calls": [{"id": "x", "type": "function", "function": {"name": "problems", "arguments": "{}"}}]}] * 20
+                try:
+                    ai_agent.ask(conn, "что там", location_id=1, point_name="М", can_money=True)
+                    check("a model that never stops calling tools is cut off", False)
+                except ai_agent.AgentError:
+                    check("a model that never stops calling tools is cut off", len(rounds) == ai_agent.MAX_ROUNDS)
+                httpx.post = lambda url, **kw: type("E", (), {"status_code": 500, "text": "boom"})()
+                try:
+                    ai_agent.ask(conn, "что там", location_id=1, point_name="М", can_money=True)
+                    check("a model error is an AgentError", False)
+                except ai_agent.AgentError:
+                    check("a model error is an AgentError", True)
+            finally:
+                httpx.post = orig_post
+                if orig_key is None:
+                    os.environ.pop("OPENAI_API_KEY", None)
+                else:
+                    os.environ["OPENAI_API_KEY"] = orig_key
+
+        # ---- весь путь через диспетчер
         sent: list[dict] = []
 
         class _FakeBot(Bot):
             async def __call__(self, method, request_timeout=None):
-                if type(method).__name__ == "SendMessage":
+                name = type(method).__name__
+                if name == "SendMessage":
+                    markup = getattr(method, "reply_markup", None)
+                    buttons = [b.callback_data or ("web_app" if b.web_app else "?") for row in getattr(markup, "inline_keyboard", None) or [] for b in row]
                     sent.append({"chat": method.chat_id, "text": method.text, "reply_to": getattr(method.reply_parameters, "message_id", None),
-                                 "preview_off": getattr(method.link_preview_options, "is_disabled", None) is True})
+                                 "preview_off": getattr(method.link_preview_options, "is_disabled", None) is True, "buttons": buttons})
                     return Message(message_id=8000 + len(sent), date=datetime.datetime.now(), chat=Chat(id=method.chat_id, type="private"), text="x")
+                if name == "SendPhoto":
+                    markup = getattr(method, "reply_markup", None)
+                    sent.append({"chat": method.chat_id, "photo": os.path.basename(method.photo.path), "text": method.caption, "reply_to": None,
+                                 "buttons": [b.callback_data or ("web_app" if b.web_app else "?") for row in getattr(markup, "inline_keyboard", None) or [] for b in row]})
+                    if photo_refused["on"]:
+                        raise TelegramBadRequest(method=method, message="PHOTO_INVALID_DIMENSIONS")
+                    return Message(message_id=8000 + len(sent), date=datetime.datetime.now(), chat=Chat(id=method.chat_id, type="private"), caption="x")
+                if name == "GetFile":
+                    return File(file_id="v", file_unique_id="u", file_path="voice/x.oga")
                 return True
+
+            async def download_file(self, file_path, destination=None, **kwargs):
+                return io.BytesIO(b"ogg")
+
+        photo_refused = {"on": False}
+
+        asked_questions: list[dict] = []
+        plan = {"answer": ("", []), "fail": True}
+
+        def _fake_ask(conn, question, **kwargs):
+            asked_questions.append({"question": question, **kwargs})
+            if plan["fail"]:
+                raise ai_agent.AgentError("нет связи")
+            return plan["answer"]
+
+        orig_ask, orig_transcribe, orig_analyze = ai_agent.ask, ai_notes.transcribe, ai_notes.analyze
+        ai_agent.ask = _fake_ask
+        ai_notes.transcribe = lambda audio, filename="voice.ogg": "Бот, что с тринадцатым айфоном"
 
         async def run() -> None:
             bot = _FakeBot(token="123456:test-bot-token-not-real")
             dp = _the_dispatcher()
             counter = 500
 
-            async def say(chat_id: int, user_id: int, text: str, reply_to: int | None = None) -> tuple[bool, int]:
+            async def say(chat_id: int, user_id: int, text: str | None, reply_to: int | None = None, **content) -> tuple[bool, int]:
                 nonlocal counter
                 counter += 1
                 sent.clear()
@@ -7214,35 +7477,382 @@ def scenario_bot_questions() -> None:
                 replied = Message(message_id=reply_to, date=datetime.datetime.now(), chat=chat, text="card") if reply_to else None
                 update = Update(update_id=counter, message=Message(
                     message_id=counter, date=datetime.datetime.now(), chat=chat, reply_to_message=replied,
-                    from_user=User(id=user_id, is_bot=False, first_name="T"), text=text))
+                    from_user=User(id=user_id, is_bot=False, first_name="T"), text=text, **content))
                 result = await dp.feed_update(bot, update)
                 await asyncio.sleep(0.05)
                 return result is not UNHANDLED, counter
 
-            handled, asked_id = await say(GROUP, MEMBER_TG, "бот сколько у нас ремонтов")
-            check("asked in the work group by anyone there, the bot answers in a reply with the list and links, link previews off",
-                  handled and len(sent) == 1 and sent[0]["chat"] == GROUP and sent[0]["reply_to"] == asked_id and sent[0]["preview_off"]
-                  and "Ремонтов не выдано: 4" in sent[0]["text"] and f"https://t.me/c/4478000111/5/{100 + fresh}" in sent[0]["text"])
+            # модель недоступна — бот не молчит
+            handled, _id = await say(GROUP, MEMBER_TG, "бот сколько у нас ремонтов")
+            check("with the model down, a question about repairs still gets the list with links",
+                  handled and len(sent) == 1 and sent[0]["preview_off"] and "Ремонтов не выдано: 4" in sent[0]["text"]
+                  and f"https://t.me/c/4478000111/5/{100 + fresh}" in sent[0]["text"])
             await say(GROUP, MEMBER_TG, "Бот, какие готовы?")
-            check("«какие готовы?» gives only the ready ones", "Ремонтов: 1" in sent[0]["text"] and "Redmi Note 12" in sent[0]["text"] and "iPhone 13" not in sent[0]["text"])
-            await say(OWNER_TG, OWNER_TG, "бот ремонты в работе")
-            check("in the DM a staff member gets the same, for his точка", len(sent) == 1 and "В работе — 2" in sent[0]["text"] and "Новый" not in sent[0]["text"])
-            await say(887999, 887999, "бот сколько ремонтов")
-            check("a stranger in the DM gets nothing", sent == [])
-            await say(-1009990009990, MEMBER_TG, "бот сколько ремонтов")
-            check("nor does a group that isn't ours", sent == [])
+            check("…narrowed by status", "Ремонтов: 1" in sent[0]["text"] and "Redmi Note 12" in sent[0]["text"])
             await say(GROUP, MEMBER_TG, "бот, привет")
-            check("addressed about something it can't do, it says what it can", len(sent) == 1 and "Пока умею" in sent[0]["text"])
-            await say(GROUP, MEMBER_TG, "ботинок порвался, сколько ремонтов таких было")
-            check("a message that merely starts with «бот…» is none of its business", sent == [])
+            check("…and anything else gets «ИИ недоступен» with examples, not silence", len(sent) == 1 and "ИИ сейчас недоступен" in sent[0]["text"])
+
+            # модель отвечает
+            plan["fail"] = False
+            plan["answer"] = ("Нашёл: РК-001 <Apple iPhone 13>, карточку прислал.", [("repair_card", fresh)])
+            handled, asked_id = await say(GROUP, MEMBER_TG, "бот найди заказ по 13 айфону и пришли в чат")
+            check("the request goes to the assistant without the word «бот», scoped to this точка and chat; an ordinary member may not see money",
+                  asked_questions[-1]["question"] == "найди заказ по 13 айфону и пришли в чат" and asked_questions[-1]["location_id"] == 1
+                  and asked_questions[-1]["can_money"] is False and asked_questions[-1]["chat_id"] == str(GROUP))
+            check("its answer comes as a reply, safely escaped", sent[0]["reply_to"] == asked_id and "&lt;Apple iPhone 13&gt;" in sent[0]["text"])
+            card = sent[1]
+            check("and the repair's card is posted into the group as a live card — with its buttons",
+                  f"РК-{fresh:03d} • Новый" in card["text"] and card["buttons"][0] == f"repair_take:{fresh}")
             with get_conn(db_path) as conn:
-                before = len(repair_notes.list_notes(conn, fresh))
+                copies = conn.execute("SELECT message_id FROM repair_order_messages WHERE order_id = ? AND kind = 'copy'", (fresh,)).fetchall()
+                check("that copy is registered: it will be kept in sync, and a reply to it is a note on the same repair",
+                      len(copies) == 1 and repairs.find_order_by_message(conn, str(GROUP), copies[0]["message_id"]) == fresh)
+            # карточка целиком — с фото устройства, как исходная
+            with get_conn(db_path) as conn:
+                filename = repairs.write_device_photo(repairs.get_repair(conn, working)["device_id"], b"\xff\xd8\xff-fake-jpeg", ".jpg")
+                repairs.set_device_photo(conn, repairs.get_repair(conn, working)["device_id"], filename)
+            plan["answer"] = ("Вот он.", [("repair_card", working)])
+            await say(GROUP, MEMBER_TG, "бот пришли самсунг")
+            card = sent[1]
+            with get_conn(db_path) as conn:
+                copy = conn.execute("SELECT has_photo FROM repair_order_messages WHERE order_id = ? AND kind = 'copy'", (working,)).fetchone()
+            check("a repair that has a photo is sent whole: the device photo with the card as its caption and the buttons under it",
+                  card.get("photo") == filename and f"РК-{working:03d} • В работе" in card["text"] and len(card["text"]) <= 1024
+                  and card["buttons"][0] == f"repair_part:{working}" and len(sent) == 2)
+            check("…and is registered as a photo card, so later edits change its caption", copy["has_photo"] == 1)
+            await say(OWNER_TG, OWNER_TG, "бот пришли самсунг")
+            check("in the DM too — the photo, the card, «Открыть в CRM»", sent[1].get("photo") == filename and sent[1]["buttons"] == ["web_app"])
+            photo_refused["on"] = True
+            await say(GROUP, MEMBER_TG, "бот пришли самсунг")
+            photo_refused["on"] = False
+            check("if Telegram refuses the photo the card still comes, as text",
+                  [("photo" in m) for m in sent[1:]] == [True, False] and f"РК-{working:03d}" in sent[2]["text"])
+
+            # статус, сказанный боту
+            def _status_read(text, status_label="", price=None):
+                lowered = text.lower()
+                status = "ready" if "готов" in lowered else "issued" if "выдан" in lowered else "in_progress" if "взял" in lowered else None
+                return {"summary": text, "stage": None, "status": status, "price": None, "payment": "card" if "картой" in lowered else None}
+
+            ai_notes.analyze = _status_read
+            asked_before = len(asked_questions)
+            await say(GROUP, MEMBER_TG, "бот галакси готов")
+            with get_conn(db_path) as conn:
+                check("«бот, галакси готов»: the one repair that fits is moved at once, «Вернуть» under the answer, the assistant isn't even asked",
+                      repairs.get_repair(conn, working)["status"] == "ready" and len(sent) == 1 and len(asked_questions) == asked_before
+                      and f"РК-{working:03d}: В работе → <b>Готов к выдаче</b>" in sent[0]["text"] and sent[0]["buttons"] == [f"rundo:{working}:in_progress"])
+            await say(GROUP, MEMBER_TG, "бот смартфон выдан")
+            with get_conn(db_path) as conn:
+                check("several repairs fit — the bot lists them and changes nothing",
+                      "не угадываю" in sent[0]["text"] and sent[0]["text"].count("• ") >= 2 and repairs.get_repair(conn, fresh)["status"] == "new"
+                      and repairs.get_repair(conn, working)["status"] == "ready")
+            await say(GROUP, MEMBER_TG, "бот пиксель готов")
+            check("no repair fits — it says so", "Не нашёл ремонт" in sent[0]["text"])
+            await say(GROUP, MEMBER_TG, "бот редми готов")
+            check("a repair that is already there is answered «уже готов», not «не нашёл»", f"РК-{ready:03d} — уже «Готов к выдаче»" in sent[0]["text"])
+            await say(GROUP, MEMBER_TG, "бот айфон 11 выдан")
+            with get_conn(db_path) as conn:
+                check("a near miss is shown, not acted on", "ближайшие, статус не трогаю" in sent[0]["text"] and "iPhone 13" in sent[0]["text"]
+                      and repairs.get_repair(conn, fresh)["status"] == "new")
+            await say(GROUP, MEMBER_TG, f"бот РК-{working} выдан картой")
+            with get_conn(db_path) as conn:
+                check("«бот, РК-… выдан картой»: handed over and paid in one message",
+                      repairs.get_repair(conn, working)["status"] == "issued" and f"выдан · 1500 грн" in sent[0]["text"])
+                repairs.undo_chat_status(conn, working, "in_progress", None)
+            await say(GROUP, MEMBER_TG, "бот какие готовы?")
+            check("a question with the same word in it goes to the assistant, not to a status change", len(asked_questions) == asked_before + 1)
+            ai_notes.analyze = orig_analyze
+
+            plan["answer"] = ("Вот список.", [("open_repairs", ("in_progress",))])
+            await say(GROUP, MEMBER_TG, "бот что в работе")
+            check("«show the list» posts the ready-made list after the answer", len(sent) == 2 and sent[0]["text"] == "Вот список." and sent[1]["text"].startswith("🔧 <b>Ремонтов") and "В работе — 2" in sent[1]["text"])
+            plan["answer"] = ("В кассе 1500 грн.", [("repair_card", fresh)])
+            await say(OWNER_TG, OWNER_TG, "бот сколько в кассе")
+            check("the owner, in his DM, may ask about money", asked_questions[-1]["can_money"] is True and sent[0]["text"] == "В кассе 1500 грн.")
+            check("a card sent to the DM carries «Открыть в CRM» instead of the group's buttons", sent[1]["buttons"] == ["web_app"])
+            await say(GROUP, OWNER_TG, "бот сколько в кассе")
+            check("the owner may ask about money in the group too", asked_questions[-1]["can_money"] is True)
+            before = len(asked_questions)
+            await say(887999, 887999, "бот сколько ремонтов")
+            await say(-1009990009990, MEMBER_TG, "бот сколько ремонтов")
+            await say(GROUP, MEMBER_TG, "ботинок порвался, сколько ремонтов таких было")
+            check("a stranger in the DM, a group that isn't ours, a message that merely starts with «бот…» — nothing is asked, nothing is sent",
+                  len(asked_questions) == before and sent == [])
+            await say(GROUP, MEMBER_TG, "бот")
+            check("just «бот» gets examples of what to ask", "Спросите меня" in sent[0]["text"] and len(asked_questions) == before)
+            with get_conn(db_path) as conn:
+                notes_before = len(repair_notes.list_notes(conn, fresh))
+            plan["answer"] = ("Ок.", [])
             await say(GROUP, MEMBER_TG, "бот, сколько ремонтов", reply_to=100 + fresh)
             with get_conn(db_path) as conn:
-                check("sent as a reply to a card it is still a question — answered, not filed as a note",
-                      len(sent) == 1 and "Ремонтов не выдано" in sent[0]["text"] and len(repair_notes.list_notes(conn, fresh)) == before)
+                check("sent as a reply to a card it is still a request — answered, not filed as a note",
+                      sent[0]["text"] == "Ок." and len(repair_notes.list_notes(conn, fresh)) == notes_before)
 
-        asyncio.run(run())
+            # голосом в личке
+            await say(OWNER_TG, OWNER_TG, None, voice=Voice(file_id="v", file_unique_id="u", duration=4, file_size=900))
+            check("a voice message to the bot in the DM is a request: what was heard is said back, then answered",
+                  sent[0]["text"].startswith("🎤 Бот, что с тринадцатым айфоном") and asked_questions[-1]["question"] == "что с тринадцатым айфоном"
+                  and sent[1]["text"] == "Ок.")
+            before = len(asked_questions)
+            await say(GROUP, MEMBER_TG, None, voice=Voice(file_id="v", file_unique_id="u", duration=4, file_size=900))
+            check("a voice message in a group that isn't a reply to a card is left alone", len(asked_questions) == before and sent == [])
+
+        try:
+            os.environ["CRM_MINIAPP_URL"] = os.environ.get("CRM_MINIAPP_URL") or "https://crm.example/miniapp"
+            asyncio.run(run())
+        finally:
+            ai_agent.ask, ai_notes.transcribe, ai_notes.analyze = orig_ask, orig_transcribe, orig_analyze
+
+
+def scenario_reminders() -> None:
+    """«Бот, напомни завтра в 10:20 …» — set at once, shown back, posted
+    into the chat when its time comes."""
+    print("scenario: напоминания — поставить фразой, привязать к ремонту, прислать в чат в срок")
+    import asyncio
+    import datetime as dt
+
+    from aiogram import Bot
+    from aiogram.exceptions import TelegramBadRequest
+    from aiogram.types import CallbackQuery, Chat, Message, Update, User
+
+    from bot import reminder_flow
+    from core import ai_notes, reminders
+
+    GROUP, TOPIC, OWNER_TG, MEMBER_TG, CARD = -1004479000111, 5, 888001, 888002, 4301
+    now = dt.datetime(2026, 10, 9, 14, 30, tzinfo=timefmt.KYIV)   # пятница
+
+    # ---- «когда»
+    due = lambda d, t: reminders.resolve_due(d, t, now).strftime("%Y-%m-%d %H:%M")
+    check("date and time as said", due("2026-10-10", "10:20") == "2026-10-10 10:20")
+    check("only a time: today if it is still ahead, tomorrow if it has passed", due(None, "18:00") == "2026-10-09 18:00" and due(None, "09:00") == "2026-10-10 09:00")
+    check("only a date: at 10:00", due("2026-10-12", None) == "2026-10-12 10:00")
+    for d, t, needle, label in ((None, None, "когда напомнить", "neither date nor time"), ("2026-10-09", "09:00", "уже прошло", "a moment that has passed"),
+                                ("2026-10-08", None, "уже прошло", "a day that has passed"), ("2030-01-01", "10:00", "не дальше чем на год", "years ahead"),
+                                ("завтра", "10:00", "Не разобрал", "a date that isn't one"), ("2026-10-10", "25:99", "Не разобрал", "a time that isn't one")):
+        try:
+            reminders.resolve_due(d, t, now)
+            check(f"{label} is refused", False)
+        except reminders.ReminderError as exc:
+            check(f"{label} is refused with a line a person can act on", needle in str(exc))
+
+    # ---- разбор фразы моделью
+    sent_prompts: list[dict] = []
+
+    class _Resp:
+        status_code, text = 200, "ok"
+
+        def __init__(self, content):
+            self._c = content
+
+        def json(self):
+            return {"choices": [{"message": {"content": self._c}}]}
+
+    reply = {"value": '{"what": "спросить Андрея про готовность", "date": "2026-10-10", "time": "10:20", "repair": null}'}
+
+    def _post(url, **kwargs):
+        sent_prompts.append(kwargs["json"])
+        return _Resp(reply["value"])
+
+    orig_post, saved = httpx.post, {k: os.environ.get(k) for k in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY")}
+    httpx.post, os.environ["OPENAI_API_KEY"] = _post, "sk-test"
+    os.environ.pop("ANTHROPIC_API_KEY", None)
+    try:
+        read = ai_notes.parse_reminder("поставь напоминание завтра на 10:20 что нужно спросить андрея про готовность", now)
+        check("the model returns what and when; it is told the current moment and weekday (it needs them for «завтра», «в пятницу»)",
+              read == {"what": "спросить Андрея про готовность", "date": "2026-10-10", "time": "10:20", "repair": None}
+              and "2026-10-09 14:30, пятница" in sent_prompts[-1]["messages"][0]["content"])
+        reply["value"] = '{"what": "", "date": null, "time": 15, "repair": "РК-48"}'
+        check("blanks and wrong types come back as None", ai_notes.parse_reminder("x", now) == {"what": None, "date": None, "time": None, "repair": "РК-48"})
+        reply["value"] = "не json"
+        try:
+            ai_notes.parse_reminder("x", now)
+            check("an answer that isn't JSON raises NoteAiError", False)
+        except ai_notes.NoteAiError:
+            check("an answer that isn't JSON raises NoteAiError", True)
+    finally:
+        httpx.post = orig_post
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    check("«напомни …» is a reminder request; «какие напоминания» asks for the list; an ordinary question is neither",
+          reminder_flow.is_reminder_request("напомни завтра отдать 13 про мах") and reminder_flow.is_reminder_request("поставь напоминание на 10:20")
+          and reminder_flow.is_list_request("какие напоминания") and reminder_flow.is_list_request("покажи напоминания")
+          and not reminder_flow.is_list_request("напомни какие ремонты готовы завтра в 9") and not reminder_flow.is_reminder_request("сколько ремонтов"))
+
+    with tempfile.TemporaryDirectory() as tmp, _separate_base(tmp, "reminders.sqlite3", ("Мастерская",)) as db_path:
+        with get_conn(db_path) as conn:
+            conn.execute("UPDATE locations SET staff_group_chat_id = ?, repair_topic_id = ? WHERE id = 1", (GROUP, TOPIC))
+            owner = auth.create_staff(conn, "rm-owner", "pass", "Павел", "owner")
+            auth.link_staff_telegram(conn, "rm-owner", OWNER_TG)
+            master = auth.create_master(conn, "Эдик", None, None, None)
+            client_id = clients.get_or_create_by_phone(conn, "Иван", "+380671236000", source="offline")
+            repair_id = repairs.create_repair(conn, client_id, "Смартфон", "Apple", "iPhone 13", None, "Экран", "offline", master, 3000, owner, location_id=1)
+            other = repairs.create_repair(conn, client_id, "Смартфон", None, "Poco c65", None, "АКБ", "offline", master, 1400, owner, location_id=1)
+            conn.execute("INSERT INTO repair_order_messages (order_id, chat_id, message_id, kind) VALUES (?, ?, ?, 'topic')", (repair_id, str(GROUP), CARD))
+
+            # ---- книга напоминаний
+            soon = reminders.create(conn, text="  позвонить   клиенту ", due=now + dt.timedelta(hours=1), chat_id=GROUP, location_id=1, staff_id=owner)
+            later = reminders.create(conn, text="заказать дисплей", due=now + dt.timedelta(days=2), chat_id=GROUP, location_id=1, author_name="Сергей")
+            check("a reminder is kept with its time in UTC and shown in Kyiv time",
+                  reminders.get(conn, soon)["text"] == "позвонить клиенту" and reminders.get(conn, soon)["due_at"] == "2026-10-09 12:30:00"
+                  and reminders.kyiv(reminders.get(conn, soon)["due_at"]) == "09.10.2026 15:30")
+            check("nothing is due before its time; at its time exactly that one is",
+                  reminders.due_now(conn, now) == [] and [r["id"] for r in reminders.due_now(conn, now + dt.timedelta(hours=1))] == [soon]
+                  and [r["id"] for r in reminders.pending(conn, 1)] == [soon, later] and reminders.pending(conn, 2) == [])
+            check("the author is the staff member, or the Telegram name of someone who isn't linked",
+                  reminders.get(conn, soon)["author"] == "Павел" and reminders.get(conn, later)["author"] == "Сергей")
+            reminders.mark_sent(conn, soon)
+            check("sent means done", reminders.due_now(conn, now + dt.timedelta(days=5)) == [reminders.get(conn, later)] or
+                  [r["id"] for r in reminders.due_now(conn, now + dt.timedelta(days=5))] == [later])
+            check("«через час» makes a sent one pending again", reminders.snooze(conn, soon, 60, now) == "09.10.2026 15:30" and reminders.get(conn, soon)["status"] == "pending"
+                  and reminders.snooze(conn, soon, 60, now) is None)
+            check("cancel works once", reminders.cancel(conn, soon) and not reminders.cancel(conn, soon) and reminders.cancel(conn, later))
+            failing = reminders.create(conn, text="x", due=now + dt.timedelta(minutes=1), chat_id=GROUP)
+            for _ in range(reminders.MAX_ATTEMPTS):
+                reminders.mark_failed(conn, failing)
+            check("a reminder Telegram never takes is given up on, not retried forever", reminders.get(conn, failing)["status"] == "cancelled")
+            try:
+                reminders.create(conn, text="   ", due=now + dt.timedelta(hours=1), chat_id=GROUP)
+                check("a reminder about nothing is refused", False)
+            except reminders.ReminderError:
+                check("a reminder about nothing is refused", True)
+
+        # ---- через диспетчер
+        sent: list[dict] = []
+        refuse = {"on": False}
+
+        class _FakeBot(Bot):
+            async def __call__(self, method, request_timeout=None):
+                name = type(method).__name__
+                if name == "SendMessage":
+                    if refuse["on"]:
+                        raise TelegramBadRequest(method=method, message="chat not found")
+                    markup = getattr(method, "reply_markup", None)
+                    sent.append({"chat": method.chat_id, "text": method.text, "thread": method.message_thread_id,
+                                 "reply_to": getattr(method.reply_parameters, "message_id", None),
+                                 "buttons": [b.callback_data for row in getattr(markup, "inline_keyboard", None) or [] for b in row]})
+                    return Message(message_id=8500 + len(sent), date=dt.datetime.now(), chat=Chat(id=method.chat_id, type="supergroup"), text="x")
+                if name == "EditMessageText":
+                    sent.append({"edit": method.text})
+                if name == "AnswerCallbackQuery":
+                    sent.append({"answer": method.text})
+                return True
+
+        plan = {"read": {"what": "спросить Андрея про готовность", "date": None, "time": None, "repair": None}}
+        orig_parse, orig_analyze = ai_notes.parse_reminder, ai_notes.analyze
+        ai_notes.parse_reminder = lambda text, now_: plan["read"]
+
+        def _never(*args, **kwargs):
+            raise AssertionError("a reminder request must not be read as a status report")
+
+        ai_notes.analyze = _never
+
+        def newest(conn):
+            """The reminder set last (pending() is ordered by when it is due, not by when it was set)."""
+            return max(reminders.pending(conn, 1), key=lambda r: r["id"])
+
+        async def run() -> None:
+            bot = _FakeBot(token="123456:test-bot-token-not-real")
+            dp = _the_dispatcher()
+            counter = 700
+            tomorrow = (dt.datetime.now(timefmt.KYIV) + dt.timedelta(days=1)).strftime("%Y-%m-%d")
+
+            async def say(chat_id: int, user_id: int, name: str, text: str, reply_to: int | None = None, thread: int | None = None) -> int:
+                nonlocal counter
+                counter += 1
+                sent.clear()
+                chat = Chat(id=chat_id, type="private" if chat_id > 0 else "supergroup")
+                replied = Message(message_id=reply_to, date=dt.datetime.now(), chat=chat, text="card") if reply_to else None
+                await dp.feed_update(bot, Update(update_id=counter, message=Message(
+                    message_id=counter, date=dt.datetime.now(), chat=chat, reply_to_message=replied, message_thread_id=thread,
+                    is_topic_message=bool(thread), from_user=User(id=user_id, is_bot=False, first_name=name), text=text)))
+                await asyncio.sleep(0.05)
+                return counter
+
+            async def press(data: str, message_id: int, chat_id: int = GROUP) -> None:
+                nonlocal counter
+                counter += 1
+                sent.clear()
+                await dp.feed_update(bot, Update(update_id=counter, callback_query=CallbackQuery(
+                    id=str(counter), from_user=User(id=MEMBER_TG, is_bot=False, first_name="Сергей"), chat_instance="c", data=data,
+                    message=Message(message_id=message_id, date=dt.datetime.now(), chat=Chat(id=chat_id, type="supergroup"), text="?"))))
+                await asyncio.sleep(0.05)
+
+            plan["read"] = {"what": "спросить Андрея про готовность", "date": tomorrow, "time": "10:20", "repair": None}
+            asked = await say(GROUP, MEMBER_TG, "Сергей", "бот поставь напоминание завтра на 10:20 что нужно спросить андрея про готовность", thread=TOPIC)
+            with get_conn(db_path) as conn:
+                first = newest(conn)
+            check("asked in the group: set at once for that chat and topic, under the asker's Telegram name",
+                  first["text"] == "спросить Андрея про готовность" and first["chat_id"] == str(GROUP) and first["thread_id"] == TOPIC
+                  and first["author"] == "Сергей" and first["order_id"] is None and reminders.kyiv(first["due_at"]).endswith("10:20"))
+            check("the bot says back exactly what it understood — when and what — with «Отменить» under it",
+                  sent[0]["reply_to"] == asked and re.search(r"<b>\d\d\.\d\d\.\d{4} 10:20</b> \(по Киеву\): спросить Андрея про готовность", sent[0]["text"])
+                  and sent[0]["buttons"] == [f"rem_cancel:{first['id']}"])
+
+            plan["read"] = {"what": "отдать телефон клиенту", "date": tomorrow, "time": "15:00", "repair": None}
+            await say(GROUP, MEMBER_TG, "Сергей", "бот напомни завтра в 15:00 что этот заказ нужно отдать", reply_to=CARD)
+            with get_conn(db_path) as conn:
+                tied = newest(conn)
+                check("said in reply to a repair's card — «этот заказ» is that repair; the phone is NOT handed over by the word «отдать»",
+                      tied["order_id"] == repair_id and repairs.get_repair(conn, repair_id)["status"] == "new")
+            check("the answer names the repair", f"РК-{repair_id:03d} · Apple iPhone 13" in sent[0]["text"])
+
+            plan["read"] = {"what": "проверить АКБ", "date": tomorrow, "time": "12:00", "repair": "поко"}
+            await say(OWNER_TG, OWNER_TG, "Павел", "бот напомни завтра в 12 проверить акб на поко")
+            with get_conn(db_path) as conn:
+                from_dm = newest(conn)
+            check("asked in the DM: it will go to the точка's work group, and the repair named in words is found",
+                  from_dm["chat_id"] == str(GROUP) and from_dm["order_id"] == other and from_dm["author"] == "Павел"
+                  and "Пришлю в рабочую группу" in sent[0]["text"])
+            plan["read"] = {"what": "позвонить", "date": tomorrow, "time": "12:00", "repair": "смартфон"}
+            await say(OWNER_TG, OWNER_TG, "Павел", "бот напомни завтра позвонить по смартфону")
+            with get_conn(db_path) as conn:
+                check("words that fit several repairs tie it to none — no guessing", newest(conn)["order_id"] is None)
+
+            plan["read"] = {"what": "позвонить", "date": None, "time": None, "repair": None}
+            await say(GROUP, MEMBER_TG, "Сергей", "бот напомни позвонить клиенту")
+            check("no time named — nothing is set, the bot asks when", "когда напомнить" in sent[0]["text"] and sent[0]["buttons"] == [])
+            plan["read"] = {"what": "позвонить", "date": "2020-01-01", "time": "10:00", "repair": None}
+            await say(GROUP, MEMBER_TG, "Сергей", "бот напомни первого января двадцатого года")
+            with get_conn(db_path) as conn:
+                check("a time in the past — nothing is set", "уже прошло" in sent[0]["text"] and len(reminders.pending(conn, 1)) == 4)
+
+            await say(GROUP, MEMBER_TG, "Сергей", "бот какие напоминания")
+            check("«какие напоминания» lists what is pending, soonest first, each with its full date — день.месяц.год время",
+                  sent[0]["text"].count("• ") == 4 and len(re.findall(r"• \d\d\.\d\d\.\d{4} \d\d:\d\d — ", sent[0]["text"])) == 4 and "спросить Андрея про готовность" in sent[0]["text"] and f"РК-{repair_id:03d}" in sent[0]["text"])
+            await press(f"rem_cancel:{from_dm['id']}", 8600)
+            with get_conn(db_path) as conn:
+                check("«Отменить» cancels it", reminders.get(conn, from_dm["id"])["status"] == "cancelled" and {"edit": "✖️ Напоминание отменено."} in sent)
+
+            # ---- доставка
+            sent.clear()
+            check("nothing goes out before its time", await reminder_flow.deliver_due(bot) == 0 and sent == [])
+            with get_conn(db_path) as conn:
+                conn.execute("UPDATE reminders SET due_at = datetime('now', '-1 minute') WHERE id IN (?, ?)", (first["id"], tied["id"]))
+            refuse["on"] = True
+            check("if Telegram won't take it, it stays pending for the next tick", await reminder_flow.deliver_due(bot) == 0)
+            refuse["on"] = False
+            delivered = await reminder_flow.deliver_due(bot)
+            plain = next(m for m in sent if "спросить Андрея" in m["text"])
+            about = next(m for m in sent if "отдать телефон клиенту" in m["text"])
+            check("when its time comes each is posted once into its chat: the plain one into the topic it was asked in",
+                  delivered == 2 and plain["chat"] == GROUP and plain["thread"] == TOPIC and plain["reply_to"] is None
+                  and "поставил(а) Сергей" in plain["text"] and plain["buttons"] == [f"rem_snooze:{first['id']}"])
+            check("…and the one about a repair as a reply to that repair's card", about["reply_to"] == CARD and f"РК-{repair_id:03d} · Apple iPhone 13" in about["text"])
+            sent.clear()
+            check("a second tick sends nothing again", await reminder_flow.deliver_due(bot) == 0 and sent == [])
+            await press(f"rem_snooze:{first['id']}", 8700)
+            with get_conn(db_path) as conn:
+                check("«Напомнить через час» makes it pending again", reminders.get(conn, first["id"])["status"] == "pending"
+                      and any("Напомню ещё раз" in (m.get("answer") or "") for m in sent))
+
+        try:
+            asyncio.run(run())
+        finally:
+            ai_notes.parse_reminder, ai_notes.analyze = orig_parse, orig_analyze
 
 
 def main() -> None:
@@ -7307,6 +7917,7 @@ def main() -> None:
     scenario_bot_dispatch()
     scenario_repair_notes()
     scenario_bot_questions()
+    scenario_reminders()
     if os.path.exists(_WEBAPP_TEST_DB):
         os.remove(_WEBAPP_TEST_DB)
 

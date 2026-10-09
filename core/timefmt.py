@@ -20,7 +20,17 @@ def kyiv_datetime(value: str | None) -> str:
         dt = datetime.strptime(value, "%Y-%m-%d %H:%M:%S").replace(tzinfo=ZoneInfo("UTC"))
     except ValueError:
         return value
-    return dt.astimezone(KYIV).strftime("%d.%m.%Y %H:%M")
+    return dt.astimezone(KYIV).strftime(HUMAN_FORMAT)
+
+
+# The one way a moment is written for people, everywhere — the Mini App
+# and every bot message alike: день.месяц.год часы:минуты, Kyiv time.
+HUMAN_FORMAT = "%d.%m.%Y %H:%M"
+
+
+def kyiv_now_text() -> str:
+    """Right now, for a person: 'дд.мм.гггг чч:мм' in Kyiv."""
+    return datetime.now(KYIV).strftime(HUMAN_FORMAT)
 
 
 def ru_date(value: str | None) -> str:

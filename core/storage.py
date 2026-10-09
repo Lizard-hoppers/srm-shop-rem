@@ -97,6 +97,28 @@ CREATE TABLE IF NOT EXISTS repair_order_messages (
 );
 CREATE INDEX IF NOT EXISTS idx_repair_order_messages_order ON repair_order_messages(order_id);
 
+-- Напоминания (10.10): «бот, напомни завтра в 10:20 …» — a line of text
+-- the bot posts into a chat at a set time (core.reminders). due_at is UTC
+-- like every other timestamp here; chat_id/thread_id — where it goes;
+-- order_id — the repair it is about, if any (the reminder then goes out
+-- as a reply to that repair's card). status: pending → sent | cancelled.
+CREATE TABLE IF NOT EXISTS reminders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    location_id INTEGER REFERENCES locations(id),
+    chat_id TEXT NOT NULL,
+    thread_id INTEGER,
+    order_id INTEGER REFERENCES repair_orders(id),
+    text TEXT NOT NULL,
+    due_at TEXT NOT NULL,
+    staff_id INTEGER REFERENCES staff(id),
+    author_name TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    sent_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(status, due_at);
+
 -- Заметки по ремонту из рабочего чата (09.10): a text or voice message
 -- sent in reply to the repair's card (core.repair_notes). original_text
 -- is what was written / what the voice message was transcribed as;

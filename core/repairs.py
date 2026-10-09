@@ -6,6 +6,7 @@ import os
 import sqlite3
 import uuid
 
+from core import cash as _cash
 from core import clients as _clients
 from core import device_catalog as _device_catalog
 from core import documents as _documents
@@ -554,6 +555,90 @@ def change_price(conn: sqlite3.Connection, order_id: int, new_price, staff_id: i
     return old
 
 
+# ---- статус из рабочего чата (10.10) ----
+#
+# «Выдан», «готово», «взял» written in reply to a repair's card move the
+# repair right there (bot/repair_attachments.py) — no trip to the CRM.
+# Only forward: a message never drags a repair back; that is what the
+# «Вернуть» button under the bot's answer (undo_chat_status) is for.
+
+CHAT_MOVES = {
+    "new": ("in_progress", "ready", "issued", "cancelled"),
+    "in_progress": ("ready", "issued", "cancelled"),
+    "ready": ("issued", "cancelled"),
+}
+
+
+def chat_move_allowed(current: str, new_status: str | None) -> bool:
+    return new_status in CHAT_MOVES.get(current, ())
+
+
+def move_from_chat(
+    conn: sqlite3.Connection, order_id: int, new_status: str, staff_id: int | None, *,
+    account_id: int | None = None, method: str | None = None,
+) -> dict:
+    """Move a repair to `new_status` on the strength of a chat message.
+
+    «Выдан» takes the money as well, the same way the CRM's form does: the
+    whole price onto one account of the repair's точка — `account_id`, or
+    the default one for `method` ('cash' / 'card'). A repair with no price
+    is handed over with no payment. If only an estimate was on record it
+    becomes the final price — that is what the client paid.
+
+    Returns {"previous", "status", "paid", "account"}. Raises
+    RepairPartError if the move isn't a forward one, core.cash.PaymentError
+    if the account doesn't fit."""
+    repair = get_repair(conn, order_id)
+    if not repair:
+        raise RepairPartError("Ремонт не найден.")
+    previous = repair["status"]
+    if not chat_move_allowed(previous, new_status):
+        raise RepairPartError(
+            f"Ремонт в статусе «{STATUS_LABELS[previous]}» — перевести его в «{STATUS_LABELS.get(new_status, new_status)}» по сообщению нельзя."
+        )
+    paid, account_name = 0, None
+    resolved = None
+    if new_status == "issued":
+        paid = current_price(repair) or 0
+        if paid:
+            resolved = _cash.resolve_payments(
+                conn, repair["location_id"], paid, [(account_id, paid, None)] if account_id else None,
+                method if method in _cash.METHODS else "cash",
+            )
+            account_name = resolved[0]["account"]["name"]
+            if not repair["price_final"]:
+                set_price(conn, order_id, repair["price_estimate"], paid)
+    if new_status == "in_progress" and staff_id and not repair["master_id"]:
+        # Whoever says «взял» has it — if he is a master in the CRM.
+        is_master = conn.execute("SELECT 1 FROM staff WHERE id = ? AND role = 'master'", (staff_id,)).fetchone()
+        if is_master:
+            assign_master(conn, order_id, staff_id)
+    update_status(conn, order_id, new_status, staff_id, "по сообщению в рабочем чате")
+    if resolved:
+        _cash.record_payments(conn, "income", resolved, "repair_order", order_id, staff_id)
+    return {"previous": previous, "status": new_status, "paid": paid, "account": account_name}
+
+
+def undo_chat_status(conn: sqlite3.Connection, order_id: int, back_to: str, staff_id: int | None) -> str:
+    """«Вернуть»: the bot misread a message (or a person misspoke) — put
+    the repair back where it was. Undoing «Выдан» takes its payment back
+    out of the касса too (the rows are cancelled, not deleted) and, through
+    update_status, the master's accrual and the document's profit.
+    Returns the status it was in before the undo."""
+    repair = get_repair(conn, order_id)
+    if not repair or back_to not in STATUS_LABELS or back_to == repair["status"]:
+        raise RepairPartError("Возвращать уже нечего — статус с тех пор изменился.")
+    was = repair["status"]
+    if was == "issued":
+        for row in conn.execute(
+            "SELECT id FROM cash_transactions WHERE ref_type = 'repair_order' AND ref_id = ? AND cancelled_at IS NULL",
+            (order_id,),
+        ).fetchall():
+            _cash.cancel_transaction(conn, row["id"])
+    update_status(conn, order_id, back_to, staff_id, "возврат статуса из рабочего чата")
+    return was
+
+
 def set_warranty(conn: sqlite3.Connection, order_id: int, warranty_until: str | None) -> None:
     conn.execute("UPDATE repair_orders SET warranty_until = ? WHERE id = ?", (warranty_until, order_id))
 
@@ -586,9 +671,12 @@ def get_used_parts(conn: sqlite3.Connection, order_id: int) -> list[sqlite3.Row]
 # with a photo is a caption, and Telegram cuts those at 1024 characters.
 CARD_NOTES = 3
 CARD_NOTE_LEN = 110
+CARD_TEXT_LIMIT = 1000
 
 
-def render_card_text(repair: sqlite3.Row, parts: list | None = None, notes: list | None = None) -> str:
+def render_card_text(
+    repair: sqlite3.Row, parts: list | None = None, notes: list | None = None, notes_shown: int = CARD_NOTES,
+) -> str:
     """HTML-formatted staff-group/topic card for a repair — shared by the
     web panel (on intake) and the bot (after a button press edits it in
     place), so the two channels never drift apart on wording. Escapes
@@ -637,14 +725,17 @@ def render_card_text(repair: sqlite3.Row, parts: list | None = None, notes: list
 
     # What was said about this repair in the chat (core.repair_notes) —
     # the latest few, short; all of them are on the repair's page.
+    # They go out as a quote (Telegram's <blockquote>) — set apart from
+    # the card's own lines, the way quoted words are.
     if notes:
         lines.append("")
-        lines.append(f"📝 <b>Заметки ({len(notes)})</b>")
-        if len(notes) > CARD_NOTES:
-            lines.append("…")
-        for note in notes[-CARD_NOTES:]:
+        lines.append(f"📝 <b>Заметки ({len(notes)})</b>" + (" — последние:" if 0 < notes_shown < len(notes) else ""))
+        quoted = []
+        for note in (notes[-notes_shown:] if notes_shown else []):
             text = note["text"] if len(note["text"]) <= CARD_NOTE_LEN else note["text"][: CARD_NOTE_LEN - 1] + "…"
-            lines.append(f"• {html.escape(text)} — <i>{html.escape(note['author'])}</i>")
+            quoted.append(f"{html.escape(text)} — <i>{html.escape(note['author'])}</i>")
+        if quoted:
+            lines.append("<blockquote>" + "\n".join(quoted) + "</blockquote>")
 
     return "\n".join(lines)
 
@@ -652,10 +743,18 @@ def render_card_text(repair: sqlite3.Row, parts: list | None = None, notes: list
 def card(conn: sqlite3.Connection, order_id: int) -> tuple[str, dict]:
     """(text, keyboard) of a repair's card as it should look right now."""
     repair = get_repair(conn, order_id)
-    return (
-        render_card_text(repair, get_used_parts(conn, order_id), _notes.list_notes(conn, order_id)),
-        render_keyboard(order_id, repair["status"]),
-    )
+    parts, notes = get_used_parts(conn, order_id), _notes.list_notes(conn, order_id)
+    text = render_card_text(repair, parts, notes)
+    # A card with a photo is a caption, cut by Telegram at 1024 characters
+    # — and a cut that lands inside the notes' quote leaves broken markup,
+    # which Telegram rejects outright (the card would silently stop
+    # updating). So when the card runs long, it shows fewer notes rather
+    # than a broken one; all of them are on the repair's page regardless.
+    shown = CARD_NOTES
+    while notes and len(text) > CARD_TEXT_LIMIT and shown > 0:
+        shown -= 1
+        text = render_card_text(repair, parts, notes, shown)
+    return text, render_keyboard(order_id, repair["status"])
 
 
 def render_keyboard(order_id: int, status: str) -> dict:

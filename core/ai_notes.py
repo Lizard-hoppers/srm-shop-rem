@@ -37,7 +37,7 @@ _PROMPT = (
     "рабочего чата по одному ремонту. Сейчас ремонт в системе в статусе «{status}», цена для клиента: "
     "{price}.\n"
     'Верни СТРОГО JSON: {{"summary": "...", "stage": "..." или null, "status": "in_progress" | "ready" | '
-    '"issued" | "cancelled" | null, "price": <число> или null}}.\n'
+    '"issued" | "cancelled" | null, "price": <число> или null, "payment": "cash" | "card" | null}}.\n'
     "summary — то же сообщение одной короткой фразой (до 15 слов) на том же языке, на котором оно "
     "написано. Сохрани все факты: суммы, сроки, названия деталей и моделей, имена, договорённости с "
     "клиентом. Ничего не добавляй и не додумывай.\n"
@@ -58,6 +58,8 @@ _PROMPT = (
     "закупки, предоплата, сколько клиент уже заплатил, вопрос о цене, предположение («может выйти "
     "дороже») — это НЕ новая цена: null. Если цена не известна и сообщение называет только доплату — "
     "null. Сомневаешься — null.\n"
+    "payment — как клиент заплатил, если сообщение это называет: наличные, «налом», «кэш» — cash; карта, "
+    "«на карту», перевод, терминал — card. Не сказано — null.\n"
     "Ничего кроме JSON в ответе быть не должно."
 )
 
@@ -137,15 +139,17 @@ MAX_PRICE = 1_000_000
 
 
 def analyze(text: str, status_label: str = "", price=None) -> dict:
-    """What a message about a repair says, four ways:
+    """What a message about a repair says, five ways:
 
       summary  one short line (the message itself when it is already
                short, or when the model's «summary» came out longer);
       stage    where the repair stands now, in a few words — or None if
                the message isn't about that;
       status   the CRM status the message plainly points to (STATUSES) —
-               or None. A hint for a person to confirm, never applied by
-               itself: «Готов» has its own checks and «Выдан» takes money.
+               or None. The bot acts on it (core.repairs.move_from_chat)
+               and offers «Вернуть» in case this reading was wrong.
+      payment  'cash' / 'card' if the message says how the client paid —
+               what «Выдан» needs to take the money without asking.
 
       price    the repair's new full price for the client, if the message
                plainly states one (`price` passed in is the current one —
@@ -187,4 +191,53 @@ def analyze(text: str, status_label: str = "", price=None) -> dict:
         new_price = int(new_price)
     if new_price is not None and price and new_price == price:
         new_price = None
-    return {"summary": summary, "stage": stage, "status": status, "price": new_price}
+    payment = data.get("payment") if data.get("payment") in ("cash", "card") else None
+    return {"summary": summary, "stage": stage, "status": status, "price": new_price, "payment": payment}
+
+
+# ---- напоминания: «когда» и «о чём» из фразы ----
+
+_WEEKDAYS = ("понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье")
+
+_REMINDER_PROMPT = (
+    "Сотрудник мастерской просит поставить напоминание. Сейчас {now}, {weekday} (время киевское).\n"
+    'Верни СТРОГО JSON: {{"what": "...", "date": "ГГГГ-ММ-ДД" или null, "time": "ЧЧ:ММ" или null, "repair": "..." или null}}.\n'
+    "what — о чём напомнить, одной короткой фразой в повелительной форме, как запись в ежедневнике («спросить "
+    "Андрея про готовность», «отдать iPhone 13 клиенту»). Без слов «напомни», «бот», без даты и времени. Язык — "
+    "как в сообщении.\n"
+    "date — день напоминания, если он назван или следует из фразы: «завтра», «послезавтра», «в пятницу» "
+    "(ближайшая будущая), «12 числа», «12.10», «через 3 дня». Не назван — null.\n"
+    "time — время в 24-часовом виде, если названо: «в 10:20», «в три часа дня» → 15:00, «утром» → 09:00, "
+    "«вечером» → 18:00, «через 2 часа» / «через полчаса» — посчитай от текущего времени (и date, если перешло "
+    "за полночь). Назван только час («в три», «о третій дня») — минуты :00, текущие минуты не подставляй. "
+    "Не названо — null.\n"
+    "repair — если напоминание про конкретный ремонт и он назван (модель телефона, «РК-48», имя клиента) — эти "
+    "слова как есть; иначе null.\n"
+    "Ничего не выдумывай. Ничего кроме JSON в ответе быть не должно."
+)
+
+
+def parse_reminder(text: str, now) -> dict:
+    """«Напомни завтра в 10:20 спросить Андрея про готовность» →
+    {"what", "date", "time", "repair"}; date/time are None when the
+    sentence doesn't say (core.reminders.resolve_due decides what that
+    means). `now` is a Kyiv datetime — the model needs it for «завтра»,
+    «в пятницу», «через час». Raises NoteAiError if the model can't be
+    reached or answers nonsense."""
+    prompt = _REMINDER_PROMPT.format(now=now.strftime("%Y-%m-%d %H:%M"), weekday=_WEEKDAYS[now.weekday()])
+    text = " ".join((text or "").split())
+    try:
+        answer = _ask_claude(prompt, text) if os.environ.get("ANTHROPIC_API_KEY") else _ask_openai(prompt, text)
+        data = json.loads(answer[answer.index("{"): answer.rindex("}") + 1])
+    except httpx.HTTPError as exc:
+        raise NoteAiError("Не удалось связаться с моделью") from exc
+    except (KeyError, IndexError, TypeError, ValueError) as exc:
+        raise NoteAiError("Не смог разобрать ответ модели") from exc
+    if not isinstance(data, dict):
+        raise NoteAiError("Не смог разобрать ответ модели")
+
+    def _text(key: str) -> str | None:
+        value = data.get(key)
+        return _clean(value) or None if isinstance(value, str) else None
+
+    return {"what": _text("what"), "date": _text("date"), "time": _text("time"), "repair": _text("repair")}

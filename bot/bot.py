@@ -14,6 +14,7 @@ from aiogram.types import (
 )
 
 from bot.config import BOT_TOKEN, MINIAPP_URL
+from bot import reminder_flow
 from bot.assistant_chat import router as assistant_chat_router
 from bot.buyback_flow import router as buyback_flow_router
 from bot.fallback import router as fallback_router
@@ -54,6 +55,7 @@ def build_dispatcher() -> Dispatcher:
     # «Бот, …» — a question to the bot itself (bot/assistant_chat.py): ahead
     # of the note handler, so it is answered even when sent as a reply.
     dp.include_router(assistant_chat_router)
+    dp.include_router(reminder_flow.router)
     # Before quick_actions: that router ends in a catch-all for every FSM
     # state (TransferFlow's included), which would otherwise take this
     # flow's text steps first.
@@ -73,6 +75,18 @@ def build_dispatcher() -> Dispatcher:
 
 
 _ASSISTANT_TICK_SECONDS = 600
+_REMINDER_TICK_SECONDS = 30
+
+
+async def _reminder_loop(bot: Bot) -> None:
+    """Напоминания (bot/reminder_flow.py): whatever has come due is
+    posted — checked twice a minute, so «в 10:20» means 10:20."""
+    while True:
+        try:
+            await reminder_flow.deliver_due(bot)
+        except Exception:  # one bad reminder must not stop the rest, or the bot
+            logging.getLogger(__name__).exception("reminder delivery failed")
+        await asyncio.sleep(_REMINDER_TICK_SECONDS)
 
 
 async def _assistant_loop() -> None:
@@ -112,10 +126,12 @@ async def main() -> None:
     # that switched it on. The reference is kept so the task isn't
     # garbage-collected mid-flight.
     assistant_task = asyncio.create_task(_assistant_loop())
+    reminder_task = asyncio.create_task(_reminder_loop(bot))
     try:
         await dp.start_polling(bot)
     finally:
         assistant_task.cancel()
+        reminder_task.cancel()
 
 
 if __name__ == "__main__":

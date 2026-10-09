@@ -6,9 +6,10 @@ message is transcribed, a long message is cut down to one short line by a
 language model (core.ai_notes), the original is kept next to it, and the
 card — in the group and in the Mini App — shows it. The same reading
 tells where the repair stands: that becomes the card's «Стадия», and when
-the message says the status itself has moved («готово», «отдал клиенту»)
-the bot offers the one button that confirms it — it never changes a
-status on its own. Likewise a message that names a new price for the
+the message says the status itself has moved («взял», «готово», «отдал
+клиенту, оплатил картой») the bot moves it right there, money included —
+nobody goes to the CRM for it — and leaves «Вернуть» under its answer in
+case it read the message wrong. Likewise a message that names a new price for the
 repair («нашли ещё поломку, выйдет 3000») gets the question «сменить цену
 на 3000 грн?» with да / нет, and the price changes only on «да». A reply to such a
 reply lands in the same repair. Nobody has to retype anything into the
@@ -40,8 +41,10 @@ from aiogram.exceptions import TelegramAPIError
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, ReactionTypeEmoji
 
 from bot.repair_actions import _sync_after_change
+from core import accounts as core_accounts
 from core import ai_notes
 from core import auth as core_auth
+from core import cash as core_cash
 from core import documents as core_documents
 from core import photos as core_photos
 from core import repair_notes as core_notes
@@ -121,25 +124,108 @@ def _author_name(message: Message) -> str:
     return (user.full_name or user.username or str(user.id)) if user else "—"
 
 
-def _status_hint(order_id: int, current: str, suggested: str | None) -> tuple[str, InlineKeyboardMarkup] | None:
-    """The message says the repair has moved on, and the CRM doesn't know
-    yet: a line saying so and the ONE button that makes it true — the
-    same buttons the card itself carries, so every check behind them
-    applies («Готово» still asks about the part, «Выдан» still takes the
-    money in the app). The bot never changes a status off a sentence."""
+def apply_status(
+    store, order_id: int, new_status: str | None, staff, *, payment: str | None = None, account_id: int | None = None,
+) -> tuple[str, InlineKeyboardMarkup | None] | None:
+    """Act on «the repair has moved on» — from a note, from a request to
+    the assistant, or from the «как оплатили?» buttons below. Returns
+    what to say in the chat (text, keyboard), or None when there is
+    nothing to do (not a forward move from where the repair is).
+
+    The status changes right here — nobody is sent to the CRM. «Выдан»
+    takes the price into the касса: onto the account named, or by the way
+    of paying the message named; when neither is known and there is a
+    price, the bot asks ONE thing — куда оплата — with a button per
+    гривневый счёт of the точка. Under every change there is «Вернуть»:
+    a sentence can be misread, and one tap puts it back."""
     label = core_documents.label("repair", order_id)
-    step = {
-        ("new", "in_progress"): ("в работе", "🔧 Взять в работу", f"repair_take:{order_id}"),
-        ("in_progress", "ready"): ("готов", "✅ Готово", f"repair_done:{order_id}"),
-        ("in_progress", "cancelled"): ("починить не удалось", "❌ Не удалось починить", f"repair_release:{order_id}"),
-        ("in_progress", "issued"): ("уже выдан", "📲 Оформить выдачу в CRM", f"open_crm:repair:{order_id}"),
-        ("ready", "issued"): ("выдан клиенту", "📲 Оформить выдачу в CRM", f"open_crm:repair:{order_id}"),
-    }.get((current, suggested))
-    if not step:
+    staff_id = staff["id"] if staff else None
+    with get_conn(store.db_path) as conn:
+        repair = core_repairs.get_repair(conn, order_id)
+        if not repair or not core_repairs.chat_move_allowed(repair["status"], new_status):
+            return None
+        price = core_repairs.current_price(repair)
+        if new_status == "issued" and price and not payment and not account_id:
+            accounts = [a for a in core_accounts.list_accounts(conn, repair["location_id"])
+                        if a["currency"] == core_accounts.BASE_CURRENCY]
+            return (
+                f"🤖 {label}: выдаю клиенту. Как оплатили <b>{price} грн</b>?",
+                InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text=a["name"], callback_data=f"rissue:{order_id}:{a['id']}")] for a in accounts
+                ]),
+            )
+        try:
+            done = core_repairs.move_from_chat(conn, order_id, new_status, staff_id, account_id=account_id, method=payment)
+        except (core_repairs.RepairPartError, core_cash.PaymentError) as exc:
+            return f"🤖 {label}: {html.escape(str(exc))}", None
+        warn = ""
+        if new_status == "ready" and core_repairs.needs_part(conn, core_repairs.get_repair(conn, order_id)):
+            warn = "\n⚠️ Запчасть не указана — отметьте её кнопкой «⚙️ Указать запчасть» на карточке."
+    labels = core_repairs.STATUS_LABELS
+    if new_status == "issued":
+        money_line = f" · {done['paid']} грн → {html.escape(done['account'])}" if done["paid"] else " · без оплаты (цена не указана)"
+        text = f"✅ {label} выдан{money_line}"
+    else:
+        text = f"✅ {label}: {labels[done['previous']]} → <b>{labels[new_status]}</b>{warn}"
+    undo = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+        text=f"↩️ Вернуть «{labels[done['previous']]}»", callback_data=f"rundo:{order_id}:{done['previous']}",
+    )]])
+    return text, undo
+
+
+async def _callback_context(callback: CallbackQuery):
+    """(store, staff-or-None) for a button under one of the bot's own
+    messages in a work group. Anyone in the group may press these — the
+    same people whose messages move a status in the first place."""
+    store = store_for_chat_id(callback.message.chat.id)
+    if not store:
+        await callback.answer("Эта группа не привязана ни к одному магазину.", show_alert=True)
         return None
-    said, button, data = step
-    text = f"🤖 {label}: похоже, {said}, а в CRM статус «{core_repairs.STATUS_LABELS[current]}». Подтвердите:"
-    return text, InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=button, callback_data=data)]])
+    with get_conn(store.db_path) as conn:
+        return store, core_auth.get_staff_by_telegram_id(conn, callback.from_user.id)
+
+
+@router.callback_query(F.data.startswith("rissue:"))
+async def issue_paid_into(callback: CallbackQuery) -> None:
+    """An answer to «как оплатили?»: hand the repair over, the price onto this account."""
+    ctx = await _callback_context(callback)
+    if not ctx:
+        return
+    store, staff = ctx
+    _prefix, raw_order, raw_account = callback.data.split(":")
+    order_id = int(raw_order)
+    result = apply_status(store, order_id, "issued", staff, account_id=int(raw_account))
+    if not result:
+        await callback.answer("Этот ремонт уже не ждёт выдачи.", show_alert=True)
+        await callback.message.edit_reply_markup(reply_markup=None)
+        return
+    await callback.message.edit_text(result[0], reply_markup=result[1])
+    await callback.answer("Выдан")
+    _sync_after_change(order_id, store.db_path)
+
+
+@router.callback_query(F.data.startswith("rundo:"))
+async def status_undo(callback: CallbackQuery) -> None:
+    """«Вернуть» under a status the bot changed."""
+    ctx = await _callback_context(callback)
+    if not ctx:
+        return
+    store, staff = ctx
+    _prefix, raw_order, back_to = callback.data.split(":")
+    order_id = int(raw_order)
+    try:
+        with get_conn(store.db_path) as conn:
+            was = core_repairs.undo_chat_status(conn, order_id, back_to, staff["id"] if staff else None)
+    except core_repairs.RepairPartError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    labels = core_repairs.STATUS_LABELS
+    note = " Оплата снята с кассы." if was == "issued" else ""
+    await callback.message.edit_text(
+        f"↩️ {core_documents.label('repair', order_id)}: возвращён из «{labels[was]}» в <b>{labels[back_to]}</b>.{note}"
+    )
+    await callback.answer("Возвращено")
+    _sync_after_change(order_id, store.db_path)
 
 
 def _price_hint(order_id: int, status: str, old, new) -> tuple[str, InlineKeyboardMarkup] | None:
@@ -157,10 +243,11 @@ def _price_hint(order_id: int, status: str, old, new) -> tuple[str, InlineKeyboa
 
 
 async def _save_note(message: Message, store, order_id: int, kind: str, original: str, staff) -> tuple[str, list[tuple]]:
-    """Read (short version, stage, status, price), store, bring the cards
-    up to date. Returns the text the card will show and the questions the
-    message raises — «the status has moved on?» (_status_hint), «the price
-    has changed?» (_price_hint) — for a person to confirm. A model failure
+    """Read (short version, stage, status, price, payment), store, act,
+    bring the cards up to date. Returns the text the card will show and
+    what the bot has to say about it: «статус изменён» with its «Вернуть»
+    (apply_status — the status moves on the message alone), «сменить
+    цену?» (_price_hint — the price moves only on «да»). A model failure
     costs only the short version and the reading — the note itself is
     always saved."""
     with get_conn(store.db_path) as conn:
@@ -172,15 +259,18 @@ async def _save_note(message: Message, store, order_id: int, kind: str, original
         logger.warning("note for repair %s saved as it is, unread: %s", order_id, exc)
         # Nothing to cut in a short message — it is its own short version.
         read = {"summary": original if len(original) <= ai_notes.SHORT_ENOUGH else None,
-                "stage": None, "status": None, "price": None}
+                "stage": None, "status": None, "price": None, "payment": None}
     with get_conn(store.db_path) as conn:
         core_notes.add_note(
             conn, order_id, kind, original, read["summary"], staff_id=staff["id"] if staff else None,
             author_name=_author_name(message), chat_id=str(message.chat.id), message_id=message.message_id,
             stage=read["stage"], suggested_status=read["status"], suggested_price=read["price"],
         )
+    moved = apply_status(store, order_id, read["status"], staff, payment=read.get("payment"))
     _sync_after_change(order_id, store.db_path)
-    hints = [_status_hint(order_id, current, read["status"]), _price_hint(order_id, current, price, read["price"])]
+    # A price named in the same breath as «выдан» is what was paid, not a
+    # change to argue about — only an open repair is asked about its price.
+    hints = [moved, None if read["status"] in ("issued", "cancelled") else _price_hint(order_id, current, price, read["price"])]
     return read["summary"] or original, [hint for hint in hints if hint]
 
 
