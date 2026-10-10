@@ -4,6 +4,7 @@ import html
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramForbiddenError
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     BufferedInputFile,
@@ -11,12 +12,14 @@ from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
+    MenuButtonWebApp,
     Message,
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
     WebAppInfo,
 )
 
+from bot.config import MINIAPP_URL
 from bot.miniapp_links import crm_link
 from bot.quick_actions import QUICK_ACTIONS_KEYBOARD, _resolve_staff_for_dm, _shift_is_open
 from core import auth as core_auth
@@ -69,6 +72,19 @@ async def start(message: Message) -> None:
         # App directly, so a staff member always has that regardless of
         # /start. Straight to the quick-action buttons.
         await message.answer("Быстрые действия:", reply_markup=QUICK_ACTIONS_KEYBOARD)
+        # The «CRM» button next to the input field, for THIS chat. bot/bot.py
+        # also sets it as the bot's default at startup, but on the bot the
+        # CRM moved to on 10.10 (@OO7servis_bot) Telegram accepted that call
+        # and kept showing the plain commands menu — set per chat it works
+        # at once. Best effort: without it the app is still one tap away
+        # from the bot's profile.
+        try:
+            await message.bot.set_chat_menu_button(
+                chat_id=message.chat.id,
+                menu_button=MenuButtonWebApp(text="CRM", web_app=WebAppInfo(url=MINIAPP_URL)),
+            )
+        except TelegramAPIError:
+            pass
         # The day starts with opening the shift (Заход 2) — offer it right
         # here; the write actions would ask for it anyway (see
         # bot.quick_actions._shift_gate).

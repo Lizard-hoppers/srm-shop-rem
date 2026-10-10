@@ -6711,10 +6711,13 @@ def scenario_bot_dispatch() -> None:
             shifts.open_shift(conn, owner, 1)
 
         sent: list[str] = []
+        menu_buttons: list[tuple] = []
 
         class _FakeBot(Bot):
             async def __call__(self, method, request_timeout=None):
                 name = type(method).__name__
+                if name == "SetChatMenuButton":
+                    menu_buttons.append((method.chat_id, method.menu_button.type, method.menu_button.text))
                 if name.startswith("Send"):
                     sent.append(getattr(method, "text", None) or getattr(method, "caption", None) or "")
                     return Message(message_id=7000 + len(sent), date=datetime.datetime.now(),
@@ -6759,6 +6762,8 @@ def scenario_bot_dispatch() -> None:
                   handled and replies == ["Кнопки меню обновились — вот актуальные. Нажмите нужную ещё раз."])
             handled, replies = await tap("/start")
             check("/start answers", handled and "Быстрые действия:" in replies)
+            check("/start also puts the «CRM» button on this person's own chat (the bot-wide default didn't stick on the new bot)",
+                  menu_buttons and menu_buttons[-1] == (TG, "web_app", "CRM"))
             _handled, replies = await tap("что угодно", user_id=885999)
             check("a stranger's text gets nothing", replies == [])
 
