@@ -338,6 +338,15 @@ _PRICE_SAID = re.compile(
 _HIDE_NOTES = re.compile(r"(?:убери|убрать|уберите|удали|удалить|очисти|очистить|скрой|скрыть|прибери|видали)\w*\s+(?:все\s+|всі\s+)?(?:заметк|нотатк|комментар|коментар)", re.IGNORECASE)
 
 
+_SHOW_NOTES = re.compile(r"(?:верни|вернуть|верните|покажи|показать|восстанови|восстановить|поверни|покажи)\w*\s+(?:назад\s+|обратно\s+)?(?:все\s+|всі\s+)?(?:заметк|нотатк|комментар|коментар)", re.IGNORECASE)
+# «удали», «убери это», «сотри эту заметку» — said in reply to the message a note was made from.
+_REMOVE_THIS = re.compile(r"^\s*(?:удали|удалить|убери|убрать|сотри|стереть|видали|прибери)\w*(?:\s+(?:это|эту|этот|цю|це))?(?:\s+(?:заметку|запись|сообщение|нотатку|запис))?\s*[.!]?\s*$", re.IGNORECASE)
+
+
+def show_notes_said(text: str | None) -> bool:
+    return bool(_SHOW_NOTES.search(text or ""))
+
+
 def price_said(text: str | None):
     """The price a message states to a card, if that is ALL it says — else None. Zero counts."""
     match = _PRICE_SAID.match(text or "")
@@ -356,9 +365,30 @@ async def card_command(message: Message, store, order_id: int, staff, text: str)
     «сумма 3000» sets the repair's price right there (it is not filed as a
     note — the price on the card is the record), «убери заметки» takes
     the notes block off the card. Returns True if the message was one of
-    these and has been dealt with. Also reached from «бот, …» sent as a
-    reply to a card (bot/assistant_chat.py)."""
+    these and has been dealt with. «Верни заметки» puts the block back;
+    «удали» in reply to one note's own message takes just that note off.
+    Also reached from «бот, …» sent as a reply to a card
+    (bot/assistant_chat.py)."""
     label = core_documents.label("repair", order_id)
+    replied = message.reply_to_message
+    if replied and _REMOVE_THIS.match(text or ""):
+        # Only when the reply is to a message that made a note — «убери» said to the card itself is not this.
+        with get_conn(store.db_path) as conn:
+            removed = core_notes.remove_by_message(conn, str(message.chat.id), replied.message_id)
+        if removed:
+            _sync_after_change(order_id, store.db_path)
+            shown = removed["summary"] or removed["original_text"]
+            await message.reply(f"🧹 {label}: заметка убрана с карточки — «{html.escape(shown[:80])}».")
+            return True
+        # A bare «удали» said to the card itself: not a note worth keeping, and not clear enough to act on.
+        await message.reply("Что убрать? Одну заметку — ответьте «удали» на то сообщение, из которого она сделана; все сразу — «убери заметки».")
+        return True
+    if show_notes_said(text):
+        with get_conn(store.db_path) as conn:
+            back = core_notes.show_on_card(conn, order_id)
+        _sync_after_change(order_id, store.db_path)
+        await message.reply(f"📝 {label}: заметки возвращены на карточку ({back})." if back else f"{label}: скрытых заметок нет — возвращать нечего.")
+        return True
     if hide_notes_said(text):
         with get_conn(store.db_path) as conn:
             hidden = core_notes.hide_from_card(conn, order_id)
@@ -433,7 +463,7 @@ async def note_reply_to_repair(message: Message) -> None:
             await message.reply(f"Не смог расшифровать голосовое — в {label} ничего не записано. Напишите текстом.")
             return
 
-    if kind == "voice" and (price_said(original) is not None or hide_notes_said(original)):
+    if kind == "voice" and (price_said(original) is not None or hide_notes_said(original) or show_notes_said(original)):
         await message.reply(f"🎤 {html.escape(original)}")
         if await card_command(message, store, order_id, staff, original):
             return

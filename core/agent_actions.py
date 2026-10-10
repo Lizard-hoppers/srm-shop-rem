@@ -284,6 +284,15 @@ def clear_repair_notes(conn, ctx, a) -> dict:
     return {"done": True, "document": label}
 
 
+def restore_repair_notes(conn, ctx, a) -> dict:
+    repair = _repair(conn, ctx, a.get("repair"))
+    back = _notes.show_on_card(conn, repair["id"])
+    label = _documents.label("repair", repair["id"])
+    _receipt(ctx, f"📝 <b>{label}</b>: заметки возвращены на карточку ({back})" if back else f"<b>{label}</b>: скрытых заметок нет",
+             sync_repair=repair["id"])
+    return {"done": True, "document": label}
+
+
 def add_expense(conn, ctx, a) -> dict:
     _need_shift(conn, ctx)
     amount, account = _amount(a.get("amount")), _account(conn, ctx, a.get("account"))
@@ -482,6 +491,7 @@ ACTIONS: dict[str, tuple] = {
     "add_repair_note": (add_repair_note, _EVERYONE, "Записать заметку в карточку ремонта.", {"repair": _REPAIR, "text": _S}, ["repair", "text"]),
     "clear_repair_notes": (clear_repair_notes, _EVERYONE, "Убрать блок заметок с карточки ремонта в чате (заметки остаются на странице ремонта в приложении).",
         {"repair": _REPAIR}, ["repair"]),
+    "restore_repair_notes": (restore_repair_notes, _EVERYONE, "Вернуть на карточку ремонта заметки, убранные раньше.", {"repair": _REPAIR}, ["repair"]),
     "add_expense": (add_expense, _CASH, "Записать расход из кассы (аренда, зарплата, закупка, прочее).",
         {"amount": _N, "category": {"type": "string", "enum": list(_cash.EXPENSE_CATEGORIES)}, "comment": {"type": "string", "description": "на что"}, "account": _ACCOUNT}, ["amount"]),
     "cash_correction": (cash_correction, _BOSS, "Внести деньги в кассу или изъять из неё (корректировка, не расход). Нужна причина.",

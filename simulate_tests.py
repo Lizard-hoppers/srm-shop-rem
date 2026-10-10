@@ -7210,11 +7210,41 @@ def scenario_repair_notes() -> None:
             with get_conn(db_path) as conn:
                 text, _kb = repairs.card(conn, cmd_repair)
                 check("a note written afterwards shows on the card again — alone", "📝 <b>Заметки (1)</b>" in text and "перезвонить завтра" in text and "после 18" not in text)
+            # «верни заметки» и «удали» одну
+            check("«верни заметки» is recognised; a single-note «удали» only as a bare instruction",
+                  all(ra.show_notes_said(t) for t in ("Верни все заметки", "верни заметки", "покажи заметки", "восстанови комментарии"))
+                  and not any(ra.show_notes_said(t) for t in ("верни телефон клиенту", "убери заметки", None))
+                  and all(ra._REMOVE_THIS.match(t) for t in ("удали", "Убери это", "сотри эту заметку")) and not ra._REMOVE_THIS.match("удали ремонт из базы"))
+            await post(OUTSIDER_TG, "Сергей Аутсорс", 4105, text="Верни все заметки")
+            with get_conn(db_path) as conn:
+                text, _kb = repairs.card(conn, cmd_repair)
+                check("«Верни все заметки» puts back what «убери заметки» took off — and is NOT itself filed as a note (10.10: it was)",
+                      "📝 <b>Заметки (2)</b>" in text and "после 18" in text and "перезвонить завтра" in text
+                      and len(repair_notes.list_notes(conn, cmd_repair)) == 2 and "возвращены на карточку (1)" in sent[0]["text"])
+            await post(OUTSIDER_TG, "Сергей Аутсорс", 4105, text="верни заметки")
+            check("asked again, there is nothing to bring back", "возвращать нечего" in sent[0]["text"])
+            _handled, junk_msg = await post(MASTER_TG, "Эдик", 4105, text="это я не туда написал, не обращайте внимания")
+            await post(MASTER_TG, "Эдик", junk_msg, text="удали")
+            with get_conn(db_path) as conn:
+                text, _kb = repairs.card(conn, cmd_repair)
+                check("«удали» in reply to one note's own message takes just that note off the card — the others stay, and it is still on record",
+                      "не туда написал" not in text and "📝 <b>Заметки (2)</b>" in text and len(repair_notes.list_notes(conn, cmd_repair)) == 3
+                      and "заметка убрана с карточки" in sent[0]["text"])
+            await post(OUTSIDER_TG, "Сергей Аутсорс", 4105, text="убери заметки")
+            await post(OUTSIDER_TG, "Сергей Аутсорс", 4105, text="верни заметки")
+            with get_conn(db_path) as conn:
+                check("a note removed on its own stays removed through «убери» / «верни»", "не туда написал" not in repairs.card(conn, cmd_repair)[0]
+                      and "📝 <b>Заметки (2)</b>" in repairs.card(conn, cmd_repair)[0])
+            await post(MASTER_TG, "Эдик", 4105, text="удали")
+            with get_conn(db_path) as conn:
+                check("«удали» said to the card itself removes nothing and isn't filed as a note — the bot says how to do it",
+                      "📝 <b>Заметки (2)</b>" in repairs.card(conn, cmd_repair)[0] and "Что убрать?" in sent[0]["text"])
+                base_notes = len(repair_notes.list_notes(conn, cmd_repair))
             ai_notes.transcribe = lambda audio, filename="voice.ogg": "Сумма 2500"
             await post(MASTER_TG, "Эдик", 4105, voice=Voice(file_id="v", file_unique_id="u", duration=2, file_size=500))
             with get_conn(db_path) as conn:
                 check("said by voice, «сумма 2500» does the same", repairs.current_price(repairs.get_repair(conn, cmd_repair)) == 2500
-                      and len(repair_notes.list_notes(conn, cmd_repair)) == 2)
+                      and len(repair_notes.list_notes(conn, cmd_repair)) == base_notes)
 
         try:
             asyncio.run(run())
@@ -8081,6 +8111,8 @@ def scenario_agent_actions() -> None:
             result, receipts = do(keeper_row, "clear_repair_notes", repair="про мах")
             check("«бот, убери заметки с 13 про мах»: the block comes off the card, the note stays on record",
                   "заметки убраны с карточки (1)" in receipts[0]["text"] and repair_notes.card_notes(conn, repair_id) == [] and len(repair_notes.list_notes(conn, repair_id)) == 1)
+            result, receipts = do(keeper_row, "restore_repair_notes", repair="про мах")
+            check("«бот, верни заметки на 13 про мах»", "возвращены на карточку (1)" in receipts[0]["text"] and len(repair_notes.card_notes(conn, repair_id)) == 1)
             do(owner_row, "set_repair_price", repair=str(repair_id), price=0)
             check("«поставь цену 0» is allowed — free", repairs.current_price(repairs.get_repair(conn, repair_id)) == 0)
             do(owner_row, "set_repair_price", repair=str(repair_id), price=1500)

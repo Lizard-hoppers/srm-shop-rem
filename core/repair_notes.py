@@ -62,12 +62,37 @@ def card_notes(conn: sqlite3.Connection, order_id: int) -> list[sqlite3.Row]:
     return [note for note in list_notes(conn, order_id) if not note["hidden"]]
 
 
+# repair_notes.hidden: 0 — on the card; 1 — taken off by «убери заметки»
+# (comes back with «верни заметки»); 2 — one note removed on its own
+# («удали» in reply to it) — that one stays off.
+HIDDEN_ALL, REMOVED_ONE = 1, 2
+
+
 def hide_from_card(conn: sqlite3.Connection, order_id: int) -> int:
     """«Убери заметки»: every note there is now comes off the repair's
     chat card (the block disappears). They stay on the repair's page in
     the Mini App, and a note written later shows on the card again.
     Returns how many were taken off."""
-    return conn.execute("UPDATE repair_notes SET hidden = 1 WHERE order_id = ? AND hidden = 0", (order_id,)).rowcount
+    return conn.execute("UPDATE repair_notes SET hidden = ? WHERE order_id = ? AND hidden = 0", (HIDDEN_ALL, order_id)).rowcount
+
+
+def show_on_card(conn: sqlite3.Connection, order_id: int) -> int:
+    """«Верни заметки»: what «убери заметки» took off the card is back on
+    it. Notes removed one by one stay removed. Returns how many came back."""
+    return conn.execute("UPDATE repair_notes SET hidden = 0 WHERE order_id = ? AND hidden = ?", (order_id, HIDDEN_ALL)).rowcount
+
+
+def remove_by_message(conn: sqlite3.Connection, chat_id: str, message_id: int) -> sqlite3.Row | None:
+    """«Удали» said in reply to the message a note was made from: that
+    one note comes off the card for good (it is still on the repair's
+    page — nothing said about a repair is deleted). Returns the note, or
+    None if that message made no note."""
+    note = conn.execute(
+        "SELECT * FROM repair_notes WHERE chat_id = ? AND message_id = ? ORDER BY id LIMIT 1", (chat_id, message_id)
+    ).fetchone()
+    if note:
+        conn.execute("UPDATE repair_notes SET hidden = ? WHERE id = ?", (REMOVED_ONE, note["id"]))
+    return note
 
 
 def find_order_by_note_message(conn: sqlite3.Connection, chat_id: str, message_id: int) -> int | None:
