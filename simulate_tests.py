@@ -7381,6 +7381,34 @@ def scenario_bot_questions() -> None:
                   ctx["actions"] == [("repair_card", fresh), ("open_repairs", ("ready",))]
                   and agent_tools.call(conn, ctx, "send_repair_card", {"repair_id": 99999}) == {"error": "ремонт не найден"})
             check("the model is given no tool that changes anything", not any("status" in name or "price" in name or "change" in name for name in agent_tools.TOOLS))
+
+            # ---- то, чего не хватило на живых вопросах 10.10
+            oldest = agent_tools.call(conn, ctx, "find_repairs", {"sort": "oldest", "limit": 1})
+            newest = agent_tools.call(conn, ctx, "find_repairs", {"sort": "newest", "limit": 1})
+            check("«какой заказ самый старый» / «последний принятый»: repairs sorted by the day they were taken in",
+                  [r["id"] for r in oldest["repairs"]] == [fresh] and oldest["total"] == 4 and [r["id"] for r in newest["repairs"]] == [no_card])
+            stats = agent_tools.call(conn, boss, "repairs_stats", {})
+            check("«сколько ремонтов сделано за всё время и на какую сумму, кроме отменённых»: all time when no dates are given, by status, with sums for the owner",
+                  stats["period"] == "за всё время" and stats["total_taken_in"] == 66 and stats["done_and_issued"] == {"count": 1, "sum_uah": 2000}
+                  and stats["without_cancelled"] == {"count": 5, "sum_uah": 3000 + 1500 + 2000 + 400}
+                  and stats["by_status"]["Отменён"]["count"] == 61 and stats["by_status"]["В работе"] == {"count": 2, "sum_uah": 1900}
+                  and stats["first_taken_in"] is not None)
+            plain = agent_tools.call(conn, ctx, "repairs_stats", {})
+            check("…the counts for anyone, the money only for those who may see it",
+                  plain["done_and_issued"] == {"count": 1} and "sum_uah" not in plain["by_status"]["Новый"])
+            check("a period narrows it; nothing in it is zeros, not an error",
+                  agent_tools.call(conn, boss, "repairs_stats", {"date_from": "2020-01-01", "date_to": "2020-12-31"})["total_taken_in"] == 0
+                  and agent_tools.call(conn, boss, "repairs_stats", {"date_from": timefmt.kyiv_today()})["total_taken_in"] == 66)
+            totals = agent_tools.call(conn, ctx, "base_totals", {})
+            check("«сколько в базе клиентов»: totals of everything", totals["clients"] == 1 and totals["repairs_all_time"] == 67 and totals["repairs_open_now"] == 5
+                  and totals["masters"] == 1 and totals["base_kept_since"] is not None)
+            conn.execute("UPDATE repair_orders SET created_at = '2026-10-06 08:30:00' WHERE id IN (?, ?)", (fresh, working))   # вторник, 11:30 по Киеву
+            conn.execute("UPDATE repair_orders SET created_at = '2026-10-09 14:10:00' WHERE id = ?", (ready,))                    # пятница, 17:10
+            pattern = agent_tools.call(conn, ctx, "intake_pattern", {"date_from": "2026-10-05", "date_to": "2026-10-09"})
+            check("«в какое время самый большой приток»: repairs taken in by hour and weekday, Kyiv time, busiest first",
+                  pattern["repairs_counted"] == 3 and pattern["by_hour_busiest_first"][0] == {"hours": "11:00–12:00", "repairs": 2}
+                  and pattern["by_weekday_busiest_first"] == [{"day": "вторник", "repairs": 2}, {"day": "пятница", "repairs": 1}])
+            conn.execute("UPDATE repair_orders SET created_at = datetime('now') WHERE id IN (?, ?, ?)", (fresh, working, ready))
             pick = lambda text, status: tuple([r["id"] for r in group] for group in agent_tools.repairs_for_status(conn, 1, text, status))
             check("which repair a status is about is settled without the model: every word that could be a name is on the card, among repairs that can make that move",
                   pick("галакси готов", "ready") == ([working], []) and pick("13 айфон взял в работу", "in_progress") == ([fresh], [])
@@ -7982,6 +8010,16 @@ def scenario_agent_actions() -> None:
             shifts.open_shift(conn, keeper, 1)
             till = accounts.balance(conn, cash_uah)
 
+            conn.execute("UPDATE shifts SET closed_at = datetime('now') WHERE staff_id = ?", (owner,))
+            conn.execute("UPDATE shifts SET opened_at = datetime('now', '-2 days') WHERE staff_id = ?", (owner,))
+            check("yesterday's shift is not today's", "Смена сегодня не открыта" in do(owner_row, "add_expense", amount=1)[0]["refused"])
+            result, receipts = do(owner_row, "open_shift")
+            check("«открой смену»: opened, and the receipt shows the balances it opens on",
+                  result == {"done": True} and shifts.current_shift(conn, owner, 1) is not None and "Смена открыта · остатки приняты как есть" in receipts[0]["text"]
+                  and "Наличные: 12000 UAH" in receipts[0]["text"])
+            check("asked again, it just says the shift is open", do(owner_row, "open_shift")[0].get("note") == "смена сегодня уже открыта"
+                  and conn.execute("SELECT COUNT(*) AS n FROM shifts WHERE staff_id = ? AND closed_at IS NULL", (owner,)).fetchone()["n"] == 1)
+
             # ---- расход
             result, receipts = do(keeper_row, "add_expense", amount="500", category="other", comment="вода")
             doc = conn.execute("SELECT * FROM documents WHERE doc_type = 'cash_out' ORDER BY id DESC LIMIT 1").fetchone()
@@ -8099,6 +8137,19 @@ def scenario_agent_actions() -> None:
                   and "Какой документ" in do(owner_row, "cancel_document", number="что-то", reason="x")[0]["refused"])
             do(owner_row, "cancel_document", number=sale_label.lower(), reason="клиент вернул")
             check("«отмени ПД-…, клиент вернул»", documents.get_for(conn, "sale", sales.list_sales(conn)[0]["id"])["status"] == "cancelled")
+            do(keeper_row, "sell", product="кабель")
+            do(keeper_row, "sell", product="кабель", price=310)
+            live_sales = conn.execute("SELECT COUNT(*) AS n FROM documents WHERE doc_type = 'sale' AND status = 'posted'").fetchone()["n"]
+            several = do(owner_row, "cancel_document", last_of_type="sale", reason="то был тест")[0]
+            check("«удали ту продажу, то был тест» with several live sales names them and cancels none",
+                  live_sales > 1 and "Таких документов несколько: ПД-" in several["refused"]
+                  and conn.execute("SELECT COUNT(*) AS n FROM documents WHERE doc_type = 'sale' AND status = 'posted'").fetchone()["n"] == live_sales)
+            only_order = do(owner_row, "cancel_document", last_of_type="client_order", reason="то был тест")
+            check("…and with only one of that kind it is cancelled, no number needed",
+                  only_order[0].get("done") and orders.list_orders(conn, statuses=("reserved",)) == [] and "отменён · причина: то был тест" in only_order[1][0]["text"])
+            check("no reason, or a kind with nothing live, is refused",
+                  "причину" in do(owner_row, "cancel_document", last_of_type="sale", reason="")[0]["refused"]
+                  and "нет" in do(owner_row, "cancel_document", last_of_type="exchange", reason="x")[0]["refused"])
 
             # ---- не дважды; чужая точка; целостность
             ctx = ctx_for(owner_row)

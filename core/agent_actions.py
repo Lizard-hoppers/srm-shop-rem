@@ -44,6 +44,7 @@ from core import settlements as _settlements
 from core import shifts as _shifts
 from core.accounts import money
 from core.agent_tools import _REPAIR_NUMBER, _digits, matches
+from core.timefmt import kyiv_datetime
 
 _EVERYONE = ("owner", "admin", "storekeeper", "master")
 _CASH = ("owner", "admin", "storekeeper")
@@ -173,7 +174,21 @@ def _product(conn, ctx, query) -> tuple[sqlite3.Row, int | None]:
 
 def _need_shift(conn, ctx) -> None:
     if not _shifts.current_shift(conn, ctx["staff"]["id"], ctx["location_id"]):
-        raise Refused("Смена сегодня не открыта — откройте её в личке с ботом (кнопка «💵 Касса»), потом повторите.")
+        raise Refused("Смена сегодня не открыта. Сначала откройте её — действие open_shift (человеку достаточно сказать «открой смену»), потом повторите.")
+
+
+def open_shift(conn, ctx, a) -> dict:
+    """«Открой смену»: the day's shift, with the balances it opens on in
+    the receipt — the same «сверить остатки» the button shows. A
+    difference the person names goes on record as «расхождение»."""
+    if _shifts.current_shift(conn, ctx["staff"]["id"], ctx["location_id"]):
+        return {"done": True, "note": "смена сегодня уже открыта"}
+    note = " ".join(str(a.get("discrepancy") or "").split()) or None
+    _shifts.open_shift(conn, ctx["staff"]["id"], ctx["location_id"], note)
+    balances = [f"{html.escape(b['name'])}: {b['balance']} {b['currency']}" for b in _accounts.balances(conn, ctx["location_id"]) if b["balance"]]
+    _receipt(ctx, "✅ Смена открыта" + (f" · расхождение: {html.escape(note)}" if note else " · остатки приняты как есть")
+             + ("\n" + " · ".join(balances) if balances else "\nНа счетах точки пусто."))
+    return {"done": True}
 
 
 def _doc(conn, doc_type: str, ref_table: str, ref_id: int) -> sqlite3.Row | None:
@@ -414,18 +429,33 @@ _PREFIXES = {prefix.upper(): doc_type for doc_type, (prefix, _name) in _document
 
 
 def cancel_document(conn, ctx, a) -> dict:
-    match = re.fullmatch(r"\s*([А-ЯA-Zа-яa-z]{2,3})\s*-?\s*0*(\d+)\s*", str(a.get("number") or ""))
     reason = " ".join(str(a.get("reason") or "").split())
-    if not match or match.group(1).upper() not in _PREFIXES:
-        raise Refused("Какой документ отменить? Назовите номер, например ПД-12 или РКО-3.")
-    if not reason:
+    match = re.fullmatch(r"\s*([А-ЯA-Zа-яa-z]{2,3})\s*-?\s*0*(\d+)\s*", str(a.get("number") or ""))
+    names_one = (match and match.group(1).upper() in _PREFIXES) or a.get("last_of_type") in _documents.DOC_TYPES
+    if names_one and not reason:
         raise Refused("Укажите причину отмены — без неё документ не отменяется.")
-    prefix, number = match.group(1).upper(), int(match.group(2))
-    docs = conn.execute("SELECT * FROM documents WHERE number = ? AND doc_type IN ({})".format(
-        ",".join("?" for _ in _documents.DOC_TYPES)), [number, *_documents.DOC_TYPES]).fetchall()
-    docs = [d for d in docs if _documents.DOC_TYPES[d["doc_type"]][0].upper() == prefix]
-    if len(docs) != 1:
-        raise Refused(f"Документ {prefix}-{number:03d} не найден." if not docs else f"{prefix}-{number:03d} — таких документов несколько, отмените в журнале приложения.")
+    if match and match.group(1).upper() in _PREFIXES:
+        prefix, number = match.group(1).upper(), int(match.group(2))
+        docs = conn.execute("SELECT * FROM documents WHERE number = ? AND doc_type IN ({})".format(
+            ",".join("?" for _ in _documents.DOC_TYPES)), [number, *_documents.DOC_TYPES]).fetchall()
+        docs = [d for d in docs if _documents.DOC_TYPES[d["doc_type"]][0].upper() == prefix]
+        if len(docs) != 1:
+            raise Refused(f"Документ {prefix}-{number:03d} не найден." if not docs else f"{prefix}-{number:03d} — таких документов несколько, отмените в журнале приложения.")
+    elif a.get("last_of_type") in _documents.DOC_TYPES:
+        # «удали ту продажу, это был тест» — the latest live document of
+        # that kind at this точка; several to choose from are listed, not guessed.
+        live = conn.execute(
+            "SELECT * FROM documents WHERE doc_type = ? AND status = 'posted' AND location_id = ? ORDER BY created_at DESC, id DESC LIMIT 5",
+            (a["last_of_type"], ctx["location_id"]),
+        ).fetchall()
+        if not live:
+            raise Refused(f"Проведённых документов «{_documents.type_name(a['last_of_type'])}» нет.")
+        if len(live) > 1:
+            listing = "; ".join(f"{_documents.doc_label(d)} от {kyiv_datetime(d['created_at'])}" + (f" на {d['amount']} грн" if d["amount"] else "") for d in live)
+            raise Refused(f"Таких документов несколько: {listing}. Назовите номер того, который отменить.")
+        docs = live[:1]
+    else:
+        raise Refused("Какой документ отменить? Назовите номер, например ПД-12 или РКО-3.")
     try:
         _doc_cancel.cancel_document(conn, docs[0]["id"], ctx["staff"]["id"], reason)
     except _documents.DocumentError as exc:
@@ -467,7 +497,12 @@ ACTIONS: dict[str, tuple] = {
     "reserve_for_client": (reserve_for_client, _EVERYONE, "Отложить товар за клиентом на 24 часа (заказ с резервом).",
         {"product": _PRODUCT, "qty": {"type": "integer"}, "price": _N, **_CLIENT}, ["product", "client_phone"]),
     "add_client": (add_client, _EVERYONE, "Записать нового клиента.", {"name": _S, "phone": _S}, ["name", "phone"]),
-    "cancel_document": (cancel_document, _BOSS, "Отменить проведённый документ по номеру (ПД-12, РКО-3…). Нужна причина.", {"number": _S, "reason": _S}, ["number", "reason"]),
+    "cancel_document": (cancel_document, _BOSS,
+        "Отменить (удалить) проведённый документ: продажу, расход, корректировку… Нужна причина («это был тест» — причина). "
+        "Номер назван — number («ПД-12»). Не назван («удали ту продажу») — last_of_type с типом документа.",
+        {"number": _S, "last_of_type": {"type": "string", "enum": list(_doc_cancel.CANCELLABLE_TYPES)}, "reason": _S}, ["reason"]),
+    "open_shift": (open_shift, _EVERYONE, "Открыть смену на сегодня (нужна для операций с деньгами). discrepancy — если человек назвал расхождение в остатках.",
+        {"discrepancy": _S}, []),
 }
 
 

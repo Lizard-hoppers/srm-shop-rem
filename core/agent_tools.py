@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+from datetime import datetime
 
 from core import accounts as _accounts
 from core import cash as _cash
@@ -32,7 +33,7 @@ from core import repair_notes as _notes
 from core import repairs as _repairs
 from core import sales as _sales
 from core import settlements as _settlements
-from core.timefmt import kyiv_date_range_utc, kyiv_datetime, kyiv_today, ru_date
+from core.timefmt import KYIV, UTC, kyiv_date_range_utc, kyiv_datetime, kyiv_today, ru_date
 
 MAX_ROWS = 25
 MAX_CARDS = 5
@@ -106,6 +107,89 @@ def _score(query: str, *fields) -> int:
     return sum(any(word.startswith(token) for word in haystack) for token in _tokens(query))
 
 
+def _range(args: dict) -> tuple[str | None, str | None, str]:
+    """(utc_start, utc_end, text) for a tool where NO dates means «за всё
+    время» — unlike _period, whose default is today."""
+    if not args.get("date_from") and not args.get("date_to"):
+        return None, None, "за всё время"
+    today = kyiv_today()
+    date_from, date_to = args.get("date_from") or "2000-01-01", args.get("date_to") or today
+    try:
+        start, end = kyiv_date_range_utc(date_from, date_to)
+    except ValueError:
+        return None, None, "за всё время"
+    return start, end, _period_text(date_from, date_to) if args.get("date_from") else f"по {ru_date(date_to)}"
+
+
+def repairs_stats(conn, ctx, args) -> dict:
+    """Counts and sums of repairs by status — over a period (by the day
+    they were taken in) or, with no dates, over all time."""
+    start, end, period = _range(args)
+    rows = [r for r in _repairs.list_repairs(conn, location_id=_scope(ctx, args))
+            if (start is None or start <= r["created_at"] < end)]
+    by_status = {}
+    for row in rows:
+        bucket = by_status.setdefault(_repairs.STATUS_LABELS[row["status"]], {"count": 0, "sum_uah": 0})
+        bucket["count"] += 1
+        bucket["sum_uah"] += _repairs.current_price(row) or 0
+    alive = [r for r in rows if r["status"] != "cancelled"]
+    issued = [r for r in rows if r["status"] == "issued"]
+    dates = sorted(r["created_at"] for r in rows)
+    result = {
+        "period": period, "total_taken_in": len(rows), "by_status": by_status,
+        "done_and_issued": {"count": len(issued)}, "without_cancelled": {"count": len(alive)},
+        "first_taken_in": kyiv_datetime(dates[0]) if dates else None, "last_taken_in": kyiv_datetime(dates[-1]) if dates else None,
+    }
+    if ctx["can_money"]:
+        result["done_and_issued"]["sum_uah"] = sum(_repairs.current_price(r) or 0 for r in issued)
+        result["without_cancelled"]["sum_uah"] = sum(_repairs.current_price(r) or 0 for r in alive)
+    else:
+        for bucket in by_status.values():
+            bucket.pop("sum_uah")
+    return result
+
+
+def base_totals(conn, ctx, args) -> dict:
+    """How much of everything there is: clients, repairs, sales, products."""
+    one = lambda sql, *params: conn.execute(sql, params).fetchone()[0]  # noqa: E731
+    first = one("SELECT MIN(created_at) FROM documents")
+    return {
+        "clients": one("SELECT COUNT(*) FROM clients"),
+        "repairs_all_time": one("SELECT COUNT(*) FROM repair_orders"),
+        "repairs_open_now": one("SELECT COUNT(*) FROM repair_orders WHERE status NOT IN ('issued', 'cancelled')"),
+        "sales_all_time": one("SELECT COUNT(*) FROM sales_orders WHERE status != 'cancelled'"),
+        "phones_bought": one("SELECT COUNT(*) FROM buyback_orders"),
+        "products_in_catalog": one("SELECT COUNT(*) FROM products WHERE active = 1"),
+        "masters": one("SELECT COUNT(*) FROM staff WHERE role = 'master' AND active = 1"),
+        "base_kept_since": kyiv_datetime(first) if first else None,
+    }
+
+
+_WEEKDAY_NAMES = ("понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье")
+
+
+def intake_pattern(conn, ctx, args) -> dict:
+    """When clients bring devices in: repairs taken in by hour of the day
+    and by weekday (Kyiv time) — busiest first."""
+    start, end, period = _range(args)
+    hours, weekdays, total = {}, {}, 0
+    for row in _repairs.list_repairs(conn, location_id=_scope(ctx, args)):
+        if start is not None and not start <= row["created_at"] < end:
+            continue
+        try:
+            local = datetime.strptime(row["created_at"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC).astimezone(KYIV)
+        except ValueError:
+            continue
+        total += 1
+        hours[local.hour] = hours.get(local.hour, 0) + 1
+        weekdays[local.weekday()] = weekdays.get(local.weekday(), 0) + 1
+    return {
+        "period": period, "repairs_counted": total,
+        "by_hour_busiest_first": [{"hours": f"{h:02d}:00–{h + 1:02d}:00", "repairs": n} for h, n in sorted(hours.items(), key=lambda kv: -kv[1])][:8],
+        "by_weekday_busiest_first": [{"day": _WEEKDAY_NAMES[d], "repairs": n} for d, n in sorted(weekdays.items(), key=lambda kv: -kv[1])],
+    }
+
+
 def find_repairs(conn, ctx, args) -> dict:
     query, status = args.get("query") or "", args.get("status")
     found, partial = [], []
@@ -124,8 +208,11 @@ def find_repairs(conn, ctx, args) -> dict:
         elif query and _score(query, *fields):
             partial.append((_score(query, *fields), row))
     if found or not partial:
-        ctx["last_found"] = [r["id"] for r in found]
-        return {"total": len(found), "repairs": [_repair_row(conn, ctx, r) for r in found[:MAX_ROWS]]}
+        # «самый старый» / «последний»: by the day it was taken in.
+        found.sort(key=lambda r: (r["created_at"], r["id"]), reverse=args.get("sort") != "oldest")
+        shown = found[: max(1, min(int(args.get("limit") or MAX_ROWS), MAX_ROWS))]
+        ctx["last_found"] = [r["id"] for r in (shown if args.get("limit") else found)]
+        return {"total": len(found), "repairs": [_repair_row(conn, ctx, r) for r in shown]}
     # Cards are filled in by hand — «13 про мах» with no brand is an
     # iPhone to everyone in the shop. Nothing matched every word, so the
     # closest ones go back, marked as such, for the model to weigh.
@@ -384,14 +471,29 @@ _DATES = {
     "date_from": {"type": "string", "description": "начало периода, ГГГГ-ММ-ДД (по умолчанию сегодня)"},
     "date_to": {"type": "string", "description": "конец периода включительно, ГГГГ-ММ-ДД (по умолчанию сегодня)"},
 }
+_DATES_OPTIONAL = {
+    "date_from": {"type": "string", "description": "начало периода, ГГГГ-ММ-ДД; не передавай, если спрашивают «за всё время» / «всего»"},
+    "date_to": {"type": "string", "description": "конец периода включительно, ГГГГ-ММ-ДД"},
+}
 _ALL = {"all_points": {"type": "boolean", "description": "по всем точкам сразу (только владельцу/админу)"}}
 
 TOOLS: dict[str, tuple] = {
     "find_repairs": (find_repairs, False,
-        "Найти ремонты по модели устройства, имени или телефону клиента, номеру РК. Без query — все. "
-        "По умолчанию только невыданные; include_closed=true — и выданные с отменёнными.",
+        "Найти ремонты (их часто называют «заказы») по модели устройства, имени или телефону клиента, номеру РК. "
+        "Без query — все. По умолчанию только невыданные; include_closed=true — и выданные с отменёнными. "
+        "«Самый старый» — sort=oldest, limit=1; «последний» — sort=newest, limit=1 (спрашивают про «вообще последний "
+        "принятый/первый за всё время» — добавь include_closed=true).",
         {"query": {"type": "string", "description": "модель («iPhone 13»), имя, телефон или «РК-48»"},
-         "status": _STATUS_ENUM, "include_closed": {"type": "boolean"}, **_ALL}, []),
+         "status": _STATUS_ENUM, "include_closed": {"type": "boolean"},
+         "sort": {"type": "string", "enum": ["newest", "oldest"]}, "limit": {"type": "integer"}, **_ALL}, []),
+    "repairs_stats": (repairs_stats, False,
+        "Статистика ремонтов: сколько всего принято, сколько сделано и выдано, сколько по каждому статусу и на "
+        "какую сумму. БЕЗ дат — за всё время; с датами — за период.", {**_DATES_OPTIONAL, **_ALL}, []),
+    "base_totals": (base_totals, False,
+        "Сколько всего в базе: клиентов, ремонтов, продаж, купленных телефонов, товаров, мастеров; с какого дня ведётся база.", {}, []),
+    "intake_pattern": (intake_pattern, False,
+        "В какие часы и дни недели приносят устройства в ремонт (приток клиентов). Без дат — за всё время.",
+        {**_DATES_OPTIONAL, **_ALL}, []),
     "get_repair": (get_repair, False, "Всё об одном ремонте: клиент, неисправность, запчасти, заметки из чата.",
         {"repair_id": {"type": "integer"}}, ["repair_id"]),
     "show_open_repairs": (show_open_repairs, False,
@@ -407,7 +509,8 @@ TOOLS: dict[str, tuple] = {
         {"client_id": {"type": "integer"}}, ["client_id"]),
     "find_products": (find_products, False, "Товары и запчасти на складе: остаток, цена, IMEI. Поиск по названию, артикулу, IMEI.",
         {"query": {"type": "string"}, "only_in_stock": {"type": "boolean"}, **_ALL}, []),
-    "client_orders": (client_orders, False, "Заказы клиентов с резервом товара (отложено на 24 часа).", {}, []),
+    "client_orders": (client_orders, False,
+        "Только резервы ТОВАРА (товар отложен за клиентом на 24 часа). Это НЕ ремонты: про ремонты и «заказы» на ремонт — find_repairs.", {}, []),
     "problems": (problems, False, "Что ждёт человека: ремонты без запчасти, непринятые перемещения, истёкшие резервы и т.п.",
         {**_ALL}, []),
     "activity": (activity, False, "Счётчики за период: принято и выдано ремонтов, продаж, покупок телефонов.",

@@ -36,6 +36,8 @@ MAX_ANSWER = 3500
 _SYSTEM = (
     "Ты — помощник в рабочем чате мастерской и магазина электроники «{point}». К тебе обращаются сотрудники "
     "словом «бот». Сейчас {now} по Киеву (для аргументов инструментов сегодняшняя дата — {today}).\n"
+    "Словом «заказ» здесь почти всегда называют РЕМОНТ (find_repairs, repairs_stats), а не резерв товара. "
+    "Вопросы «сколько всего», «за всё время» — repairs_stats / base_totals без дат.\n"
     "Отвечай ТОЛЬКО по данным инструментов. Нужных данных нет или инструмент вернул пусто — так и скажи, "
     "ничего не выдумывай: ни ремонтов, ни сумм, ни имён. Сомневаешься, что именно ищут, — сначала поищи "
     "шире (другое написание модели, без лишних слов), потом ответь.\n"
@@ -61,7 +63,8 @@ _ACTIONS_YES = (
     "или товар — НЕ выдумывай, спроси одной короткой фразой;\n"
     "• инструмент ответил refused — ничего не сделано: передай человеку причину или вопрос из ответа как есть;\n"
     "• одно действие — один вызов; не повторяй вызов, который уже прошёл;\n"
-    "• «расход» — add_expense; «внести/изъять из кассы» — cash_correction; «клиент принёс/отдал долг, аванс» — "
+    "• смена не открыта, а просят денежное действие — сам открой её (open_shift) и продолжай;\n"
+    "• «расход» — add_expense; «внести/положить/пополнить счёт, изъять из кассы» — cash_correction; «клиент принёс/отдал долг, аванс» — "
     "client_money in; «вернуть клиенту» — client_money out."
 )
 _ACTIONS_NO = ("Действий в учёте (записать расход, принять ремонт, продать) ты для этого человека не выполняешь: "
@@ -155,7 +158,11 @@ def ask(conn: sqlite3.Connection, question: str, *, location_id: int, point_name
             except ValueError:
                 args = {}
             result = (agent_actions.run if name in agent_actions.ACTIONS else agent_tools.call)(conn, ctx, name, args)
-            logger.info("agent tool %s(%s)", name, json.dumps(args, ensure_ascii=False)[:200])
+            # What was asked for AND what came of it — «он не смог» is
+            # diagnosed from this line (10.10: the log had only the call).
+            outcome = "refused: " + str(result["refused"])[:160] if isinstance(result, dict) and result.get("refused") else (
+                "error: " + str(result["error"])[:160] if isinstance(result, dict) and result.get("error") else "ok")
+            logger.info("agent tool %s(%s) -> %s", name, json.dumps(args, ensure_ascii=False)[:200], outcome)
             messages.append({"role": "tool", "tool_call_id": call.get("id"),
                              "content": json.dumps(result, ensure_ascii=False, default=str)[:6000]})
     raise AgentError("Слишком длинный разбор — уточните вопрос")

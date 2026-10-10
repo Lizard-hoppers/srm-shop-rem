@@ -360,7 +360,7 @@ async def _handle(message: Message, store, staff, question: str) -> None:
         else:
             await message.reply("ИИ сейчас недоступен — попробуйте через минуту.\n\n" + _HELP)
         return
-    logger.info("assistant: %r -> %d chars, actions %s, done %d", question[:80], len(text), actions, len(receipts))
+    logger.info("assistant: %r -> %r, actions %s, done %d", question[:120], text[:300], actions, len(receipts))
     _remember(message.chat.id, user_id, question, text)
     if text:
         await message.reply(to_html(text), link_preview_options=_NO_PREVIEW)
