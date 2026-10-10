@@ -49,7 +49,9 @@ a { color: var(--accent); text-decoration: none; }
   align-items: center;
   justify-content: space-between;
   gap: 14px;
-  padding: calc(env(safe-area-inset-top, 0px) + 14px) 18px 12px;
+  /* --tg-top: room for the status bar and Telegram's own controls when
+     the app is fullscreen inside Telegram (telegram-fullscreen.js); 0 otherwise. */
+  padding: calc(max(env(safe-area-inset-top, 0px), var(--tg-top, 0px)) + 14px) 18px 12px;
   background: color-mix(in srgb, var(--bg) 88%, transparent);
   backdrop-filter: blur(14px);
   -webkit-backdrop-filter: blur(14px);
@@ -78,7 +80,7 @@ a { color: var(--accent); text-decoration: none; }
   left: 0; right: 0; bottom: 0;
   display: flex;
   justify-content: space-around;
-  padding: 8px 6px calc(env(safe-area-inset-bottom, 0px) + 8px);
+  padding: 8px 6px calc(max(env(safe-area-inset-bottom, 0px), var(--tg-bottom, 0px)) + 8px);
   background: color-mix(in srgb, var(--panel) 82%, transparent);
   backdrop-filter: blur(18px);
   -webkit-backdrop-filter: blur(18px);
@@ -101,7 +103,9 @@ a { color: var(--accent); text-decoration: none; }
 
 /* ---- layout ---- */
 
-.container { max-width: 640px; margin: 0 auto; padding: 18px 16px calc(env(safe-area-inset-bottom, 0px) + 96px); }
+.container { max-width: 640px; margin: 0 auto; padding: 18px 16px calc(max(env(safe-area-inset-bottom, 0px), var(--tg-bottom, 0px)) + 96px); }
+/* A page with no top bar of its own (the boot screen, a login) must not sit under Telegram's controls either. */
+body:not(:has(.appbar)) .container { padding-top: calc(var(--tg-top, 0px) + 18px); }
 
 h1 { font-size: 21px; margin: 0 0 16px; font-weight: 800; letter-spacing: -0.01em; }
 h2 { font-size: 15px; margin: 28px 0 12px; font-weight: 700; }

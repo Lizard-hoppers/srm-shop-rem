@@ -981,6 +981,29 @@ U+FE0F) подаётся настоящему диспетчеру из `bot.bot
 инструмента (`-> ok / refused: … / error: …`), а не только факт вызова.
 `journalctl -u crm_bot | grep -E "assistant:|agent tool"`.
 
+## Приложение на весь экран в Telegram (10.10)
+
+Павел: «делаем полноценное приложение на весь экран, а не как сейчас».
+`webapp/static/telegram-fullscreen.js` (подключён в `<head>` каждой
+страницы и экрана входа `/miniapp`): `expand()` везде; на телефонах и
+планшетах (iOS/Android, клиент с Bot API 8.0+) — `requestFullscreen()`,
+шапка Telegram исчезает; `disableVerticalSwipes()` — свайп вниз листает
+страницу, а не закрывает приложение посреди формы. В полноэкранном режиме
+страница идёт под статус-бар и плавающие кнопки Telegram — их высота
+(`safeAreaInset + contentSafeAreaInset`) кладётся в `--tg-top` /
+`--tg-bottom`, а `style.css` прибавляет её к шапке и нижней панели. Вне
+Telegram и на старых клиентах обе переменные 0 — вёрстка прежняя. На
+десктопе полноэкранный режим намеренно не запрашивается (он развернул бы
+само окно Telegram на весь монитор).
+
+**BotFather — «Main Mini App»** (делает Павел, один раз): @BotFather →
+/mybots → бот → Bot Settings → Configure Mini App → Enable Mini App → URL
+`https://crm.45.94.156.136.sslip.io/miniapp`. После этого у бота
+появляется кнопка «Открыть» в профиле и в списке чатов и прямая ссылка
+`https://t.me/<бот>?startapp`. Кнопка-меню «CRM» в чате с ботом ставится
+кодом (`bot/bot.py`, `set_chat_menu_button`) на тот же адрес — её
+настраивать не нужно. Адрес берётся из `CRM_MINIAPP_URL` в `.env`.
+
 ## Статус по фазам (план: `.claude/plans/fancy-greeting-pearl.md` у Павла)
 
 - [x] Фаза 0 — каркас: схема БД (`core/storage.py`), staff-аккаунты,

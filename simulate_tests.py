@@ -2323,6 +2323,17 @@ def scenario_webapp_forms(db_path: str) -> None:
         check("settings page offers both language options",
               "Русский" in settings_resp.text and "Українська" in settings_resp.text)
 
+        shell = client.get(f"/?t={token}").text
+        head = shell.split("</head>")[0]
+        check("every page asks Telegram for the full screen before it paints (the script is in <head>, after Telegram's own)",
+              "/static/telegram-fullscreen.js" in head and head.index("telegram-web-app.js") < head.index("telegram-fullscreen.js")
+              and "/static/telegram-fullscreen.js" in client.get("/miniapp").text.split("</head>")[0])
+        script = client.get("/static/telegram-fullscreen.js").text
+        check("it expands everywhere, goes fullscreen on phones only, keeps a swipe from closing the app, and reports the room Telegram's controls take",
+              all(x in script for x in ("tg.expand()", "requestFullscreen", 'tg.platform === "ios" || tg.platform === "android"',
+                                        "disableVerticalSwipes", "--tg-top", "contentSafeAreaInset")) and "if (!tg || !tg.initData) return;" in script)
+        css = client.get("/static/style.css").text
+        check("the header and the tab bar leave that room; outside Telegram it is zero", "var(--tg-top, 0px)" in css and "var(--tg-bottom, 0px)" in css)
         dash_before_lang = client.get(f"/?t={token}")
         check("dashboard defaults to Russian nav labels", "Ремонты" in dash_before_lang.text)
 
