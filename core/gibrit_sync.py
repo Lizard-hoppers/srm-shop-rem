@@ -15,6 +15,10 @@ ext_id = его card_id.
     (core.repairs.settle пропускает ext_source);
   * карточек в Telegram — их шлёт сам бот Гибрида в свои группы.
 
+Фото устройства бот сохраняет у себя на сервере (orders.photo_path, с
+11.10) — оно копируется в фото устройства CRM. У заказов до этой даты
+фото есть только в сообщениях Telegram, сюда они не попадают.
+
 Цифры берутся как в таблице бота: цена выдачи (E), закупка запчасти (F,
 manual_parts_cost), выплата мастеру (K, manual_master_pay — введённая
 руками либо (E−F)/3 для «Штат 33%»). Прибыль фирмы считает CRM по своей
@@ -27,6 +31,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
@@ -131,6 +136,9 @@ def _estimate_created(orders: list) -> dict[int, datetime]:
 
 def _signature(order) -> str:
     payload = [_SIG_VERSION] + [_col(order, field) for field in _SIG_FIELDS]
+    # Только когда фото есть: иначе появление самой колонки пересобрало бы всю историю.
+    if _col(order, "photo_path"):
+        payload.append(_col(order, "photo_path"))
     return hashlib.sha1(json.dumps(payload, ensure_ascii=False).encode()).hexdigest()
 
 
@@ -226,6 +234,25 @@ def _target(order, created: dict[int, datetime]) -> dict:
     }
 
 
+def _attach_photo(conn: sqlite3.Connection, order, device_id: int) -> None:
+    """Фото, которое бот сохранил на сервере, становится фото устройства —
+    один раз: уже стоящее фото не заменяется."""
+    path = (_col(order, "photo_path") or "").strip()
+    if not path:
+        return
+    if conn.execute("SELECT photo_path FROM devices WHERE id = ?", (device_id,)).fetchone()["photo_path"]:
+        return
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except OSError:
+        return
+    if not data:
+        return
+    filename = _repairs.write_device_photo(device_id, data, os.path.splitext(path)[1] or ".jpg")
+    _repairs.set_device_photo(conn, device_id, filename)
+
+
 def _write(conn: sqlite3.Connection, order, existing, location_id: int, created: dict, masters: dict, kinds: dict) -> None:
     target = _target(order, created)
     client_id = _client_id(conn, order)
@@ -272,7 +299,7 @@ def _write(conn: sqlite3.Connection, order, existing, location_id: int, created:
             created_at=target["created_at"],
         )
     else:
-        order_id = existing["id"]
+        order_id, device_id = existing["id"], existing["device_id"]
         conn.execute(
             f"UPDATE repair_orders SET {', '.join(f'{c} = ?' for c in values)} WHERE id = ?",
             [*values.values(), order_id],
@@ -291,6 +318,7 @@ def _write(conn: sqlite3.Connection, order, existing, location_id: int, created:
                 "VALUES (?, ?, NULL, 'Из бота «Гибрид сервис»')",
                 (order_id, status),
             )
+    _attach_photo(conn, order, device_id)
     # Прибыль документа — только у выданного (см. core.repairs.settle;
     # начисление мастеру для ext_source там пропускается).
     if status == "issued":

@@ -8819,7 +8819,7 @@ def scenario_gibrit_sync() -> None:
             "purchase_price TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT '', supplier TEXT NOT NULL DEFAULT '', "
             "master_pay TEXT, master TEXT NOT NULL DEFAULT '', master_type TEXT NOT NULL DEFAULT '', comment TEXT NOT NULL DEFAULT '', "
             "card_id_executor TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, "
-            "device_model TEXT, problem TEXT, device_password TEXT, created_by TEXT, photo_file_id TEXT)"
+            "device_model TEXT, problem TEXT, device_password TEXT, created_by TEXT, photo_file_id TEXT, photo_path TEXT)"
         )
         src.commit()
         src.close()
@@ -8960,6 +8960,23 @@ def scenario_gibrit_sync() -> None:
             check("the totals for reconciling with the bot's table add up",
                   (totals["n"], totals["issued"], totals["cancelled"], totals["open"], totals["revenue"], totals["parts"], totals["master_pay"], totals["profit"])
                   == (8, 3, 1, 4, 1900, 650, 450, 800))
+
+            # ---- фото: бот хранит файл у себя на сервере, CRM забирает его в фото устройства
+            shot = os.path.join(tmp, "104.jpg")
+            Image.new("RGB", (40, 30), (200, 10, 10)).save(shot, "JPEG")
+            put(source, 104, client_name="Наш", title="Poco X3 экран", status="новый", master="Алексей", master_type="Штат фикс", photo_path=shot)
+            put(source, 106, client_name="Без Телефона", phone="не помню", title="Nokia 2", status="новый", master="", master_type="",
+                photo_path=os.path.join(tmp, "нет-такого.jpg"))
+            with_photo = gibrit_sync.sync(conn, gibrit_sync.read_source(source))
+            pictured = repairs.get_repair(conn, conn.execute("SELECT id FROM repair_orders WHERE ext_id = 104").fetchone()["id"])
+            check("an order whose photo the bot saved gets it as the device photo in CRM",
+                  with_photo["updated"] == 2 and bool(pictured["device_photo_path"])
+                  and os.path.getsize(os.path.join(repairs.PHOTO_DIR, pictured["device_photo_path"])) > 0)
+            check("a photo path with no file behind it is not a crash — the repair just has no photo",
+                  repairs.get_repair(conn, conn.execute("SELECT id FROM repair_orders WHERE ext_id = 106").fetchone()["id"])["device_photo_path"] is None)
+            check("orders without a photo (the whole history) are left alone, and the photo is not copied twice",
+                  gibrit_sync.sync(conn, gibrit_sync.read_source(source))["unchanged"] == 8
+                  and repairs.get_repair(conn, pictured["id"])["device_photo_path"] == pictured["device_photo_path"])
 
             # ---- своя жизнь CRM не задета
             store_1 = SimpleNamespace(db_path=db_path, location_id=1)
