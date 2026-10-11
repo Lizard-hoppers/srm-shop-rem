@@ -31,10 +31,14 @@ _MONEY_ROLES = ("owner", "admin")
 _JOURNAL_TAIL = 8
 
 
+ALL_TIME_FROM = "2020-01-01"
+
+
 def period_dates(period: str, date_from: str = "", date_to: str = "") -> tuple[str, str, str]:
     """(period, date_from, date_to) as inclusive Kyiv dates. An explicit,
     valid date range wins («custom»); otherwise день / неделя (the last 7
-    days) / месяц (from the 1st)."""
+    days) / месяц (from the 1st) / всё время («all» — from ALL_TIME_FROM,
+    a date before the business kept any records here)."""
     today = kyiv_today()
     if date_from and date_to:
         try:
@@ -47,6 +51,8 @@ def period_dates(period: str, date_from: str = "", date_to: str = "") -> tuple[s
         return "week", start, today
     if period == "month":
         return "month", today[:8] + "01", today
+    if period == "all":
+        return "all", ALL_TIME_FROM, today
     return "day", today, today
 
 

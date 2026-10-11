@@ -28,7 +28,7 @@ from core.accounts import money
 # Кассовые расходы that reduce profit (see the module docstring for what doesn't).
 OPERATING_CATEGORIES = ("rent", "salary", "other")
 
-PERIODS = ("day", "week", "month")
+PERIODS = ("day", "week", "month", "all")
 
 
 def _loc(column: str, location_id: int | None) -> tuple[str, list]:

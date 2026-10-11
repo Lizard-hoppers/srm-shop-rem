@@ -6671,6 +6671,13 @@ def scenario_overview() -> None:
                                           "Чистая прибыль", "Долги", "Анна", "Борис", "Эдик", "Последние документы")))
             check("problems link to where they are fixed", "/orders?" in home and "/repairs?" in home)
             all_points = client.get(f"/?period=month&point=all&t={token}").text
+            # 11.10: четвёртая кнопка периода — «Всё время».
+            all_time = client.get(f"/?period=all&point=all&t={token}")
+            check("the period filter offers «Всё время», and the page for it opens",
+                  "period=all" in all_points and "Всё время" in all_points and all_time.status_code == 200)
+            all_time_profit = client.get(f"/profit?period=all&point=all&t={token}")
+            check("«Чистая прибыль» for it says «всё время» instead of a made-up start date",
+                  all_time_profit.status_code == 200 and "· всё время" in all_time_profit.text and "2020" not in all_time_profit.text)
             check("«Все точки» adds the other точка's problem", "перемещений товара в пути" in all_points and "перемещений товара в пути" not in home)
             keeper_home = client.get(f"/?point=all&t={keeper_token}").text
             check("a non-owner sees problems and sections of their точка, but no money, no долги and no точка switch",

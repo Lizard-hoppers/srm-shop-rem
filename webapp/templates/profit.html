@@ -8,14 +8,14 @@
 <form method="get" class="search-bar">
   <input type="hidden" name="t" value="{{ token }}">
   <input type="hidden" name="point" value="{{ point }}">
-  <input type="date" name="date_from" value="{{ date_from }}">
-  <input type="date" name="date_to" value="{{ date_to }}">
+  <input type="date" name="date_from" value="{{ '' if period == 'all' else date_from }}">
+  <input type="date" name="date_to" value="{{ '' if period == 'all' else date_to }}">
   <button type="submit">{{ t('show_btn') }}</button>
 </form>
 
 <div class="panel-box" style="margin: 12px 0;">
   <div style="font-size: 28px; font-weight: 800;">{{ profit.net | money }} грн</div>
-  <div class="stat-label">{{ t('profit_title') }} · {{ date_from | rudate }} — {{ date_to | rudate }}</div>
+  <div class="stat-label">{{ t('profit_title') }} · {% if period == 'all' %}{{ t('period_all') | lower }}{% else %}{{ date_from | rudate }} — {{ date_to | rudate }}{% endif %}</div>
 </div>
 
 <div class="table-scroll">
