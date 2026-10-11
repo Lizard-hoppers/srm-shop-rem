@@ -1618,11 +1618,15 @@ def scenario_quick_intake_chat() -> None:
         async def answer(self, text, reply_markup=None):
             return SimpleNamespace(message_id=self._chat_log.add("bot", text, reply_markup))
 
+        async def answer_photo(self, photo, caption=None, reply_markup=None):
+            return SimpleNamespace(message_id=self._chat_log.add("bot", caption, reply_markup))
+
     class _Cb:
         def __init__(self, chat: _Chat, bot: _Bot, data: str, message_id: int) -> None:
             self.data = data
             self.from_user = SimpleNamespace(id=STAFF_TG_ID)
             self.message = _CbMessage(chat, message_id)
+            self.message.bot = bot
             self.bot = bot
             self.answered: list[tuple] = []
 
@@ -1651,6 +1655,9 @@ def scenario_quick_intake_chat() -> None:
     original_get_staff = auth.get_staff_by_telegram_id
     qa.get_store = lambda store_id: _fake_store
     auth.get_staff_by_telegram_id = lambda conn, telegram_id: {"id": 1, "role": "master"}
+    # …and no staff table for the «мастер» step's list of masters.
+    original_list_masters = auth.list_masters
+    auth.list_masters = lambda conn, include_inactive=False: []
 
     async def run() -> None:
         chat = _Chat()
@@ -1672,9 +1679,11 @@ def scenario_quick_intake_chat() -> None:
         await qa.repair_start(say(qa.BTN_REPAIR), state)
         check("tap on 🔧 Ремонт leaves exactly one bot message", len(chat.bot_messages) == 1)
         check("the tap itself is deleted right away", chat.staff_messages == [])
-        check("first screen is step 1 of 6 and asks for the photo",
-              "шаг 1 из 6" in screen()["text"] and "фото" in screen()["text"].lower())
+        check("first screen is step 1 of 9 and asks for the photo",
+              "шаг 1 из 9" in screen()["text"] and "фото" in screen()["text"].lower())
 
+        # 11.10: порядок шагов как в боте «Гибрид сервис» — фото, телефон,
+        # имя, модель, неисправность, стоимость, пароль, комментарий, мастер.
         first_screen_id = screen()["id"]
         await qa.repair_got_photo(say(photo=[SimpleNamespace(file_id="photo-1")]), state)
         check("answering REPOSTS a new message instead of editing the old one in place",
@@ -1682,30 +1691,8 @@ def scenario_quick_intake_chat() -> None:
         check("still exactly one bot message after the repost", len(chat.bot_messages) == 1)
         check("the screen is the last message in the chat", chat.last()["author"] == "bot")
         check("the sent photo is not left lying in the chat", chat.staff_messages == [])
-        check("step 2 asks for the defect", "шаг 2 из 6" in screen()["text"] and "неисправность" in screen()["text"].lower())
+        check("step 2 asks for the client's phone", "шаг 2 из 9" in screen()["text"] and "Телефон клиента:" in screen()["text"])
         check("the photo is already acknowledged in the recap", "Фото: приложено ✅" in screen()["text"])
-
-        await qa.repair_got_defect(say("Не включается <после падения>"), state)
-        check("step 3 asks for the model", "шаг 3 из 6" in screen()["text"] and "Модель устройства" in screen()["text"])
-        check("staff-typed text is HTML-escaped in the recap (parse_mode=HTML)",
-              "&lt;после падения&gt;" in screen()["text"] and "<после падения>" not in screen()["text"])
-
-        await qa.repair_got_model(say("iPhone 12"), state)
-        check("device type is gone — the model alone is the device line", "Устройство: iPhone 12" in screen()["text"])
-        check("step 4 asks for the price estimate, with a skip button",
-              "шаг 4 из 6" in screen()["text"] and "Оценочная стоимость" in screen()["text"]
-              and screen()["markup"] is not None)
-
-        await qa.repair_got_price(say("не число"), state)
-        check("a bad price answer warns WITHOUT losing the question",
-              screen()["text"].startswith("⚠️") and "Оценочная стоимость" in screen()["text"])
-
-        skip_button = screen()["markup"].inline_keyboard[0][0]
-        await qa.repair_skip_price(tap(skip_button.callback_data), state)
-        check("skipping the price moves straight to the phone",
-              "шаг 5 из 6" in screen()["text"] and "Телефон клиента:" in screen()["text"])
-        check("a skipped price recaps as 'пока не известна', not a stale warning",
-              "Оценка:" not in screen()["text"])
 
         # "+380" — ровно то, что остаётся, если отправить телефон, не
         # дописав его после кода страны; normalize_phone трактует это как
@@ -1715,15 +1702,55 @@ def scenario_quick_intake_chat() -> None:
               screen()["text"].startswith("⚠️") and "Телефон клиента:" in screen()["text"])
 
         await qa.repair_got_phone(say("0501234567"), state)
-        check("the phone is normalized and step 6 asks for the name",
-              "+380501234567" in screen()["text"] and "шаг 6 из 6" in screen()["text"] and "Имя клиента:" in screen()["text"])
+        check("the phone is normalized and step 3 asks for the name",
+              "+380501234567" in screen()["text"] and "шаг 3 из 9" in screen()["text"] and "Имя клиента:" in screen()["text"])
 
         await qa.repair_got_name(say("Вася <дома>"), state)
+        check("step 4 asks for the model", "шаг 4 из 9" in screen()["text"] and "Модель устройства" in screen()["text"])
+        check("staff-typed text is HTML-escaped in the recap (parse_mode=HTML)",
+              "&lt;дома&gt;" in screen()["text"] and "<дома>" not in screen()["text"])
+
+        await qa.repair_got_model(say("iPhone 12"), state)
+        check("device type is gone — the model alone is the device line", "Устройство: iPhone 12" in screen()["text"])
+        check("step 5 asks for the defect", "шаг 5 из 9" in screen()["text"] and "неисправность" in screen()["text"].lower())
+
+        await qa.repair_got_defect(say("Не включается <после падения>"), state)
+        check("step 6 asks for the price estimate, with a skip button",
+              "шаг 6 из 9" in screen()["text"] and "Оценочная стоимость" in screen()["text"]
+              and screen()["markup"] is not None)
+        check("the defect is escaped in the recap too", "&lt;после падения&gt;" in screen()["text"])
+
+        await qa.repair_got_price(say("не число"), state)
+        check("a bad price answer warns WITHOUT losing the question",
+              screen()["text"].startswith("⚠️") and "Оценочная стоимость" in screen()["text"])
+
+        skip_button = screen()["markup"].inline_keyboard[0][0]
+        await qa.repair_skip_price(tap(skip_button.callback_data), state)
+        check("skipping the price moves on to the device password, which can be skipped too",
+              "шаг 7 из 9" in screen()["text"] and "Пароль от устройства" in screen()["text"]
+              and screen()["markup"].inline_keyboard[0][0].callback_data == "repair_password_skip")
+        check("a skipped price recaps as 'пока не известна', not a stale warning",
+              "Оценка:" not in screen()["text"])
+
+        await qa.repair_got_password(say("1234 <x>"), state)
+        check("step 8 asks for a comment and recaps the password, escaped",
+              "шаг 8 из 9" in screen()["text"] and "Комментарий" in screen()["text"]
+              and "Пароль: 1234 &lt;x&gt;" in screen()["text"])
+
+        await qa.repair_skip_comment(tap("repair_comment_skip"), state)
+        check("step 9 — the last question — is the master, offered as buttons",
+              "шаг 9 из 9" in screen()["text"] and "Выберите мастера" in screen()["text"]
+              and screen()["markup"].inline_keyboard[-1][0].callback_data == "rm_pick:0")
+
+        await qa.repair_master_pick(tap("rm_pick:0"), state)
         card = screen()
+        check("answering the last question leaves exactly one bot message — the card", len(chat.bot_messages) == 1)
         check("the confirm card carries its accept/cancel buttons", card["markup"] is not None)
         check("the confirm card is a PHOTO message (Павел: должна быть с фото) with the full recap",
               all(part in card["text"] for part in ("iPhone 12", "Не включается", "+380501234567"))
               and "пока не известна" in card["text"])
+        check("the card shows the password and that no master was chosen",
+              "Пароль: 1234 &lt;x&gt;" in card["text"] and "Мастер: не назначен" in card["text"])
         check("the confirm card escapes the staff-typed name too", "&lt;дома&gt;" in card["text"])
         check("the reply that produced the card is gone from the chat", chat.staff_messages == [])
         check("the confirm card is the last message in the chat", chat.last()["id"] == card["id"])
@@ -1751,6 +1778,7 @@ def scenario_quick_intake_chat() -> None:
         clients.get_by_phone = original_get_by_phone
         qa.get_store = original_get_store
         auth.get_staff_by_telegram_id = original_get_staff
+        auth.list_masters = original_list_masters
 
     # Покупка телефона: шесть нумерованных шагов; курс, оплата и карточка
     # подтверждения идут без шапки «шаг N из M».
@@ -5704,11 +5732,15 @@ def scenario_repair_part_chat() -> None:
             async def edit_text(self, text, reply_markup=None):
                 self._log.edit(self.message_id, text, reply_markup)
 
+            async def answer_photo(self, photo, caption=None, reply_markup=None):
+                return SimpleNamespace(message_id=self._log.add("bot", caption, reply_markup, kind="photo"))
+
         class _Cb:
             def __init__(self, chat, bot, data, message_id, user_id, chat_id):
                 self.data, self.bot = data, bot
                 self.from_user = SimpleNamespace(id=user_id)
                 self.message = _CbMessage(chat, message_id, chat_id)
+                self.message.bot = bot
                 self.answered = []
 
             async def answer(self, text=None, show_alert=False):
@@ -5728,10 +5760,17 @@ def scenario_repair_part_chat() -> None:
             # ---- приём: знакомый клиент — имя не спрашиваем; мастер выбирается на карточке
             await qa.repair_start(say(qa.BTN_REPAIR), state)
             await qa.repair_got_photo(_Msg(chat, bot, photo=True), state)
-            await qa.repair_got_defect(say("Замена дисплея"), state)
-            await qa.repair_got_model(say("iPhone 13"), state)
-            await qa.repair_got_price(say("3000"), state)
             await qa.repair_got_phone(say("067 111 00 99"), state)
+            check("a returning client's name is not asked — the next question is the model",
+                  "Модель устройства" in screen()["text"] and "Постоянный Клиент" in screen()["text"])
+            await qa.repair_got_model(say("iPhone 13"), state)
+            await qa.repair_got_defect(say("Замена дисплея"), state)
+            await qa.repair_got_price(say("3000"), state)
+            await qa.repair_got_password(say("0000"), state)
+            await qa.repair_got_comment(say("царапина на корпусе"), state)
+            check("the master step offers this точка's masters and «не назначать»",
+                  f"rm_pick:{master}" in _buttons(screen()["markup"]) and "rm_pick:0" in _buttons(screen()["markup"]))
+            await qa.repair_master_pick(tap("rm_pick:0"), state)
             card = screen()
             check("a returning client's name is not asked again — straight to the card with it filled in",
                   card["kind"] == "photo" and "Имя: Постоянный Клиент" in card["text"] and "Мастер: не назначен" in card["text"])
@@ -5748,6 +5787,10 @@ def scenario_repair_part_chat() -> None:
                 check("the repair is created for that client, with that master and price",
                       repair["master_id"] == master and repair["price_estimate"] == 3000 and repair["client_name"] == "Постоянный Клиент")
                 repair_id = repair["id"]
+                check("the device password and the intake comment are saved on the repair",
+                      repair["device_password"] == "0000" and repair["intake_comment"] == "царапина на корпусе")
+                card_text, _kb = repairs.card(conn, repair_id)
+                check("…and both are on the group card", "🔑 Пароль: <b>0000</b>" in card_text and "Комментарий: царапина на корпусе" in card_text)
             check("the confirmation names the document", f"РК-{repair_id:03d} создан" in chat.log[-1]["text"])
 
             # ---- группа: «Взять в работу» → «Готово» без запчасти не проходит
@@ -8739,6 +8782,201 @@ def scenario_agent_actions() -> None:
             assistant_chat._HISTORY.clear()
 
 
+def scenario_gibrit_sync() -> None:
+    """11.10: ремонты точки «Гибрид сервис» ведёт её собственный бот; CRM
+    односторонне забирает их (core.gibrit_sync) и считает по ним цифры."""
+    print("scenario: ремонты из бота «Гибрид сервис» (core.gibrit_sync)")
+    import sqlite3 as _sqlite3
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    from bot import quick_actions as qa
+    from core import gibrit_sync, overview
+
+    def make_source(path: str) -> None:
+        src = _sqlite3.connect(path)
+        src.execute(
+            "CREATE TABLE orders (card_id INTEGER PRIMARY KEY, date TEXT NOT NULL DEFAULT '', client_name TEXT NOT NULL DEFAULT '', "
+            "phone TEXT NOT NULL DEFAULT '', title TEXT NOT NULL DEFAULT '', issue_price TEXT NOT NULL DEFAULT '', "
+            "purchase_price TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT '', supplier TEXT NOT NULL DEFAULT '', "
+            "master_pay TEXT, master TEXT NOT NULL DEFAULT '', master_type TEXT NOT NULL DEFAULT '', comment TEXT NOT NULL DEFAULT '', "
+            "card_id_executor TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, "
+            "device_model TEXT, problem TEXT, device_password TEXT, created_by TEXT, photo_file_id TEXT)"
+        )
+        src.commit()
+        src.close()
+
+    def put(path: str, card_id: int, **fields) -> None:
+        row = {"created_at": "2026-10-11 15:10:20", "updated_at": "2026-10-11 15:10:20", **fields, "card_id": card_id}
+        src = _sqlite3.connect(path)
+        src.execute(
+            f"INSERT OR REPLACE INTO orders ({', '.join(row)}) VALUES ({', '.join('?' for _ in row)})", list(row.values())
+        )
+        src.commit()
+        src.close()
+
+    with tempfile.TemporaryDirectory() as tmp, _separate_base(tmp, "gibrit.sqlite3", ("007", "Гибрид сервис")) as db_path:
+        source = os.path.join(tmp, "orders.sqlite3")
+        make_source(source)
+        # история (залита из таблицы): выданный штатному 33%, выданный аутсорсу с выплатой, возврат, «наш», открытый
+        put(source, 100, date="01.09.2026", client_name="Иван", phone="0671110001", title="iPhone 12 экран", issue_price="900",
+            purchase_price="300", status="Готов", master="Алексей", master_type="Штат 33%", comment="срочно")
+        put(source, 101, date="03.09.2026", client_name="Пётр", phone="067 111 00 02", title="A52 акб", issue_price="1000",
+            purchase_price="200", status="Готов", master_pay="250", master="Олег Som", master_type="Аутсорс")
+        put(source, 102, date="04.09.2026", client_name="Иван", phone="+380671110001", title="iPhone 12 стекло", issue_price="0",
+            purchase_price="0", status="Возврат", master_pay="0", master="Алексей", master_type="Штат 33%")
+        put(source, 103, date="05.09.2026", client_name="Наш", title="Redmi 9 плата", purchase_price="150", status="Готов",
+            master="Олег Som", master_type="Штат фикс")
+        put(source, 104, client_name="Наш", title="Poco X3 экран", status="новый", master="Алексей", master_type="Штат фикс")
+        put(source, 105, client_name="Без Телефона", title="Nokia", issue_price="400", status="новый", master="Алексей", master_type="Штат 33%")
+        put(source, 106, client_name="Без Телефона", phone="не помню", title="Nokia 2", status="новый", master="", master_type="")
+        orders = gibrit_sync.read_source(source)
+        check("the bot's base is read as-is, in card order", [o["card_id"] for o in orders] == [100, 101, 102, 103, 104, 105, 106])
+
+        with get_conn(db_path) as conn:
+            owner = auth.create_staff(conn, "g-owner", "pass", "Владелец", "owner")
+            own_master = auth.create_master(conn, "Мастер 007", None, "percent", 50, location_id=1)
+            anna = clients.get_or_create_by_phone(conn, "Иван Иванов", "+380671110001", source="offline")
+            result = gibrit_sync.sync(conn, orders)
+            check("the first pass brings every order in", result == {"total": 7, "created": 7, "updated": 0, "unchanged": 0})
+            rows = {r["ext_id"]: r for r in conn.execute("SELECT * FROM repair_orders WHERE ext_source = 'gibrit'")}
+            check("all of them belong to the точка «Гибрид сервис»", {r["location_id"] for r in rows.values()} == {2})
+            check("«Готов» is выдан, «Возврат» is отменён, an open one with a master is в работе, without — новый",
+                  [rows[i]["status"] for i in (100, 101, 102, 103, 104, 106)]
+                  == ["issued", "issued", "cancelled", "issued", "in_progress", "new"])
+            check("the price, the hand-entered parts cost and the master's pay come from the bot's numbers",
+                  (rows[100]["price_final"], rows[100]["manual_parts_cost"], rows[100]["manual_master_pay"]) == (900, 300, 200)
+                  and (rows[101]["price_final"], rows[101]["manual_parts_cost"], rows[101]["manual_master_pay"]) == (1000, 200, 250))
+            check("an open repair keeps its price as the estimate only",
+                  rows[105]["price_estimate"] == 400 and rows[105]["price_final"] is None)
+            check("none of them nags about a missing part", all(r["no_parts"] == 1 for r in rows.values()))
+            finance = repairs.finance(conn, rows[100]["id"])
+            check("the repair's money: 900 − 300 = 600 → мастеру 200 → фирме 400",
+                  (finance["price"], finance["parts_cost"], finance["base"], finance["master_share"], finance["firm_profit"]) == (900, 300, 600, 200, 400))
+            check("the document of a выдан repair carries that profit; an open one carries none",
+                  documents.get_for(conn, "repair", rows[100]["id"])["profit"] == 400
+                  and documents.get_for(conn, "repair", rows[101]["id"])["profit"] == 550
+                  and documents.get_for(conn, "repair", rows[103]["id"])["profit"] == -150
+                  and documents.get_for(conn, "repair", rows[105]["id"])["profit"] is None)
+            check("the closing day becomes issued_at (noon Kyiv → UTC), and the repair was taken in no later than that",
+                  rows[100]["issued_at"] == "2026-09-01 09:00:00" and rows[100]["created_at"] <= rows[100]["issued_at"])
+            check("an order from the history is dated no later than any later order was closed",
+                  rows[102]["created_at"] <= "2026-09-05 09:00:00" and rows[104]["created_at"] == "2026-10-11 12:11:00")
+            period = overview.profit(conn, "2026-09-01 00:00:00", "2026-10-01 00:00:00", 2)
+            check("«Чистая прибыль» of the точка for September counts them: 3 ремонта, выручка 1900, прибыль 800",
+                  (period["repairs_count"], period["repairs_revenue"], period["repairs_profit"]) == (3, 1900, 800))
+            check("…and none of it lands on точка 1", overview.profit(conn, "2026-09-01 00:00:00", "2026-10-01 00:00:00", 1)["repairs_count"] == 0)
+            check("no cash moved and nothing is owed to a master because of the history",
+                  conn.execute("SELECT COUNT(*) AS n FROM cash_transactions").fetchone()["n"] == 0
+                  and conn.execute("SELECT COUNT(*) AS n FROM master_accruals").fetchone()["n"] == 0
+                  and overview.standing(conn)["masters_owed"] == 0)
+            check("the open ones count as open repairs of that точка", overview.standing(conn, 2)["open_repairs"] == 3)
+
+            aleksey = conn.execute("SELECT * FROM staff WHERE name = 'Алексей'").fetchone()
+            oleg = conn.execute("SELECT * FROM staff WHERE name = 'Олег Som'").fetchone()
+            check("the bot's masters appear as masters of that точка, without a rate; аутсорс is marked so",
+                  aleksey["role"] == "master" and aleksey["location_id"] == 2 and aleksey["pay_type"] is None
+                  and aleksey["master_kind"] == "staff" and oleg["master_kind"] == "outsource")
+            check("…judged by how he was mostly booked, not by the first order seen",
+                  gibrit_sync._master_kinds([{"master": "X", "master_type": t} for t in ("Штат фикс", "Аутсорс", "Штат 33%", "Аутсорс")]) == {"X": "outsource"})
+            stats = masters.period_stats(conn, oleg["id"])
+            check("a master's statistics count the hand-entered parts and his pay per repair",
+                  (stats["repairs_count"], stats["revenue"], stats["parts_cost"], stats["profit"], stats["manual_pay"]) == (2, 1000, 350, 650, 250)
+                  and masters.master_summary(conn, oleg)["all_time"]["payout"] == 250)
+            check("a client is matched by phone with the one CRM already had — and keeps his name",
+                  rows[100]["client_id"] == anna and rows[102]["client_id"] == anna
+                  and clients.get_client(conn, anna)["name"] == "Иван Иванов")
+            ours = clients.get_client(conn, rows[103]["client_id"])
+            check("«Наш» orders share one internal client", rows[103]["client_id"] == rows[104]["client_id"] and ours["name"] == "Наш (Гибрид сервис)" and ours["phone"] is None)
+            check("phoneless clients are matched by name (free text is not a phone)", rows[105]["client_id"] == rows[106]["client_id"])
+            history = [r["status"] for r in repairs.get_status_history(conn, rows[100]["id"])]
+            check("the repair's history shows it was taken in and выдан", sorted(history) == ["issued", "new"])
+            device = repairs.get_repair(conn, rows[100]["id"])
+            check("the order's title is the device line; the comment is on the repair",
+                  device["model"] == "iPhone 12 экран" and device["intake_comment"] == "срочно")
+
+            again = gibrit_sync.sync(conn, gibrit_sync.read_source(source))
+            check("a second pass with nothing changed touches nothing", again == {"total": 7, "created": 0, "updated": 0, "unchanged": 7})
+            check("…and makes no duplicates", conn.execute("SELECT COUNT(*) AS n FROM repair_orders").fetchone()["n"] == 7
+                  and conn.execute("SELECT COUNT(*) AS n FROM documents WHERE doc_type = 'repair'").fetchone()["n"] == 7)
+
+        # ---- в боте закрыли заказ, поменяли цену, приняли новый (уже с паролем)
+        today = datetime.now(timefmt.KYIV)
+        stamp = today.strftime("%Y-%m-%d %H:%M:%S")
+        put(source, 105, date=today.strftime("%d.%m.%Y"), client_name="Без Телефона", title="Nokia", issue_price="700", purchase_price="100",
+            status="Готов", master="Алексей", master_type="Штат 33%", updated_at=stamp)
+        put(source, 107, client_name="Оля", phone="0671110007", title="Pixel 7 не заряжается", issue_price="500", status="новый",
+            master="Даня Ломбард", master_type="Штат 33%", comment="без чехла", device_model="Pixel 7", problem="не заряжается",
+            device_password="4321", created_by="manager", created_at=stamp, updated_at=stamp)
+        with get_conn(db_path) as conn:
+            result = gibrit_sync.sync(conn, gibrit_sync.read_source(source))
+            check("only what changed in the bot is touched", result == {"total": 8, "created": 1, "updated": 1, "unchanged": 6})
+            closed = conn.execute("SELECT * FROM repair_orders WHERE ext_id = 105").fetchone()
+            check("the closed order is now выдан today at the bot's own time, with the new price",
+                  closed["status"] == "issued" and closed["price_final"] == 700
+                  and closed["issued_at"] == today.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"))
+            check("its profit is on the document: 700 − 100 = 600 → мастеру 200 → 400",
+                  documents.get_for(conn, "repair", closed["id"])["profit"] == 400 and documents.get_for(conn, "repair", closed["id"])["amount"] == 700)
+            check("the status change is in its history", [r["status"] for r in repairs.get_status_history(conn, closed["id"])].count("issued") == 1)
+            start, end = timefmt.kyiv_date_range_utc(timefmt.kyiv_today(), timefmt.kyiv_today())
+            check("today's «Главная» for the точка sees it", overview.profit(conn, start, end, 2)["repairs_revenue"] == 700)
+            fresh = repairs.get_repair(conn, conn.execute("SELECT id FROM repair_orders WHERE ext_id = 107").fetchone()["id"])
+            check("a new order arrives with the model, the defect, the password and its real time",
+                  (fresh["model"], fresh["defect_description"], fresh["device_password"], fresh["intake_comment"])
+                  == ("Pixel 7", "не заряжается", "4321", "без чехла")
+                  and fresh["created_at"] == today.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"))
+            check("the password is on the repair's card", "🔑 Пароль: <b>4321</b>" in repairs.card(conn, fresh["id"])[0])
+            check("a master new to the bot becomes a master of the точка",
+                  conn.execute("SELECT location_id FROM staff WHERE name = 'Даня Ломбард'").fetchone()["location_id"] == 2)
+
+        # ---- «изменить выбор»: заказ вернули в работу
+        put(source, 105, client_name="Без Телефона", title="Nokia", issue_price="700", purchase_price="100", status="новый",
+            master="Алексей", master_type="Штат 33%", updated_at=stamp)
+        with get_conn(db_path) as conn:
+            gibrit_sync.sync(conn, gibrit_sync.read_source(source))
+            reopened = conn.execute("SELECT * FROM repair_orders WHERE ext_id = 105").fetchone()
+            check("reopening it in the bot takes it out of выдан and clears the document's profit",
+                  reopened["status"] == "in_progress" and reopened["issued_at"] is None and reopened["price_final"] is None
+                  and documents.get_for(conn, "repair", reopened["id"])["profit"] is None)
+            totals = gibrit_sync.totals(conn)
+            check("the totals for reconciling with the bot's table add up",
+                  (totals["n"], totals["issued"], totals["cancelled"], totals["open"], totals["revenue"], totals["parts"], totals["master_pay"], totals["profit"])
+                  == (8, 3, 1, 4, 1900, 650, 450, 800))
+
+            # ---- своя жизнь CRM не задета
+            store_1 = SimpleNamespace(db_path=db_path, location_id=1)
+            store_2 = SimpleNamespace(db_path=db_path, location_id=2)
+            check("точка 1 is not offered the other shop's masters at intake — only its own",
+                  [m["name"] for m in qa._store_masters(store_1)] == ["Мастер 007"])
+            check("точка 2 is offered the masters that came from its bot",
+                  {m["name"] for m in qa._store_masters(store_2)} == {"Алексей", "Олег Som", "Даня Ломбард"})
+            native = repairs.create_repair(conn, anna, "", None, "iPhone 11", None, "экран", "offline", own_master, 2000, owner,
+                                           location_id=1, device_password="1111", intake_comment="коробка")
+            repairs.set_price(conn, native, 2000, 2000)
+            repairs.update_status(conn, native, "issued", owner)
+            check("a repair taken in by CRM itself still accrues the master's share by his rate",
+                  masters.accrued_total(conn, own_master) == 1000 and documents.get_for(conn, "repair", native)["profit"] == 1000)
+            check("…and carries its own password and comment",
+                  repairs.get_repair(conn, native)["device_password"] == "1111" and "Комментарий: коробка" in repairs.card(conn, native)[0])
+            check("a repair with neither shows neither line",
+                  "Пароль" not in repairs.card(conn, conn.execute("SELECT id FROM repair_orders WHERE ext_id = 101").fetchone()["id"])[0])
+
+        with tempfile.TemporaryDirectory() as tmp2, _separate_base(tmp2, "nogibrit.sqlite3", ("007",)) as other:
+            with get_conn(other) as conn:
+                try:
+                    gibrit_sync.sync(conn, gibrit_sync.read_source(source))
+                    refused = False
+                except gibrit_sync.SyncError:
+                    refused = True
+                check("without the точка «Гибрид сервис» the sync refuses to run", refused)
+        try:
+            gibrit_sync.read_source(os.path.join(tmp, "missing.sqlite3"))
+            missing = False
+        except gibrit_sync.SyncError:
+            missing = True
+        check("a missing bot base is reported, not a crash", missing)
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         db_path = os.path.join(tmp, "test.sqlite3")
@@ -8805,6 +9043,7 @@ def main() -> None:
     scenario_agent_actions()
     scenario_supplier_chat()
     scenario_repairs_button()
+    scenario_gibrit_sync()
     if os.path.exists(_WEBAPP_TEST_DB):
         os.remove(_WEBAPP_TEST_DB)
 

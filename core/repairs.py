@@ -113,6 +113,8 @@ def create_repair(
     *,
     location_id: int | None = None,
     key: str | None = None,
+    device_password: str | None = None,
+    intake_comment: str | None = None,
 ) -> int:
     location_id = _locations.resolve(conn, location_id)
     device_id = conn.execute(
@@ -126,6 +128,13 @@ def create_repair(
            VALUES (?, ?, ?, 'new', ?, ?, ?)""",
         (device_id, client_id, master_id, channel, price_estimate, location_id),
     ).lastrowid
+    device_password = (device_password or "").strip() or None
+    intake_comment = (intake_comment or "").strip() or None
+    if device_password or intake_comment:
+        conn.execute(
+            "UPDATE repair_orders SET device_password = ?, intake_comment = ? WHERE id = ?",
+            (device_password, intake_comment, order_id),
+        )
 
     conn.execute(
         "INSERT INTO repair_status_history (order_id, status, changed_by, comment) VALUES (?, 'new', ?, 'Принят')",
@@ -265,13 +274,20 @@ def finance(conn: sqlite3.Connection, order_id: int) -> dict:
            WHERE ref_type = 'repair_order' AND ref_id = ? AND reason = 'repair_use'""",
         (order_id,),
     ).fetchone()
-    parts_cost = round(row["cost"], 2)
+    # «Закупка» typed in by hand (a repair kept by an outside system —
+    # core.gibrit_sync — has no stock behind it) counts as parts cost too.
+    parts_cost = round(row["cost"] + (repair["manual_parts_cost"] or 0), 2)
     parts_cost = int(parts_cost) if parts_cost == int(parts_cost) else parts_cost
     base = price - parts_cost
     master = conn.execute(
         "SELECT pay_type, pay_value FROM staff WHERE id = ?", (repair["master_id"],)
     ).fetchone() if repair["master_id"] else None
     share = _masters.repair_share(base, master["pay_type"], master["pay_value"]) if master else 0
+    # …and so does a master's pay entered for this one repair: it replaces
+    # whatever his rate would have given.
+    if repair["manual_master_pay"] is not None:
+        share = round(repair["manual_master_pay"], 2)
+        share = int(share) if share == int(share) else share
     return {
         "price": price, "parts_cost": parts_cost, "base": base, "master_share": share,
         "firm_profit": base - share,
@@ -286,7 +302,9 @@ def settle(conn: sqlite3.Connection, order_id: int) -> None:
     repair = get_repair(conn, order_id)
     numbers = finance(conn, order_id)
     _masters.cancel_accruals(conn, "repair_order", order_id)
-    if repair["master_id"]:
+    # A repair kept by an outside system is settled with the master there —
+    # here it only counts in the numbers, it does not become «мы должны».
+    if repair["master_id"] and not repair["ext_source"]:
         _masters.accrue(
             conn, repair["master_id"], "repair", "repair_order", order_id, numbers["master_share"],
             comment=f"{_documents.label('repair', order_id)}: {numbers['base']} × ставка",
@@ -341,6 +359,8 @@ def create_repair_intake(
     photo: tuple[bytes, str] | None,
     location_id: int | None = None,
     key: str | None = None,
+    device_password: str | None = None,
+    intake_comment: str | None = None,
 ) -> tuple[int, str, dict | None, tuple[bytes, str] | None]:
     """One client (reused by phone, or created) + one repair order + its
     device photo (if given) + catalog remember — the exact sequence
@@ -358,7 +378,7 @@ def create_repair_intake(
     order_id = create_repair(
         conn, client_id, device_type, brand, model, serial_number,
         defect_description, channel, master_id, price_estimate, staff_id,
-        location_id=location_id, key=key,
+        location_id=location_id, key=key, device_password=device_password, intake_comment=intake_comment,
     )
     _device_catalog.remember(conn, device_type, brand, model)
 
@@ -680,6 +700,15 @@ CARD_NOTE_LEN = 110
 CARD_TEXT_LIMIT = 1000
 
 
+def _optional(repair, column: str):
+    """A column that rows built before it existed (and hand-made rows in
+    callers that select their own column list) simply don't carry."""
+    try:
+        return repair[column]
+    except (IndexError, KeyError):
+        return None
+
+
 def render_card_text(
     repair: sqlite3.Row, parts: list | None = None, notes: list | None = None, notes_shown: int = CARD_NOTES,
 ) -> str:
@@ -710,6 +739,11 @@ def render_card_text(
     ]
     if repair["defect_description"]:
         lines.append(f"Работа: {html.escape(repair['defect_description'])}")
+    password, comment = _optional(repair, "device_password"), _optional(repair, "intake_comment")
+    if password:
+        lines.append(f"🔑 Пароль: <b>{html.escape(password)}</b>")
+    if comment:
+        lines.append(f"Комментарий: {html.escape(comment)}")
     lines.append(f"Ответственный: {master_label}")
     if repair["stage_note"]:
         lines.append(f"Стадия: <b>{html.escape(repair['stage_note'])}</b>")

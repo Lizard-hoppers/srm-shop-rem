@@ -30,6 +30,9 @@
       <p>{{ repair.device_type }} {{ repair.brand or '' }} {{ repair.model or '' }}</p>
       <p class="meta">{{ t('serial_number_prefix') }} {{ repair.serial_number or '—' }}</p>
       <p class="meta">{{ t('defect_prefix') }} {{ repair.defect_description or '—' }}</p>
+      {% if repair.device_password %}<p class="meta">{{ t('device_password_prefix') }} <b>{{ repair.device_password }}</b></p>{% endif %}
+      {% if repair.intake_comment %}<p class="meta">{{ t('intake_comment_prefix') }} {{ repair.intake_comment }}</p>{% endif %}
+      {% if repair.ext_source == 'gibrit' %}<p class="meta">{{ t('repair_external_gibrit') }} №{{ repair.ext_id }}</p>{% endif %}
       <p class="meta">{{ t('channel_prefix') }} <span class="pill pill-{{ repair.channel }}">{{ t('channel_online') if repair.channel == 'online' else t('channel_offline') }}</span> · {{ t('accepted_at_prefix') }} {{ repair.created_at | kyiv }}</p>
     </div>
 

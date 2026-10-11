@@ -1080,6 +1080,22 @@ def init_db(db_path: str = DB_PATH) -> None:
         # free-text line next to the status, cleared when the status
         # changes. And what each note itself said.
         _ensure_column(conn, "repair_orders", "stage_note", "stage_note TEXT")
+        # 11.10: приём «как в боте Гибрида» — пароль устройства и
+        # комментарий приёмщика на самом ремонте. И ремонты, которые ведёт
+        # внешняя система (бот «Гибрид сервис», core.gibrit_sync): откуда
+        # он и его номер там; закупка запчасти и выплата мастеру у них
+        # вводятся руками, а не берутся со склада/из ставки.
+        _ensure_column(conn, "repair_orders", "device_password", "device_password TEXT")
+        _ensure_column(conn, "repair_orders", "intake_comment", "intake_comment TEXT")
+        _ensure_column(conn, "repair_orders", "ext_source", "ext_source TEXT")
+        _ensure_column(conn, "repair_orders", "ext_id", "ext_id INTEGER")
+        _ensure_column(conn, "repair_orders", "ext_sig", "ext_sig TEXT")
+        _ensure_column(conn, "repair_orders", "manual_parts_cost", "manual_parts_cost REAL")
+        _ensure_column(conn, "repair_orders", "manual_master_pay", "manual_master_pay REAL")
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_repair_orders_ext ON repair_orders(ext_source, ext_id) "
+            "WHERE ext_source IS NOT NULL"
+        )
         _ensure_column(conn, "repair_notes", "stage", "stage TEXT")
         _ensure_column(conn, "repair_notes", "suggested_status", "suggested_status TEXT")
         _ensure_column(conn, "repair_notes", "suggested_price", "suggested_price REAL")

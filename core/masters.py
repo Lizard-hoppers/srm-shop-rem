@@ -42,7 +42,8 @@ def period_stats(
         params += [utc_start, utc_end]
 
     row = conn.execute(
-        f"SELECT COUNT(*) AS repairs_count, COALESCE(SUM(price_final), 0) AS revenue "
+        f"SELECT COUNT(*) AS repairs_count, COALESCE(SUM(price_final), 0) AS revenue, "
+        f"COALESCE(SUM(manual_parts_cost), 0) AS manual_parts, COALESCE(SUM(manual_master_pay), 0) AS manual_pay "
         f"FROM repair_orders WHERE {where}",
         params,
     ).fetchone()
@@ -66,12 +67,15 @@ def period_stats(
     ).fetchone()
 
     revenue = row["revenue"]
-    parts_cost = parts_row["parts_cost"]
+    # parts from stock + «закупка» entered by hand on the repair itself
+    parts_cost = money(parts_row["parts_cost"] + row["manual_parts"])
     return {
         "repairs_count": row["repairs_count"],
         "revenue": revenue,
         "parts_cost": parts_cost,
-        "profit": revenue - parts_cost,
+        "profit": money(revenue - parts_cost),
+        # pay entered per repair (not from the master's rate) — see master_summary
+        "manual_pay": money(row["manual_pay"]),
     }
 
 
@@ -102,7 +106,10 @@ def master_summary(conn: sqlite3.Connection, master: sqlite3.Row) -> dict:
     all_time_stats = period_stats(conn, master["id"])
 
     for stats in (today_stats, month_stats, all_time_stats):
-        stats["payout"] = payout(stats["profit"], stats["repairs_count"], master["pay_type"], master["pay_value"])
+        stats["payout"] = money(
+            payout(stats["profit"], stats["repairs_count"], master["pay_type"], master["pay_value"])
+            + stats["manual_pay"]
+        )
 
     return {"today": today_stats, "month": month_stats, "all_time": all_time_stats}
 

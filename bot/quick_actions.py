@@ -166,12 +166,18 @@ class RepairIntake(StatesGroup):
     рядом. Тип устройства (device_type) убран совсем — "модель" одной
     строкой ("iPhone 12") несёт достаточно, а отдельный вопрос только
     замедлял приём."""
+    # 11.10 (Павел): порядок шагов — как в боте «Гибрид сервис», к которому
+    # привыкли приёмщики: фото → телефон → имя → модель → неисправность →
+    # стоимость → пароль → комментарий → мастер, и только потом карточка.
     photo = State()
-    defect = State()
-    model = State()
-    price = State()
     phone = State()
     name = State()
+    model = State()
+    defect = State()
+    price = State()
+    password = State()
+    comment = State()
+    master = State()
     confirm = State()
 
 
@@ -471,7 +477,7 @@ _SEPARATOR = "──────────────"
 
 
 def _steps_repair(_data: dict) -> list[str]:
-    return ["photo", "defect", "model", "price", "phone", "name"]
+    return ["photo", "phone", "name", "model", "defect", "price", "password", "comment", "master"]
 
 
 def _steps_contact(_data: dict) -> list[str]:
@@ -511,12 +517,16 @@ def _summary_repair(data: dict) -> list[str]:
     lines = []
     if data.get("photo_bytes"):
         lines.append("Фото: приложено ✅")
+    lines.append(_client_line("Клиент", data))
     lines.append(_device_line(data))
     if data.get("defect_description"):
         lines.append(f"Неисправность: {html.escape(data['defect_description'])}")
     if data.get("price_estimate"):
         lines.append(f"Оценка: {data['price_estimate']} грн")
-    lines.append(_client_line("Клиент", data))
+    if data.get("device_password"):
+        lines.append(f"Пароль: {html.escape(data['device_password'])}")
+    if data.get("intake_comment"):
+        lines.append(f"Комментарий: {html.escape(data['intake_comment'])}")
     return [line for line in lines if line]
 
 
@@ -1391,8 +1401,8 @@ async def repair_got_photo(message: Message, state: FSMContext) -> None:
     file = await message.bot.get_file(photo.file_id)
     buf = await message.bot.download_file(file.file_path)
     await state.update_data(photo_bytes=buf.read())
-    await state.set_state(RepairIntake.defect)
-    await _advance(message, state, "Неисправность (что случилось с устройством):")
+    await state.set_state(RepairIntake.phone)
+    await _advance(message, state, "Телефон клиента:")
 
 
 @router.message(RepairIntake.photo)
@@ -1400,48 +1410,7 @@ async def repair_photo_fallback(message: Message, state: FSMContext) -> None:
     await _nudge(message, state, "Пришлите фото устройства (как фото, не файлом).")
 
 
-@router.message(RepairIntake.defect, F.text)
-async def repair_got_defect(message: Message, state: FSMContext) -> None:
-    defect = message.text.strip()
-    if not defect:
-        await _nudge(message, state, "Опишите неисправность.")
-        return
-    await state.update_data(defect_description=defect)
-    await state.set_state(RepairIntake.model)
-    await _advance(message, state, "Модель устройства (например: iPhone 12):")
-
-
-@router.message(RepairIntake.model, F.text)
-async def repair_got_model(message: Message, state: FSMContext) -> None:
-    model = message.text.strip()
-    if not model:
-        await _nudge(message, state, "Не может быть пустым.")
-        return
-    await state.update_data(model=model)
-    await state.set_state(RepairIntake.price)
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="Пока не знаю ➡️", callback_data="repair_price_skip"),
-    ]])
-    await _advance(message, state, "Оценочная стоимость ремонта (грн):", reply_markup=keyboard)
-
-
-@router.message(RepairIntake.price, F.text)
-async def repair_got_price(message: Message, state: FSMContext) -> None:
-    price = _parse_positive_int(message.text)
-    if not price:
-        await _nudge(message, state, "Введите сумму числом, например: 500 — либо «Пока не знаю».")
-        return
-    await state.update_data(price_estimate=price)
-    await state.set_state(RepairIntake.phone)
-    await _advance(message, state, "Телефон клиента:")
-
-
-@router.callback_query(F.data == "repair_price_skip", RepairIntake.price)
-async def repair_skip_price(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.update_data(price_estimate=None)
-    await state.set_state(RepairIntake.phone)
-    await _advance_callback(callback, state, "Телефон клиента:")
-    await callback.answer()
+_MODEL_QUESTION = "Модель устройства (например: iPhone 12):"
 
 
 @router.message(RepairIntake.phone, F.text)
@@ -1452,7 +1421,7 @@ async def repair_got_phone(message: Message, state: FSMContext) -> None:
         return
     data = await state.update_data(client_phone=phone)
     # A returning client is already on record under this number — no
-    # point asking their name again; straight to the card.
+    # point asking their name again; straight on to the device.
     known_name = None
     try:
         store = get_store(data["store_id"])
@@ -1462,11 +1431,157 @@ async def repair_got_phone(message: Message, state: FSMContext) -> None:
     except KeyError:
         pass
     if known_name:
-        data = await state.update_data(client_name=known_name)
-        await _send_repair_confirm(message, state, data)
+        await state.update_data(client_name=known_name)
+        await state.set_state(RepairIntake.model)
+        await _advance(message, state, _MODEL_QUESTION)
         return
     await state.set_state(RepairIntake.name)
     await _advance(message, state, "Имя клиента:")
+
+
+@router.message(RepairIntake.name, F.text)
+async def repair_got_name(message: Message, state: FSMContext) -> None:
+    name = message.text.strip()
+    if not name:
+        await _nudge(message, state, "Имя не может быть пустым.")
+        return
+    await state.update_data(client_name=name)
+    await state.set_state(RepairIntake.model)
+    await _advance(message, state, _MODEL_QUESTION)
+
+
+@router.message(RepairIntake.model, F.text)
+async def repair_got_model(message: Message, state: FSMContext) -> None:
+    model = message.text.strip()
+    if not model:
+        await _nudge(message, state, "Не может быть пустым.")
+        return
+    await state.update_data(model=model)
+    await state.set_state(RepairIntake.defect)
+    await _advance(message, state, "Неисправность (что случилось с устройством):")
+
+
+@router.message(RepairIntake.defect, F.text)
+async def repair_got_defect(message: Message, state: FSMContext) -> None:
+    defect = message.text.strip()
+    if not defect:
+        await _nudge(message, state, "Опишите неисправность.")
+        return
+    await state.update_data(defect_description=defect)
+    await state.set_state(RepairIntake.price)
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="Пока не знаю ➡️", callback_data="repair_price_skip"),
+    ]])
+    await _advance(message, state, "Оценочная стоимость ремонта (грн):", reply_markup=keyboard)
+
+
+_PASSWORD_QUESTION = "Пароль от устройства:"
+
+
+def _password_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="Без пароля ➡️", callback_data="repair_password_skip"),
+    ]])
+
+
+@router.message(RepairIntake.price, F.text)
+async def repair_got_price(message: Message, state: FSMContext) -> None:
+    price = _parse_positive_int(message.text)
+    if not price:
+        await _nudge(message, state, "Введите сумму числом, например: 500 — либо «Пока не знаю».")
+        return
+    await state.update_data(price_estimate=price)
+    await state.set_state(RepairIntake.password)
+    await _advance(message, state, _PASSWORD_QUESTION, reply_markup=_password_keyboard())
+
+
+@router.callback_query(F.data == "repair_price_skip", RepairIntake.price)
+async def repair_skip_price(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.update_data(price_estimate=None)
+    await state.set_state(RepairIntake.password)
+    await _advance_callback(callback, state, _PASSWORD_QUESTION, reply_markup=_password_keyboard())
+    await callback.answer()
+
+
+_COMMENT_QUESTION = "Комментарий к заказу:"
+
+
+def _comment_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="Без комментария ➡️", callback_data="repair_comment_skip"),
+    ]])
+
+
+@router.message(RepairIntake.password, F.text)
+async def repair_got_password(message: Message, state: FSMContext) -> None:
+    await state.update_data(device_password=message.text.strip() or None)
+    await state.set_state(RepairIntake.comment)
+    await _advance(message, state, _COMMENT_QUESTION, reply_markup=_comment_keyboard())
+
+
+@router.callback_query(F.data == "repair_password_skip", RepairIntake.password)
+async def repair_skip_password(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.update_data(device_password=None)
+    await state.set_state(RepairIntake.comment)
+    await _advance_callback(callback, state, _COMMENT_QUESTION, reply_markup=_comment_keyboard())
+    await callback.answer()
+
+
+def _store_masters(store) -> list:
+    """Masters a repair of this точка may go to: its own and the ones not
+    tied to any точка — another shop's masters are not offered."""
+    with get_conn(store.db_path) as conn:
+        masters = core_auth.list_masters(conn)
+    return [m for m in masters if m["location_id"] in (None, store.location_id)]
+
+
+def _master_step_keyboard(data: dict) -> InlineKeyboardMarkup | None:
+    try:
+        store = get_store(data["store_id"])
+    except KeyError:
+        return None
+    rows = [[InlineKeyboardButton(text=m["name"][:40], callback_data=f"rm_pick:{m['id']}")] for m in _store_masters(store)]
+    rows.append([InlineKeyboardButton(text="Не назначать ➡️", callback_data="rm_pick:0")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@router.message(RepairIntake.comment, F.text)
+async def repair_got_comment(message: Message, state: FSMContext) -> None:
+    data = await state.update_data(intake_comment=message.text.strip() or None)
+    await state.set_state(RepairIntake.master)
+    await _advance(message, state, "Выберите мастера:", reply_markup=_master_step_keyboard(data))
+
+
+@router.callback_query(F.data == "repair_comment_skip", RepairIntake.comment)
+async def repair_skip_comment(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.update_data(intake_comment=None)
+    await state.set_state(RepairIntake.master)
+    await _advance_callback(callback, state, "Выберите мастера:", reply_markup=_master_step_keyboard(data))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("rm_pick:"), RepairIntake.master)
+async def repair_master_pick(callback: CallbackQuery, state: FSMContext) -> None:
+    """The last question: the master. After it — the «Проверьте данные»
+    card, where the choice can still be changed («👤 Мастер»)."""
+    data = await state.get_data()
+    master_id = int(callback.data.split(":", 1)[1])
+    master_name = None
+    if master_id:
+        try:
+            store = get_store(data["store_id"])
+        except KeyError:
+            await callback.answer("Магазин больше не настроен.", show_alert=True)
+            return
+        with get_conn(store.db_path) as conn:
+            master = core_auth.get_master(conn, master_id)
+        if not master or not master["active"]:
+            await callback.answer("Этого мастера выбрать нельзя.", show_alert=True)
+            return
+        master_name = master["name"]
+    data = await state.update_data(master_id=master_id or None, master_name=master_name)
+    await _send_repair_confirm(callback.message, state, data, consume=False)
+    await callback.answer()
 
 
 def _repair_confirm_keyboard() -> InlineKeyboardMarkup:
@@ -1479,16 +1594,19 @@ def _repair_confirm_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
-async def _send_repair_confirm(message: Message, state: FSMContext, data: dict) -> None:
+async def _send_repair_confirm(message: Message, state: FSMContext, data: dict, consume: bool = True) -> None:
     """The «Проверьте данные» card. Not _advance: it is a PHOTO message
     (Павел wants the actual device photo on the card, not a text line
     saying it exists), and _repost/_advance only ever send plain text.
     Same Clean-Chat shape by hand instead — consume the reply, send the
-    new screen, delete the previous one."""
+    new screen, delete the previous one. `consume=False` when it is
+    reached by a button (the master step) — `message` is then the bot's
+    own screen, not a reply of the employee's to clear away."""
     await state.set_state(RepairIntake.confirm)
     keyboard = _repair_confirm_keyboard()
     caption = _repair_confirm_caption(data)
-    await _consume(state, message)
+    if consume:
+        await _consume(state, message)
     previous_id = data.get("prompt_message_id")
     photo = BufferedInputFile(data["photo_bytes"], filename="device.jpg")
     sent = await message.answer_photo(photo, caption=caption, reply_markup=keyboard)
@@ -1509,25 +1627,18 @@ def _repair_confirm_caption(data: dict) -> str:
     lines = [
         "📋 Проверьте данные:",
         "",
+        f"Телефон: {html.escape(data['client_phone'])}",
+        f"Имя: {html.escape(data['client_name'])}",
         f"Модель: {html.escape(data['model'])}",
         f"Неисправность: {html.escape(data['defect_description'])}",
         price_line,
-        f"Мастер: {html.escape(data['master_name']) if data.get('master_name') else 'не назначен'}",
-        f"Телефон: {html.escape(data['client_phone'])}",
-        f"Имя: {html.escape(data['client_name'])}",
+        f"Пароль: {html.escape(data['device_password']) if data.get('device_password') else 'нет'}",
     ]
+    if data.get("intake_comment"):
+        lines.append(f"Комментарий: {html.escape(data['intake_comment'])}")
+    lines.append(f"Мастер: {html.escape(data['master_name']) if data.get('master_name') else 'не назначен'}")
     text = "\n".join(lines)
     return text if len(text) <= 1024 else text[:1023] + "…"
-
-
-@router.message(RepairIntake.name, F.text)
-async def repair_got_name(message: Message, state: FSMContext) -> None:
-    name = message.text.strip()
-    if not name:
-        await _nudge(message, state, "Имя не может быть пустым.")
-        return
-    data = await state.update_data(client_name=name)
-    await _send_repair_confirm(message, state, data)
 
 
 # «👤 Мастер» on the card: the buttons under the photo turn into the list
@@ -1544,9 +1655,7 @@ async def repair_master_menu(callback: CallbackQuery, state: FSMContext) -> None
     except KeyError:
         await callback.answer("Магазин больше не настроен.", show_alert=True)
         return
-    with get_conn(store.db_path) as conn:
-        masters = core_auth.list_masters(conn)
-    rows = [[InlineKeyboardButton(text=m["name"][:40], callback_data=f"rm_set:{m['id']}")] for m in masters]
+    rows = [[InlineKeyboardButton(text=m["name"][:40], callback_data=f"rm_set:{m['id']}")] for m in _store_masters(store)]
     rows.append([InlineKeyboardButton(text="Не назначать", callback_data="rm_set:0")])
     await callback.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     await callback.answer()
@@ -1619,6 +1728,7 @@ async def repair_confirm(callback: CallbackQuery, state: FSMContext) -> None:
             channel="offline", master_id=data.get("master_id"), price_estimate=data.get("price_estimate"),
             staff_id=staff["id"], photo=(data["photo_bytes"], ".jpg"),
             location_id=store.location_id, key=_tap_key(callback),
+            device_password=data.get("device_password"), intake_comment=data.get("intake_comment"),
         )
 
     # asyncio.to_thread: core.notify does blocking httpx calls to Telegram
