@@ -63,7 +63,7 @@ def store_switch_view(request: Request, staff=Depends(require_staff)):
 
 
 @router.post("/switch")
-def store_switch_do(request: Request, store_id: str = Form(...), staff=Depends(require_staff)):
+def store_switch_do(request: Request, store_id: str = Form(...), back: str = Form(""), staff=Depends(require_staff)):
     """Only among the точки this person may work in (every one for an
     owner/admin, their own for anyone else) — the token is re-minted for
     the same staff row, just pointing at the chosen точка."""
@@ -78,4 +78,6 @@ def store_switch_do(request: Request, store_id: str = Form(...), staff=Depends(r
     if staff["telegram_id"]:
         set_last_store(staff["telegram_id"], target_store.id)
     token = make_token(staff["id"], target_store.id)
-    return RedirectResponse(f"/?t={token}", status_code=303)
+    # The switcher on «Ещё» keeps the person on «Ещё»; the standalone
+    # page lands on Главная as before.
+    return RedirectResponse(f"/more?t={token}" if back == "more" else f"/?t={token}", status_code=303)

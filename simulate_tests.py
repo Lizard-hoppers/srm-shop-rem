@@ -3432,8 +3432,19 @@ def scenario_multi_store_login_and_switch_http() -> None:
                 switch_page = client.get(f"/store/switch?t={token_after_first_login}")
                 check("the switcher lists every точка by its Кабинет name",
                       "Кастомное Имя A" in switch_page.text and "Вторая Точка" in switch_page.text)
+                more_page = client.get(f"/more?t={token_after_first_login}").text
                 check("«Ещё» offers the switcher to someone with more than one точка",
-                      "/store/switch" in client.get(f"/more?t={token_after_first_login}").text)
+                      "/store/switch" in more_page)
+                # 11.10: не пунктом в списке, а карточкой под карточкой сотрудника —
+                # текущий магазин и кнопки всех доступных.
+                check("…as a card right under the person's own: the current точка by name, a button per точка",
+                      "Текущий магазин" in more_page and more_page.index("Текущий магазин") < more_page.index("/clients")
+                      and more_page.count('name="store_id"') == 2 and more_page.count('type="submit" class="secondary"') == 1)
+                stay = client.post("/store/switch?t=" + token_after_first_login, data={"store_id": "2", "back": "more"}, follow_redirects=False)
+                check("switching from that card stays on «Ещё», now in the other точка",
+                      stay.status_code == 303 and stay.headers["location"].startswith("/more?t=")
+                      and read_token(stay.headers["location"].split("t=", 1)[1])["store_id"] == "2")
+                client.post("/store/switch?t=" + token_after_first_login, data={"store_id": "1"}, follow_redirects=False)
 
                 switch = client.post("/store/switch?t=" + token_after_first_login, data={"store_id": "2"}, follow_redirects=False)
                 check("switching to точка 2 redirects (303)", switch.status_code == 303)

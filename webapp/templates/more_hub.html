@@ -2,13 +2,37 @@
 {% import "_icons.html" as icons %}
 {% block title %}{{ t('nav_more') }}{% endblock %}
 {% block content %}
-<div class="card profile-card">
+<div class="card profile-card"{% if multi_store_access %} style="margin-bottom: 10px;"{% endif %}>
   <div class="profile-avatar">{{ (staff.name or '?')[0]|upper }}</div>
   <div>
     <div class="profile-name">{{ staff.name }}</div>
     <div class="profile-role">{{ role_labels.get(staff.role, staff.role) }}</div>
   </div>
 </div>
+{% if multi_store_access %}
+{# В каком магазине человек сейчас — такой же карточкой, как он сам, и
+   тут же переключатель: нажал на другой магазин — оказался в нём. #}
+<div class="card profile-card" style="flex-wrap: wrap;">
+  <div class="profile-avatar">{{ (current_store_name or '?')[0]|upper }}</div>
+  <div>
+    <div class="profile-name">{{ current_store_name }}</div>
+    <div class="profile-role">{{ t('more_store_current') }}</div>
+  </div>
+  <div style="display: flex; gap: 8px; width: 100%;">
+    {% for store in accessible %}
+    <form method="post" action="{{ link('/store/switch') }}" style="flex: 1; margin: 0;">
+      <input type="hidden" name="store_id" value="{{ store.id }}">
+      <input type="hidden" name="back" value="more">
+      {% if store.id == current_store_id %}
+      <button type="button" class="secondary" style="width: 100%; border-color: var(--accent); color: var(--accent-2);">{{ store.name }}</button>
+      {% else %}
+      <button type="submit" class="secondary" style="width: 100%;">{{ store.name }}</button>
+      {% endif %}
+    </form>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
 
 <div class="nav-list">
   <a class="card nav-card" href="{{ link('/clients') }}">
@@ -81,16 +105,6 @@
     <div class="nav-card-body">
       <div class="nav-card-title">{{ t('more_journal') }}</div>
       <div class="nav-card-sub">{{ t('more_journal_sub') }}</div>
-    </div>
-    <div class="chevron">{{ icons.icon('chevron', 18) }}</div>
-  </a>
-  {% endif %}
-  {% if multi_store_access %}
-  <a class="card nav-card" href="{{ link('/store/switch') }}">
-    <div class="card-icon">{{ icons.icon('repeat', 18) }}</div>
-    <div class="nav-card-body">
-      <div class="nav-card-title">{{ t('more_store_switch') }}</div>
-      <div class="nav-card-sub">{{ t('more_store_switch_sub') }}</div>
     </div>
     <div class="chevron">{{ icons.icon('chevron', 18) }}</div>
   </a>

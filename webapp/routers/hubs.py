@@ -98,5 +98,10 @@ async def warehouse_scan_photo(photo: UploadFile = File(...), staff=Depends(requ
 
 @router.get("/more")
 def more_hub(request: Request, staff=Depends(require_staff)):
-    multi_store_access = len(stores_for_staff(staff)) > 1
-    return render(request, "more_hub.html", staff=staff, multi_store_access=multi_store_access)
+    accessible = stores_for_staff(staff)
+    current = request.state.store
+    return render(
+        request, "more_hub.html", staff=staff, multi_store_access=len(accessible) > 1,
+        accessible=accessible, current_store_id=current.id,
+        current_store_name=next((s.name for s in accessible if s.id == current.id), current.name),
+    )
