@@ -25,6 +25,7 @@ from bot.quick_actions import ButtonTextMiddleware
 from bot.quick_actions import router as quick_actions_router
 from bot.repair_actions import router as repair_actions_router
 from bot.repair_attachments import router as repair_attachments_router
+from bot.repairs_button import router as repairs_button_router
 from bot.sale_flow import router as sale_flow_router
 from bot.supplier_chat import router as supplier_chat_router
 from bot.transfer_flow import router as transfer_flow_router
@@ -59,6 +60,8 @@ def build_dispatcher() -> Dispatcher:
     dp.include_router(router)
     # «Бот, …» — a question to the bot itself (bot/assistant_chat.py): ahead
     # of the note handler, so it is answered even when sent as a reply.
+    # «🔧 Ремонты», the button docked in the groups (bot/repairs_button.py).
+    dp.include_router(repairs_button_router)
     dp.include_router(assistant_chat_router)
     dp.include_router(reminder_flow.router)
     # Before quick_actions: that router ends in a catch-all for every FSM

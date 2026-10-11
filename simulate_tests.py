@@ -7996,6 +7996,85 @@ def scenario_reminders() -> None:
             ai_notes.parse_reminder, ai_notes.analyze = orig_parse, orig_analyze
 
 
+def scenario_repairs_button() -> None:
+    """«🔧 Ремонты» — the button docked under the input field in the
+    masters' group and the work group."""
+    print("scenario: кнопка «Ремонты» в группах — список актуальных ремонтов одним нажатием")
+    import asyncio
+    import datetime as dt
+
+    from aiogram import Bot
+    from aiogram.types import Chat, Message, Update, User
+
+    from bot import repairs_button
+    from bot.quick_actions import BTN_REPAIRS_LIST
+
+    WORK, MASTERS, ELSEWHERE, TOPIC, ANYONE = -1004480000311, -1004480000312, -1004480000313, 5, 889201
+
+    with tempfile.TemporaryDirectory() as tmp, _separate_base(tmp, "rbutton.sqlite3", ("007",)) as db_path:
+        with get_conn(db_path) as conn:
+            conn.execute("UPDATE locations SET staff_group_chat_id = ?, masters_group_chat_id = ?, repair_topic_id = ? WHERE id = 1", (WORK, MASTERS, TOPIC))
+            owner = auth.create_staff(conn, "rb-owner", "pass", "Павел", "owner")
+            anna = clients.get_or_create_by_phone(conn, "Анна", "+380671239001", source="offline")
+            first = repairs.create_repair(conn, anna, "Смартфон", "Apple", "iPhone 13", None, "Экран", "offline", None, 1500, owner, location_id=1)
+            done = repairs.create_repair(conn, anna, "Смартфон", "Xiaomi", "Redmi 12", None, "АКБ", "offline", None, 700, owner, location_id=1)
+            conn.execute("UPDATE repair_orders SET status = 'issued' WHERE id = ?", (done,))
+        sent: list[dict] = []
+
+        class _FakeBot(Bot):
+            async def __call__(self, method, request_timeout=None):
+                name = type(method).__name__
+                if name == "SendMessage":
+                    markup = getattr(method, "reply_markup", None)
+                    sent.append({"send": method.text, "thread": method.message_thread_id, "id": 9700 + len(sent) + 10 * len(seen),
+                                 "keyboard": [[b.text for b in row] for row in getattr(markup, "keyboard", None) or []],
+                                 "persistent": getattr(markup, "is_persistent", None)})
+                    return Message(message_id=sent[-1]["id"], date=dt.datetime.now(), chat=Chat(id=method.chat_id, type="supergroup"), text="x").as_(self)
+                if name == "DeleteMessage":
+                    sent.append({"delete": method.message_id})
+                return True
+
+        seen: list[int] = []
+
+        async def run() -> None:
+            bot = _FakeBot(token="123456:test-bot-token-not-real")
+            dp = _the_dispatcher()
+            counter = 6000
+
+            async def say(text: str, chat_id: int, thread: int | None = None) -> int:
+                nonlocal counter
+                counter += 1
+                seen.append(counter)
+                sent.clear()
+                await dp.feed_update(bot, Update(update_id=counter, message=Message(
+                    message_id=counter, date=dt.datetime.now(), chat=Chat(id=chat_id, type="supergroup", is_forum=thread is not None),
+                    message_thread_id=thread, is_topic_message=True if thread is not None else None,
+                    from_user=User(id=ANYONE, is_bot=False, first_name="Мастер"), text=text)))
+                return counter
+
+            tap = await say("🔧️ Ремонты", MASTERS)
+            listing = [m for m in sent if "send" in m]
+            check("the button's tap (as the phone sends it, with the invisible selector) in the masters' group shows the repairs not handed out — from anyone in the group, a master needs no CRM account",
+                  len(listing) == 1 and "Ремонтов не выдано: 1" in listing[0]["send"] and "iPhone 13" in listing[0]["send"] and "Redmi 12" not in listing[0]["send"])
+            check("the list carries the keyboard again, one button, persistent — it stays docked and comes back for whoever lost it",
+                  listing[0]["keyboard"] == [[BTN_REPAIRS_LIST]] and listing[0]["persistent"] is True)
+            check("the «🔧 Ремонты» line the tap sent is removed from the chat", sent[0] == {"delete": tap})
+            previous = listing[0]["id"]
+            await say(BTN_REPAIRS_LIST, MASTERS)
+            check("a second tap takes the previous list away — the fresh one is the last message, lists don't pile up", {"delete": previous} in sent and len([m for m in sent if "send" in m]) == 1)
+            await say(BTN_REPAIRS_LIST, WORK, thread=TOPIC)
+            check("in the work group's «Ремонты» topic the list is sent into that topic", [m["thread"] for m in sent if "send" in m] == [TOPIC] and {"delete": previous} not in sent)
+            await say("бот, сколько у нас ремонтов", MASTERS)
+            check("«бот, сколько у нас ремонтов» gives the same list and attaches the button too", [m["keyboard"] for m in sent if "send" in m] == [[[BTN_REPAIRS_LIST]]])
+            await say(BTN_REPAIRS_LIST, ELSEWHERE)
+            check("in a group that isn't a shop's the text does nothing", sent == [])
+            with get_conn(db_path) as conn:
+                check("the button only reads — nothing about the repairs changed", repairs.get_repair(conn, first)["status"] == "new")
+
+        asyncio.run(run())
+        repairs_button._last_list.clear()
+
+
 def scenario_supplier_chat() -> None:
     """Группа с поставщиком: файл со сметой → одна карточка, вопросы в
     одном порядке (магазин → сумма → оплата → счёт → курс → провести),
@@ -8725,6 +8804,7 @@ def main() -> None:
     scenario_reminders()
     scenario_agent_actions()
     scenario_supplier_chat()
+    scenario_repairs_button()
     if os.path.exists(_WEBAPP_TEST_DB):
         os.remove(_WEBAPP_TEST_DB)
 

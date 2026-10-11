@@ -209,12 +209,11 @@ async def undo_action(callback: CallbackQuery) -> None:
 
 
 async def _send_list(message: Message, store, statuses: tuple[str, ...]) -> None:
-    with get_conn(store.db_path) as conn:
-        chunks = repair_digest.build(
-            conn, store.location_id, statuses=statuses, prefer_chat_id=message.chat.id, topics=_topics(store),
-        )
-    for chunk in chunks:
-        await message.answer(chunk, link_preview_options=_NO_PREVIEW)
+    # Imported here: that module takes its button's text from quick_actions,
+    # which this one already pulls in — no cycle, just kept out of the header.
+    from bot import repairs_button
+
+    await repairs_button.send_list(message, store, statuses)
 
 
 async def _send_card(message: Message, store, staff, order_id: int) -> None:

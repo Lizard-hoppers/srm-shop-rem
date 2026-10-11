@@ -94,8 +94,12 @@ BTN_SUMMARY = "📊 Сводка"
 BTN_CASH = "💵 Касса"
 BTN_TRANSFER = "🔁 Перемещение"
 BTN_CANCEL = "❌ Отмена"
+# The one button of the group keyboard (bot/repairs_button.py) — listed
+# here so its text is normalised like the rest.
+BTN_REPAIRS_LIST = "🔧 Ремонты"
 _ENTRY_BUTTONS = {
     BTN_SALE, BTN_REPAIR, BTN_REPAIR_LEGACY, BTN_OUR_REPAIR, BTN_CLIENT, BTN_BUYBACK, BTN_PURCHASE, BTN_SUMMARY, BTN_CASH, BTN_TRANSFER, BTN_CANCEL,
+    BTN_REPAIRS_LIST,
 }
 
 
