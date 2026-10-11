@@ -33,6 +33,7 @@ from core import repair_notes as _notes
 from core import repairs as _repairs
 from core import sales as _sales
 from core import settlements as _settlements
+from core import supplier_accounts as _suppliers
 from core.timefmt import KYIV, UTC, kyiv_date_range_utc, kyiv_datetime, kyiv_today, ru_date
 
 MAX_ROWS = 25
@@ -430,6 +431,20 @@ def debts(conn, ctx, args) -> dict:
             "whom_we_owe": [{"name": d["name"], "phone": d["phone"], "uah": -d["balance"]} for d in standing["creditors"]]}
 
 
+def supplier_debts(conn, ctx, args) -> dict:
+    """Поставщики деталей: взаиморасчёты по каждому и последние сметы/оплаты."""
+    rows = []
+    for supplier in _suppliers.all_balances(conn):
+        owed = {cur: value for cur, value in supplier["balances"].items() if value > 0}
+        held = {cur: -value for cur, value in supplier["balances"].items() if value < 0}
+        rows.append({"supplier": supplier["name"], "we_owe": owed, "our_deposit_with_them": held})
+    recent = [{"number": _suppliers.label(row), "supplier": row["supplier_name"], "point": row["location_name"],
+               "amount": row["amount"], "currency": row["currency"],
+               "kind": _suppliers.MODES[row["pay_mode"]] if row["kind"] == "invoice" else "оплата поставщику",
+               "when": kyiv_datetime(row["posted_at"])} for row in _suppliers.recent(conn, limit=10)]
+    return {"suppliers": rows, "recent": recent}
+
+
 def masters(conn, ctx, args) -> dict:
     rows = conn.execute("SELECT id, name, pay_type, pay_value FROM staff WHERE role = 'master' AND active = 1 ORDER BY name").fetchall()
     return {"masters": [
@@ -518,6 +533,7 @@ TOOLS: dict[str, tuple] = {
     "cash_state": (cash_state, True, "Остатки по счетам кассы и приход/расход за период.", {**_DATES, **_ALL}, []),
     "profit": (profit, True, "Чистая прибыль за период: продажи, ремонты, расходы, списания.", {**_DATES, **_ALL}, []),
     "debts": (debts, True, "Кто должен нам, кому должны мы (клиенты и мастера), товар по себестоимости.", {**_ALL}, []),
+    "supplier_debts": (supplier_debts, True, "Поставщики деталей: кому сколько должны, где наш депозит, последние сметы и оплаты.", {}, []),
     "masters": (masters, True, "Мастера: ставка, начислено, выплачено, долг, сколько ремонтов в работе.", {}, []),
     "journal": (journal, True, "Журнал документов за период, можно одного типа.",
         {**_DATES, "doc_type": {"type": "string", "enum": list(_documents.DOC_TYPES)}, **_ALL}, []),

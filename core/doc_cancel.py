@@ -28,12 +28,13 @@ from core import inventory as _inventory
 from core import masters as _masters
 from core import orders as _orders
 from core import settlements as _settlements
+from core import supplier_accounts as _suppliers
 from core import stock_transfers as _stock_transfers
 from core.documents import DocumentError
 
 CANCELLABLE_TYPES = (
     "sale", "cash_out", "cash_adjust", "exchange", "money_transfer",
-    "receipt", "stock_in", "writeoff", "transfer", "buyback", "cash_in", "client_order", "production",
+    "receipt", "stock_in", "writeoff", "transfer", "buyback", "cash_in", "client_order", "production", "supplier_invoice", "supplier_payment",
 )
 
 
@@ -80,6 +81,12 @@ def _cancel_production(conn: sqlite3.Connection, doc: sqlite3.Row, staff_id: int
         _production.cancel(conn, doc["ref_id"], staff_id, mark_document=False)
     except (_production.ProductionError, _stock_transfers.TransferError, _inventory.InsufficientStockError) as exc:
         raise DocumentError(str(exc)) from exc
+
+
+def _cancel_supplier_invoice(conn: sqlite3.Connection, doc: sqlite3.Row, staff_id: int) -> None:
+    """A проведённая смета or an оплата поставщику: what we owed for it
+    and what was paid for it both stop counting."""
+    _suppliers.cancel_posted(conn, doc["ref_id"])
 
 
 def _cancel_client_order(conn: sqlite3.Connection, doc: sqlite3.Row, staff_id: int) -> None:
@@ -190,6 +197,7 @@ _REVERSERS = {
     "sale": _cancel_sale, "cash_out": _cancel_cash, "cash_adjust": _cancel_cash,
     "exchange": _cancel_exchange, "money_transfer": _cancel_transfer,
     "cash_in": _cancel_cash, "client_order": _cancel_client_order, "production": _cancel_production,
+    "supplier_invoice": _cancel_supplier_invoice, "supplier_payment": _cancel_supplier_invoice,
 }
 
 

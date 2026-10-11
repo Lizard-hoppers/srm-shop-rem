@@ -21,6 +21,11 @@ DEFAULT_LANGUAGE = "ru"
 
 _STRINGS: dict[str, dict[str, str]] = {
     "ru": {
+        "doc_type_supplier_payment": "Оплата поставщику",
+        "doc_type_supplier_invoice": "Счёт поставщика",
+        "more_home_screen": "На главный экран",
+        "more_home_screen_sub": "Иконка CRM на рабочем столе телефона",
+        "more_home_screen_done": "Готово — иконка на главном экране",
         "repair_note_off_card": "убрана с карточки в чате",
         "repair_stage_label": "стадия",
         "repair_notes_title": "Заметки из чата",
@@ -754,6 +759,11 @@ _STRINGS: dict[str, dict[str, str]] = {
         "no_rate_hint": "Ставка не задана — выплата не считается.",
     },
     "uk": {
+        "doc_type_supplier_payment": "Оплата постачальнику",
+        "doc_type_supplier_invoice": "Рахунок постачальника",
+        "more_home_screen": "На головний екран",
+        "more_home_screen_sub": "Іконка CRM на робочому столі телефону",
+        "more_home_screen_done": "Готово — іконка на головному екрані",
         "repair_note_off_card": "прибрана з картки в чаті",
         "repair_stage_label": "стадія",
         "repair_notes_title": "Нотатки з чату",

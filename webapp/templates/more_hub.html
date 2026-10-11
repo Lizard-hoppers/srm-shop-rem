@@ -105,6 +105,15 @@
     <div class="chevron">{{ icons.icon('chevron', 18) }}</div>
   </a>
   {% endif %}
+  {# Shown by home-screen.js only where Telegram can actually do it. #}
+  <a class="card nav-card" href="#" id="homeScreenCard" style="display:none;" data-done="{{ t('more_home_screen_done') }}">
+    <div class="card-icon">{{ icons.icon('home', 18) }}</div>
+    <div class="nav-card-body">
+      <div class="nav-card-title">{{ t('more_home_screen') }}</div>
+      <div class="nav-card-sub" id="homeScreenSub">{{ t('more_home_screen_sub') }}</div>
+    </div>
+    <div class="chevron">{{ icons.icon('chevron', 18) }}</div>
+  </a>
   <a class="card nav-card" href="{{ link('/settings') }}">
     <div class="card-icon">{{ icons.icon('settings', 18) }}</div>
     <div class="nav-card-body">
@@ -114,4 +123,5 @@
     <div class="chevron">{{ icons.icon('chevron', 18) }}</div>
   </a>
 </div>
+<script src="/static/home-screen.js?v={{ asset_version }}"></script>
 {% endblock %}

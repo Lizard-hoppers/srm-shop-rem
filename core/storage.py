@@ -97,6 +97,84 @@ CREATE TABLE IF NOT EXISTS repair_order_messages (
 );
 CREATE INDEX IF NOT EXISTS idx_repair_order_messages_order ON repair_order_messages(order_id);
 
+-- Группы с поставщиками (10.10): у каждого поставщика деталей — свой
+-- чат в Telegram; бот в нём читает сметы и ведёт взаиморасчёты
+-- (core.supplier_accounts, bot/supplier_chat.py).
+--   supplier_chats    which Telegram group is which supplier's.
+--   supplier_invoices a смета read from a file posted there, and — kind
+--                     'payment' — a payment/deposit a staff member reports
+--                     in the chat. Both go through the same fixed steps
+--                     (step: store → amount → mode → account → rate →
+--                     confirm) on ONE message the bot keeps editing, so
+--                     the state lives here, not in memory: a restart or a
+--                     week's pause loses nothing.
+--   supplier_ledger   signed rows per supplier per currency: amount > 0 —
+--                     we owe him more (a смета), amount < 0 — less (we
+--                     paid). The sum is the balance: > 0 «мы должны», < 0
+--                     «наш депозит у поставщика». Cancelled, never deleted.
+--   supplier_chat_messages  what was written in those chats (the bot is
+--                     asked to read everything that happens there).
+CREATE TABLE IF NOT EXISTS supplier_chats (
+    chat_id TEXT PRIMARY KEY,
+    supplier_id INTEGER NOT NULL REFERENCES suppliers(id),
+    title TEXT,
+    linked_by INTEGER REFERENCES staff(id),
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS supplier_invoices (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL DEFAULT 'invoice',
+    supplier_id INTEGER NOT NULL REFERENCES suppliers(id),
+    chat_id TEXT,
+    source_message_id INTEGER,
+    card_message_id INTEGER,
+    file_name TEXT,
+    items_json TEXT NOT NULL DEFAULT '{}',
+    currency TEXT NOT NULL DEFAULT 'UAH',
+    total REAL,
+    amount REAL,
+    location_id INTEGER REFERENCES locations(id),
+    pay_mode TEXT,
+    account_id INTEGER REFERENCES money_accounts(id),
+    rate REAL,
+    step TEXT NOT NULL DEFAULT 'store',
+    status TEXT NOT NULL DEFAULT 'draft',
+    staff_id INTEGER REFERENCES staff(id),
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    posted_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_supplier_invoices_card ON supplier_invoices(chat_id, card_message_id);
+
+CREATE TABLE IF NOT EXISTS supplier_ledger (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    supplier_id INTEGER NOT NULL REFERENCES suppliers(id),
+    currency TEXT NOT NULL DEFAULT 'UAH',
+    amount REAL NOT NULL,
+    kind TEXT NOT NULL,
+    ref_type TEXT,
+    ref_id INTEGER,
+    location_id INTEGER REFERENCES locations(id),
+    staff_id INTEGER REFERENCES staff(id),
+    comment TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    cancelled_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_supplier_ledger_supplier ON supplier_ledger(supplier_id);
+
+CREATE TABLE IF NOT EXISTS supplier_chat_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id TEXT NOT NULL,
+    message_id INTEGER,
+    author_id INTEGER,
+    author_name TEXT,
+    is_staff INTEGER NOT NULL DEFAULT 0,
+    text TEXT,
+    file_name TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_supplier_chat_messages_chat ON supplier_chat_messages(chat_id, id);
+
 -- Напоминания (10.10): «бот, напомни завтра в 10:20 …» — a line of text
 -- the bot posts into a chat at a set time (core.reminders). due_at is UTC
 -- like every other timestamp here; chat_id/thread_id — where it goes;

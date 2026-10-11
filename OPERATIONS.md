@@ -996,6 +996,13 @@ Telegram и на старых клиентах обе переменные 0 —
 десктопе полноэкранный режим намеренно не запрашивается (он развернул бы
 само окно Telegram на весь монитор).
 
+**«На главный экран»** — карточка в «Ещё» (`webapp/static/home-screen.js`):
+вызывает `WebApp.addToHomeScreen()`; показывается только там, где Telegram
+это умеет (Bot API 8.0+, статус не `unsupported`), и прячется, когда
+иконка уже добавлена. То же вручную: «⋯» в шапке приложения → «Добавить
+на главный экран». Прямая ссылка на приложение:
+`https://t.me/OO7servis_bot?startapp`.
+
 **BotFather — «Main Mini App»** (делает Павел, один раз): @BotFather →
 /mybots → бот → Bot Settings → Configure Mini App → Enable Mini App → URL
 `https://crm.45.94.156.136.sslip.io/miniapp`. После этого у бота

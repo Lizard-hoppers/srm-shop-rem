@@ -2332,6 +2332,11 @@ def scenario_webapp_forms(db_path: str) -> None:
         check("it expands everywhere, goes fullscreen on phones only, keeps a swipe from closing the app, and reports the room Telegram's controls take",
               all(x in script for x in ("tg.expand()", "requestFullscreen", 'tg.platform === "ios" || tg.platform === "android"',
                                         "disableVerticalSwipes", "--tg-top", "contentSafeAreaInset")) and "if (!tg || !tg.initData) return;" in script)
+        more_page = client.get(f"/more?t={token}").text
+        home_js = client.get("/static/home-screen.js").text
+        check("«Ещё» carries the «На главный экран» card, hidden until Telegram says it can add the icon",
+              'id="homeScreenCard" style="display:none;"' in more_page and "На главный экран" in more_page and "/static/home-screen.js" in more_page
+              and all(x in home_js for x in ("addToHomeScreen", "checkHomeScreenStatus", '"unsupported"', '"added"', 'isVersionAtLeast("8.0")')))
         css = client.get("/static/style.css").text
         check("the header and the tab bar leave that room; outside Telegram it is zero", "var(--tg-top, 0px)" in css and "var(--tg-bottom, 0px)" in css)
         dash_before_lang = client.get(f"/?t={token}")
@@ -7991,6 +7996,313 @@ def scenario_reminders() -> None:
             ai_notes.parse_reminder, ai_notes.analyze = orig_parse, orig_analyze
 
 
+def scenario_supplier_chat() -> None:
+    """Группа с поставщиком: файл со сметой → одна карточка, вопросы в
+    одном порядке (магазин → сумма → оплата → счёт → курс → провести),
+    взаиморасчёты (долг / депозит), команды, отмена."""
+    print("scenario: группа поставщика — смета из файла, шаги, долг/депозит, оплата, отмена")
+    import asyncio
+    import datetime as dt
+    import io
+    import zipfile
+
+    from aiogram import Bot
+    from aiogram.types import CallbackQuery, Chat, Document, Message, PhotoSize, Update, User
+
+    from bot import supplier_chat
+    from core import agent_tools, supplier_accounts as sup, supplier_files
+
+    def _raises(action, error) -> bool:
+        try:
+            action()
+        except error:
+            return True
+        return False
+
+    WORK, CHAT, OTHER, OWNER_TG, KEEPER_TG, VENDOR_TG = -1004480000211, -1004480000212, -1004480000213, 889101, 889102, 889103
+
+    # ---- чтение файла: без сети
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("xl/sharedStrings.xml", '<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><si><t>Дисплей iPhone 13</t></si><si><r><t>Ито</t></r><r><t>го</t></r></si></sst>')
+        z.writestr("xl/worksheets/sheet1.xml", '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row><c t="s"><v>0</v></c><c><v>2</v></c><c><v>1200</v></c></row><row><c t="s"><v>1</v></c><c/><c><v>2400</v></c></row></sheetData></worksheet>')
+    check("an Excel смета is unpacked into rows without any extra package", supplier_files._xlsx_text(buf.getvalue()) == "Дисплей iPhone 13\t2\t1200\nИтого\t\t2400")
+    tidy = supplier_files.tidy({"is_invoice": True, "items": [{"name": " Дисплей  13", "qty": "2", "price": "1 200,50"}, {"name": "", "qty": 1, "price": 5}], "total": 2500, "currency": "usd"})
+    check("the model only transcribes: numbers are re-read, the sum by lines is counted by code and kept next to the printed total",
+          tidy["items"] == [{"name": "Дисплей 13", "qty": 2, "price": 1200.5}] and tidy["total"] == 2500 and tidy["lines_total"] == 2401 and tidy["currency"] == "USD")
+    check("a file that is not a смета, or has no sum at all, is nothing", supplier_files.tidy({"is_invoice": False, "items": [{"name": "x", "price": 5}]}) is None
+          and supplier_files.tidy({"is_invoice": True, "items": [{"name": "x"}], "total": None}) is None)
+    check("no currency in the file — гривня, and it is marked as a guess", supplier_files.tidy({"is_invoice": True, "items": [], "total": 10})["currency_known"] is False)
+    for name, words in (("price.xls", ".xlsx"), ("clip.mp4", "не читаю"), ("a.xlsx", "повреждён")):
+        try:
+            supplier_files.read(name, b"not a zip")
+            check(f"{name} is refused in words", False)
+        except supplier_files.FileError as exc:
+            check(f"{name} is refused in words for the chat", words in str(exc))
+
+    with tempfile.TemporaryDirectory() as tmp, _separate_base(tmp, "suppliers.sqlite3", ("007", "Гибрид сервис")) as db_path:
+        with get_conn(db_path) as conn:
+            conn.execute("UPDATE locations SET staff_group_chat_id = ? WHERE id = 1", (WORK,))
+            owner = auth.create_staff(conn, "sp-owner", "pass", "Павел", "owner")
+            auth.link_staff_telegram(conn, "sp-owner", OWNER_TG)
+            auth.create_staff(conn, "sp-keeper", "pass", "Кладовщик", "storekeeper", location_id=1)
+            auth.link_staff_telegram(conn, "sp-keeper", KEEPER_TG)
+            cash.record_adjustment(conn, 20000, "старт", owner, location_id=2)
+            acc = {(a["location_id"], a["kind"], a["currency"]): a["id"] for a in accounts.list_accounts(conn)}
+            hybrid_cash, hybrid_usd = acc[(2, "cash", "UAH")], acc[(2, "cash", "USD")]
+            cash.post(conn, "income", accounts.get_account(conn, hybrid_usd), 500, staff_id=owner, category="other", comment="старт", rate=40)
+
+            # ---- учёт: шаги и книги
+            link = sup.link_chat(conn, OTHER, "Запчасти Одесса", owner)
+            check("a group is tied to a supplier named after it; the same name again is the same supplier",
+                  link["supplier_name"] == "Запчасти Одесса" and sup.link_chat(conn, OTHER, "x", owner, "запчасти одесса")["supplier_id"] == link["supplier_id"])
+            sid = link["supplier_id"]
+            one = sup.create(conn, supplier_id=sid, chat_id=OTHER, total=5400, file_name="s.xlsx")
+            check("a смета starts as a draft at «магазин», and nothing is in the books", sup.get(conn, one)["step"] == "store" and sup.balances(conn, sid) == {})
+            try:
+                sup.post(conn, one, owner)
+                check("it can't be проведена before the questions are answered", False)
+            except sup.SupplierError as exc:
+                check("it can't be проведена before the questions are answered", "ответьте" in str(exc))
+            check("магазин → сумма (asked even though the file had one) → оплата → провести, always in this order",
+                  sup.choose_store(conn, one, 2, owner)["step"] == "amount" and sup.set_amount(conn, one, None, owner)["step"] == "mode"
+                  and sup.choose_mode(conn, one, "debt", owner)["step"] == "confirm")
+            till = accounts.balance(conn, hybrid_cash)
+            posted = sup.post(conn, one, owner)
+            doc = sup.document(conn, posted)
+            check("«в долг»: we owe the supplier the amount, the касса is untouched, СЧ-001 is in the journal for точка «Гибрид сервис»",
+                  sup.balances(conn, sid) == {"UAH": 5400} and accounts.balance(conn, hybrid_cash) == till and sup.balance_text(conn, sid) == "мы должны 5400 UAH"
+                  and documents.doc_label(doc) == "СЧ-001" and doc["amount"] == 5400 and doc["location_id"] == 2 and "в долг" in doc["title"])
+            try:
+                sup.post(conn, one, owner)
+                check("проведено once only", False)
+            except sup.SupplierError as exc:
+                check("проведено once only", "Уже проведено" in str(exc))
+
+            two = sup.create(conn, supplier_id=sid, chat_id=OTHER, total=3000)
+            sup.choose_store(conn, two, 2, owner)
+            sup.set_amount(conn, two, "2 800", owner)
+            check("a different amount than the file's is typed at the «сумма» step", sup.get(conn, two)["amount"] == 2800 and sup.get(conn, two)["total"] == 3000)
+            try:
+                sup.choose_mode(conn, two, "deposit", owner)
+                check("«из депозита» is refused while the supplier holds nothing of ours", False)
+            except sup.SupplierError as exc:
+                check("«из депозита» is refused while the supplier holds nothing of ours", "Депозита не хватает" in str(exc))
+            check("«сейчас» asks for an account of that точка in the смета's currency", sup.choose_mode(conn, two, "now", owner)["step"] == "account"
+                  and [a["id"] for a in sup.payable_accounts(conn, sup.get(conn, two))] == [a["id"] for a in accounts.list_accounts(conn, 2) if a["currency"] == "UAH"])
+            try:
+                sup.choose_account(conn, two, acc[(1, "cash", "UAH")], owner)
+                check("another точка's account is refused", False)
+            except sup.SupplierError:
+                check("another точка's account is refused", True)
+            sup.choose_account(conn, two, hybrid_cash, owner)
+            sup.post(conn, two, owner)
+            row = conn.execute("SELECT * FROM cash_transactions WHERE ref_type = 'supplier_invoice' AND ref_id = ?", (two,)).fetchone()
+            check("«сейчас»: the money leaves the account as «Закупка», and the debt doesn't grow",
+                  accounts.balance(conn, hybrid_cash) == till - 2800 and row["category"] == "supplies" and sup.balances(conn, sid) == {"UAH": 5400})
+
+            pay = sup.create(conn, supplier_id=sid, chat_id=OTHER, kind="payment", total=9000)
+            check("a payment said in the chat skips «сумма» and «оплата»: магазин → счёт → провести",
+                  sup.choose_store(conn, pay, 2, owner)["step"] == "account" and sup.choose_account(conn, pay, hybrid_cash, owner)["step"] == "confirm")
+            paid = sup.post(conn, pay, owner)
+            check("paying more than we owe leaves a deposit with the supplier; the payment is ОП-… in the journal",
+                  sup.balance_text(conn, sid) == "наш депозит 3600 UAH" and accounts.balance(conn, hybrid_cash) == till - 11800
+                  and documents.doc_label(sup.document(conn, paid)) == f"ОП-{pay:03d}" and sup.document(conn, paid)["amount"] == -9000)
+
+            three = sup.create(conn, supplier_id=sid, chat_id=OTHER, total=1600)
+            sup.choose_store(conn, three, 1, owner)
+            sup.set_amount(conn, three, None, owner)
+            check("«из депозита» goes through when he holds enough — straight to «провести», no account", sup.choose_mode(conn, three, "deposit", owner)["step"] == "confirm")
+            sup.post(conn, three, owner)
+            check("…and it comes off the deposit, the касса untouched", sup.balance_text(conn, sid) == "наш депозит 2000 UAH" and accounts.balance(conn, hybrid_cash) == till - 11800)
+
+            usd = sup.create(conn, supplier_id=sid, chat_id=OTHER, total=100, currency="USD")
+            sup.choose_store(conn, usd, 2, owner)
+            sup.set_amount(conn, usd, None, owner)
+            sup.choose_mode(conn, usd, "now", owner)
+            check("a dollar смета is paid from a dollar account, and the course is asked", [a["id"] for a in sup.payable_accounts(conn, sup.get(conn, usd))] == [hybrid_usd]
+                  and sup.choose_account(conn, usd, hybrid_usd, owner)["step"] == "rate" and sup.set_rate(conn, usd, "41,5", owner)["step"] == "confirm")
+            sup.post(conn, usd, owner)
+            check("…the journal shows it in гривня by that course", sup.document(conn, sup.get(conn, usd))["amount"] == 4150 and accounts.balance(conn, hybrid_usd) == 400)
+            sup.set_currency(conn, sup.create(conn, supplier_id=sid, chat_id=OTHER, total=10), "EUR", owner)
+            check("the currency can be corrected while it is a draft; a проведённая one can't be touched",
+                  conn.execute("SELECT currency FROM supplier_invoices ORDER BY id DESC LIMIT 1").fetchone()["currency"] == "EUR" and _raises(lambda: sup.set_currency(conn, usd, "EUR", owner), sup.SupplierError))
+
+            doc_cancel.cancel_document(conn, sup.document(conn, sup.get(conn, two))["id"], owner, "ошибка")
+            check("cancelling a paid смета from the journal puts the money back", accounts.balance(conn, hybrid_cash) == till - 9000 and sup.get(conn, two)["status"] == "cancelled")
+            doc_cancel.cancel_document(conn, sup.document(conn, paid)["id"], owner, "ошибка")
+            check("cancelling a payment returns the money and the balance", accounts.balance(conn, hybrid_cash) == till and sup.balance_text(conn, sid) == "мы должны 7000 UAH")
+            tool = agent_tools.supplier_debts(conn, {}, {})
+            check("the assistant can tell what we owe suppliers (owner/admin only)", tool["suppliers"][0]["we_owe"] == {"UAH": 7000}
+                  and "supplier_debts" in agent_tools.available(True) and "supplier_debts" not in agent_tools.available(False))
+
+        # ---- весь путь через диспетчер
+        sent: list[dict] = []
+        readings = {
+            "смета.xlsx": {"items": [{"name": "Дисплей <13>", "qty": 2, "price": 1200}], "total": 2500, "printed_total": 2500, "lines_total": 2400, "currency": "UAH", "currency_known": True},
+            "гарантия.pdf": None, "photo.jpg": None,
+        }
+        asked_model: list = []
+
+        class _FakeBot(Bot):
+            async def __call__(self, method, request_timeout=None):
+                name = type(method).__name__
+                markup = getattr(method, "reply_markup", None)
+                buttons = [(b.text, b.callback_data) for row in getattr(markup, "inline_keyboard", None) or [] for b in row]
+                if name == "SendMessage":
+                    sent.append({"send": method.text, "buttons": buttons, "id": 9500 + len(sent)})
+                    return Message(message_id=sent[-1]["id"], date=dt.datetime.now(), chat=Chat(id=method.chat_id, type="supergroup"), text="x").as_(self)
+                if name == "EditMessageText":
+                    sent.append({"edit": method.text, "buttons": buttons, "id": method.message_id})
+                if name == "DeleteMessage":
+                    sent.append({"delete": method.message_id})
+                if name == "AnswerCallbackQuery":
+                    sent.append({"answer": method.text, "alert": bool(method.show_alert)})
+                return True
+
+        async def _no_download(bot, file_id):
+            return b"file"
+
+        orig_download, orig_read, orig_post = supplier_chat._download, supplier_files.read, httpx.post
+        supplier_chat._download = _no_download
+        supplier_files.read = lambda name, data: readings[name]
+        httpx.post = lambda *a, **k: asked_model.append(a) or (_ for _ in ()).throw(AssertionError("the model must not be called here"))
+
+        async def run() -> None:
+            bot = _FakeBot(token="123456:test-bot-token-not-real")
+            dp = _the_dispatcher()
+            counter = 4000
+
+            async def say(user_id: int, text=None, *, chat_id=CHAT, document=None, photo=False, reply_to=None) -> int:
+                nonlocal counter
+                counter += 1
+                sent.clear()
+                chat = Chat(id=chat_id, type="supergroup", title="TEVIX запчасти")
+                replied = Message(message_id=reply_to, date=dt.datetime.now(), chat=chat, text="?", from_user=User(id=123456, is_bot=True, first_name="bot")) if reply_to else None
+                await dp.feed_update(bot, Update(update_id=counter, message=Message(
+                    message_id=counter, date=dt.datetime.now(), chat=chat, reply_to_message=replied, text=text,
+                    from_user=User(id=user_id, is_bot=False, first_name="T"),
+                    document=Document(file_id="f", file_unique_id="u", file_name=document, file_size=1000) if document else None,
+                    photo=[PhotoSize(file_id="p", file_unique_id="pu", width=10, height=10, file_size=100)] if photo else None)))
+                return counter
+
+            async def press(user_id: int, data: str, card_id: int) -> None:
+                nonlocal counter
+                counter += 1
+                sent.clear()
+                chat = Chat(id=CHAT, type="supergroup")
+                await dp.feed_update(bot, Update(update_id=counter, callback_query=CallbackQuery(
+                    id=str(counter), from_user=User(id=user_id, is_bot=False, first_name="T"), chat_instance="c", data=data,
+                    message=Message(message_id=card_id, date=dt.datetime.now(), chat=chat, text="x", from_user=User(id=123456, is_bot=True, first_name="bot")))))
+
+            await say(VENDOR_TG, "/supplier TEVIX")
+            check("/supplier from anyone but the owner/admin gets no answer and ties nothing", sent == [])
+            await say(OWNER_TG, "/supplier TEVIX", chat_id=WORK)
+            check("a shop's own work group can't be made a supplier's", "рабочая группа" in sent[0]["send"])
+            await say(VENDOR_TG, "добрый день, смету скину", chat_id=CHAT)
+            with get_conn(db_path) as conn:
+                check("before the group is tied, nothing of it is kept", conn.execute("SELECT COUNT(*) AS n FROM supplier_chat_messages WHERE chat_id = ?", (str(CHAT),)).fetchone()["n"] == 0)
+            await say(OWNER_TG, "/supplier TEVIX")
+            check("/supplier TEVIX by the owner ties the group and says what the bot does here", "группа поставщика <b>TEVIX</b>" in sent[0]["send"] and "взаиморасчёты 0" in sent[0]["send"] and "бот, оплата" in sent[0]["send"])
+
+            await say(VENDOR_TG, "вот смета на дисплеи")
+            await say(VENDOR_TG, document="clip.mp4")
+            check("a video is not a смета — passed over in silence", sent == [])
+            await say(VENDOR_TG, photo=True)
+            check("a photo that isn't a смета (a part, a parcel) — silence too", sent == [])
+            await say(VENDOR_TG, document="price.xls")
+            check("an old .xls is answered with what to send instead", sent[0]["send"] == "📄 Читаю файл…" and ".xlsx" in sent[1]["edit"])
+            await say(VENDOR_TG, document="гарантия.pdf")
+            check("a document with no смета in it is answered so", "не нашёл сметы" in sent[1]["edit"])
+
+            await say(VENDOR_TG, document="смета.xlsx")
+            card_id = sent[0]["id"]
+            check("the supplier drops a смета: «читаю…» turns into the card — what was read, the mismatch flagged, and the FIRST question: which shop",
+                  sent[0]["send"] == "📄 Читаю файл…" and sent[1]["id"] == card_id and "Смета · TEVIX" in sent[1]["edit"] and "• Дисплей &lt;13&gt; — 2 × 1200" in sent[1]["edit"]
+                  and "Итого в файле: <b>2500 грн</b>" in sent[1]["edit"] and "По строкам выходит 2400" in sent[1]["edit"] and "В какой магазин это?" in sent[1]["edit"]
+                  and [b[0] for b in sent[1]["buttons"]] == ["🏪 007", "🏪 Гибрид сервис", "✖️ Не учитывать"])
+            with get_conn(db_path) as conn:
+                inv = conn.execute("SELECT * FROM supplier_invoices WHERE chat_id = ? ORDER BY id DESC LIMIT 1", (str(CHAT),)).fetchone()
+                tevix = inv["supplier_id"]
+            n = inv["id"]
+            await press(VENDOR_TG, f"sup:store:{n}:2", card_id)
+            with get_conn(db_path) as conn:
+                check("the supplier himself can't press the buttons", sent == [{"answer": "Это решает владелец или администратор.", "alert": True}] and sup.get(conn, n)["location_id"] is None)
+            await press(KEEPER_TG, f"sup:store:{n}:2", card_id)
+            check("nor a storekeeper — money with suppliers is the owner's and the admin's", sent[0]["alert"] is True)
+            await press(OWNER_TG, f"sup:store:{n}:2", card_id)
+            check("магазин chosen → the card (same message) asks the amount: confirm the file's, or answer with another",
+                  "🏪 Магазин: Гибрид сервис" in sent[0]["edit"] and "Сумма по смете — 2500 грн?" in sent[0]["edit"] and sent[0]["buttons"][0] == ("✅ Да, 2500 грн", f"sup:amt:{n}")
+                  and ("Валюта: USD", f"sup:cur:{n}:USD") in sent[0]["buttons"])
+            await say(VENDOR_TG, "2400", reply_to=card_id)
+            with get_conn(db_path) as conn:
+                check("a number from the supplier in reply to the card changes nothing", sent == [] and sup.get(conn, n)["amount"] == 2500)
+            await say(OWNER_TG, "2400", reply_to=card_id)
+            new_card = sent[1]["id"]
+            check("the owner answers the card with «2400»: the old card is removed and the next question comes as the LAST message",
+                  sent[0] == {"delete": card_id} and "💰 Сумма: 2400 грн" in sent[1]["send"] and "Как рассчитываемся?" in sent[1]["send"]
+                  and [b[1] for b in sent[1]["buttons"]][:2] == [f"sup:mode:{n}:now", f"sup:mode:{n}:debt"] and not any("deposit" in b[1] for b in sent[1]["buttons"]))
+            await press(OWNER_TG, f"sup:mode:{n}:now", new_card)
+            check("«оплатили сейчас» → which account of that shop, гривня ones only",
+                  "С какого счёта платим?" in sent[0]["edit"] and [b[0] for b in sent[0]["buttons"]][:3] == ["Наличные", "Счёт ФОП", "Карта"])
+            await press(OWNER_TG, f"sup:acc:{n}:{hybrid_cash}", new_card)
+            check("…→ the summary and «Провести»; nothing is in the books yet", "Всё верно? Проводим?" in sent[0]["edit"] and "🏦 Счёт: Наличные" in sent[0]["edit"] and sent[0]["buttons"][0] == ("✅ Провести", f"sup:post:{n}"))
+            with get_conn(db_path) as conn:
+                before = accounts.balance(conn, hybrid_cash)
+                check("no document before «Провести»", sup.document(conn, sup.get(conn, n)) is None)
+            await press(OWNER_TG, f"sup:post:{n}", new_card)
+            with get_conn(db_path) as conn:
+                check("«Провести»: the card says who and when (Kyiv), the balance, and carries «Отменить проведение»; the money left the shop's касса",
+                      f"✅ <b>СЧ-{n:03d} проведён</b> · Павел · " in sent[0]["edit"] and "Взаиморасчёты: взаиморасчёты 0" in sent[0]["edit"]
+                      and sent[0]["buttons"] == [("↩️ Отменить проведение", f"sup:undo:{n}")] and accounts.balance(conn, hybrid_cash) == before - 2400)
+            await press(OWNER_TG, f"sup:post:{n}", new_card)
+            check("a second press on a stale «Провести» does nothing", sent[0]["alert"] is True and "Уже проведено" in sent[0]["answer"])
+            await press(OWNER_TG, f"sup:undo:{n}", new_card)
+            with get_conn(db_path) as conn:
+                check("«Отменить проведение» returns the money and marks the card", "Не учтено" in sent[0]["edit"] and sent[0]["buttons"] == [] and accounts.balance(conn, hybrid_cash) == before)
+
+            await say(OWNER_TG, "бот, сколько в кассе")
+            check("the general assistant does NOT answer in a supplier's group (he reads it too) — only this chat's own commands", "бот, баланс" in sent[0]["send"] and asked_model == [])
+            await say(KEEPER_TG, "бот, баланс")
+            check("a storekeeper's command gets no answer here", sent == [])
+            await say(OWNER_TG, "бот, депозит 300 usd")
+            pay_card = sent[0]["id"]
+            with get_conn(db_path) as conn:
+                p = conn.execute("SELECT * FROM supplier_invoices ORDER BY id DESC LIMIT 1").fetchone()
+            check("«бот, депозит 300 usd» → a payment card: 300 USD, first question the shop", p["kind"] == "payment" and p["amount"] == 300 and p["currency"] == "USD"
+                  and "Оплата поставщику · TEVIX" in sent[0]["send"] and "💰 Сумма: 300 USD" in sent[0]["send"] and "В какой магазин это?" in sent[0]["send"])
+            await press(OWNER_TG, f"sup:store:{p['id']}:2", pay_card)
+            check("…→ a dollar account of that shop", [b[0] for b in sent[0]["buttons"]][0] == "Наличные USD")
+            await press(OWNER_TG, f"sup:acc:{p['id']}:{hybrid_usd}", pay_card)
+            check("…→ the course, answered with a number", "По какому курсу?" in sent[0]["edit"])
+            await say(OWNER_TG, "41.5", reply_to=pay_card)
+            pay_card = sent[1]["id"]
+            check("…→ «Провести» with the гривня value shown", "💱 Курс: 41.5 (≈ 12450 грн)" in sent[1]["send"] and "Проводим?" in sent[1]["send"])
+            await press(OWNER_TG, f"sup:post:{p['id']}", pay_card)
+            check("the deposit is with the supplier", "Взаиморасчёты: наш депозит 300 USD" in sent[0]["edit"])
+            await say(OWNER_TG, "бот, баланс")
+            check("«бот, баланс» — the balance and the last documents", "<b>TEVIX</b> — наш депозит 300 USD" in sent[0]["send"] and f"ОП-{p['id']:03d}" in sent[0]["send"] and "оплата" in sent[0]["send"])
+            await say(VENDOR_TG, document="смета.xlsx")
+            drop_card = sent[0]["id"]
+            with get_conn(db_path) as conn:
+                d = conn.execute("SELECT id FROM supplier_invoices ORDER BY id DESC LIMIT 1").fetchone()["id"]
+            await press(OWNER_TG, f"sup:drop:{d}", drop_card)
+            with get_conn(db_path) as conn:
+                check("«Не учитывать» closes the card with nothing in the books", "Не учтено" in sent[0]["edit"] and sup.get(conn, d)["status"] == "cancelled" and sup.balances(conn, tevix) == {"USD": -300})
+                log = conn.execute("SELECT author_id, is_staff, text, file_name FROM supplier_chat_messages WHERE chat_id = ? ORDER BY id", (str(CHAT),)).fetchall()
+                check("everything written in the group is kept — the supplier's words and files too, with who is ours",
+                      (VENDOR_TG, 0, "вот смета на дисплеи", None) in [tuple(r) for r in log] and (VENDOR_TG, 0, None, "смета.xlsx") in [tuple(r) for r in log]
+                      and (OWNER_TG, 1, "бот, баланс", None) in [tuple(r) for r in log])
+            await say(OWNER_TG, "/supplier off")
+            await say(VENDOR_TG, document="смета.xlsx")
+            check("«/supplier off» — the group is no longer read", sent == [])
+
+        try:
+            asyncio.run(run())
+        finally:
+            supplier_chat._download, supplier_files.read, httpx.post = orig_download, orig_read, orig_post
+
+
 def scenario_agent_actions() -> None:
     """«Бот, запиши расход…», «бот, прими ремонт…», «бот, продай…» — the
     assistant fills in a form, code decides and does, a receipt with
@@ -8412,6 +8724,7 @@ def main() -> None:
     scenario_bot_questions()
     scenario_reminders()
     scenario_agent_actions()
+    scenario_supplier_chat()
     if os.path.exists(_WEBAPP_TEST_DB):
         os.remove(_WEBAPP_TEST_DB)
 

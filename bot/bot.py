@@ -26,6 +26,7 @@ from bot.quick_actions import router as quick_actions_router
 from bot.repair_actions import router as repair_actions_router
 from bot.repair_attachments import router as repair_attachments_router
 from bot.sale_flow import router as sale_flow_router
+from bot.supplier_chat import router as supplier_chat_router
 from bot.transfer_flow import router as transfer_flow_router
 from core import assistant as core_assistant
 from core.storage import init_db
@@ -48,6 +49,10 @@ def build_dispatcher() -> Dispatcher:
     # abandoned draft (nothing's written to the DB until the final
     # confirm), no persistence needed across process restarts.
     dp = Dispatcher(storage=MemoryStorage())
+    # First: a group tied to a supplier belongs to this router whole — the
+    # supplier sits there, so nothing of it may reach the assistant or the
+    # repair handlers below (bot/supplier_chat.py).
+    dp.include_router(supplier_chat_router)
     # Before `router`: its bare CommandStart() matches every /start, deep
     # link or not — see bot/channel_orders.py.
     dp.include_router(channel_orders_router)
