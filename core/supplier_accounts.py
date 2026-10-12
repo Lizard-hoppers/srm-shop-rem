@@ -157,6 +157,22 @@ def reading_of(invoice: sqlite3.Row) -> dict:
     return reading if isinstance(reading, dict) else {}
 
 
+def totals_of(invoice: sqlite3.Row) -> dict:
+    """{currency: total} when the file gives every price in two currencies
+    (dollars and гривня side by side); {} for an ordinary смета."""
+    totals = reading_of(invoice).get("totals")
+    return totals if isinstance(totals, dict) else {}
+
+
+def file_rate(invoice: sqlite3.Row) -> float | None:
+    """The rate the supplier himself counted by — known only when the file
+    has both columns and the смета is being settled in the foreign one."""
+    rate = reading_of(invoice).get("rate")
+    if invoice["currency"] == _accounts.BASE_CURRENCY or invoice["currency"] not in totals_of(invoice):
+        return None
+    return float(rate) if isinstance(rate, (int, float)) and rate > 0 else None
+
+
 def doc_type(invoice: sqlite3.Row) -> str:
     return _DOC_TYPE[invoice["kind"]]
 
@@ -250,10 +266,16 @@ def set_amount(conn: sqlite3.Connection, invoice_id: int, amount, staff_id: int 
 
 
 def set_currency(conn: sqlite3.Connection, invoice_id: int, currency: str, staff_id: int | None) -> sqlite3.Row:
-    """The file was read in the wrong currency — fix it at the «сумма» step."""
-    _draft(conn, invoice_id)
+    """The file was read in the wrong currency — fix it at the «сумма» step.
+    A file with two price columns has a total of its own for each: going
+    over to the other column takes that column's sum, not the same number
+    under another name."""
+    invoice = _draft(conn, invoice_id)
     if currency not in CURRENCIES:
         raise SupplierError("Такой валюты нет.")
+    column_total = totals_of(invoice).get(currency)
+    if column_total:
+        conn.execute("UPDATE supplier_invoices SET total = ?, amount = ? WHERE id = ?", (money(column_total), money(column_total), invoice_id))
     conn.execute(
         "UPDATE supplier_invoices SET currency = ?, account_id = NULL, rate = NULL, staff_id = COALESCE(?, staff_id) WHERE id = ?",
         (currency, staff_id, invoice_id),
@@ -298,6 +320,16 @@ def set_rate(conn: sqlite3.Connection, invoice_id: int, rate, staff_id: int | No
     if not value or not 0 < value < 10_000:
         raise SupplierError("Курс — число: сколько гривен за единицу валюты, например 41.5.")
     conn.execute("UPDATE supplier_invoices SET rate = ? WHERE id = ?", (float(value), invoice_id))
+    return _advance(conn, invoice_id, staff_id, amount_confirmed=True)
+
+
+def take_file_rate(conn: sqlite3.Connection, invoice_id: int, staff_id: int | None) -> sqlite3.Row:
+    """«Курс» answered with the supplier's own — the гривня value then
+    comes out as the гривня column of his file, to the копійка."""
+    rate = file_rate(_draft(conn, invoice_id))
+    if not rate:
+        raise SupplierError("В смете курса нет — ответьте на сообщение числом.")
+    conn.execute("UPDATE supplier_invoices SET rate = ? WHERE id = ?", (rate, invoice_id))
     return _advance(conn, invoice_id, staff_id, amount_confirmed=True)
 
 

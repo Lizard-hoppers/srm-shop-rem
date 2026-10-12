@@ -111,13 +111,21 @@ def card(conn, invoice) -> tuple[str, InlineKeyboardMarkup | None]:
     if invoice["file_name"]:
         lines.append(f"📄 {html.escape(invoice['file_name'])}")
     items = reading.get("items") or []
+    # Two price columns in the file (dollars and гривня): both are shown,
+    # each under its own name, whichever of them the смета is settled in.
+    columns = suppliers.totals_of(invoice)
+    first, second = reading.get("currency"), next((code for code in columns if code != reading.get("currency")), None)
     for item in items[:_SHOWN_ITEMS]:
         price = f" — {item['qty'] or 1} × {item['price']}" if item.get("price") else (f" — {item['qty']} шт" if item.get("qty") else "")
+        if item.get("price") and item.get("price2") and second:
+            price += f" {_cur(first)} · {item['price2']} {_cur(second)}"
         lines.append(f"• {html.escape(item['name'])}{price}")
     if len(items) > _SHOWN_ITEMS:
         lines.append(f"…и ещё {len(items) - _SHOWN_ITEMS} поз.")
     if is_invoice and invoice["total"]:
-        lines.append(f"Итого в файле: <b>{money(invoice['total'])} {_cur(currency)}</b>")
+        others = "".join(f" · {money(value)} {_cur(code)}" for code, value in columns.items() if code != currency)
+        lines.append(f"Итого в файле: <b>{money(invoice['total'])} {_cur(currency)}</b>{others}"
+                     + (f" (курс {reading['rate']:.2f})" if others and reading.get("rate") else ""))
         printed, by_lines = reading.get("printed_total"), reading.get("lines_total")
         if printed and by_lines and abs(printed - by_lines) >= 0.01:
             lines.append(f"⚠️ По строкам выходит {by_lines} — сверьте сумму.")
@@ -177,7 +185,8 @@ def card(conn, invoice) -> tuple[str, InlineKeyboardMarkup | None]:
         rows.append([again, drop])
     elif step == "rate":
         lines.append(f"❓ <b>По какому курсу?</b> Ответьте на это сообщение числом — сколько гривен за 1 {_cur(currency)}.")
-        rows = [[again, drop]]
+        by_file = suppliers.file_rate(invoice)
+        rows = ([[_button(f"✅ Как в смете — {by_file:.2f}", "rate", invoice_id)]] if by_file else []) + [[again, drop]]
     else:
         lines.append("❓ <b>Всё верно? Проводим?</b>")
         rows = [[_button("✅ Провести", "post", invoice_id)], [again, drop]]
@@ -273,7 +282,7 @@ async def _read_file(message: Message, link, file_id: str, file_name: str, size:
             raise supplier_files.FileError("Старый формат .xls не читаю — пересохраните как .xlsx или пришлите PDF/фото.")
         data = await _download(message.bot, file_id)
         # Off the event loop: the reading is a blocking call that takes seconds.
-        reading = await asyncio.to_thread(supplier_files.read, file_name, data)
+        reading = await asyncio.to_thread(supplier_files.read, file_name, data, message.caption)
     except supplier_files.FileError as exc:
         logger.info("supplier chat %s: %s not read: %s", message.chat.id, file_name, exc)
         if status:
@@ -402,6 +411,8 @@ async def pressed(callback: CallbackQuery) -> None:
                 suppliers.choose_mode(conn, invoice["id"], argument, staff["id"])
             elif action == "acc":
                 suppliers.choose_account(conn, invoice["id"], int(argument), staff["id"])
+            elif action == "rate":
+                suppliers.take_file_rate(conn, invoice["id"], staff["id"])
             elif action == "again":
                 suppliers.restart(conn, invoice["id"], staff["id"])
             elif action == "drop":

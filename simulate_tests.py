@@ -8173,6 +8173,17 @@ def scenario_supplier_chat() -> None:
     check("a file that is not a смета, or has no sum at all, is nothing", supplier_files.tidy({"is_invoice": False, "items": [{"name": "x", "price": 5}]}) is None
           and supplier_files.tidy({"is_invoice": True, "items": [{"name": "x"}], "total": None}) is None)
     check("no currency in the file — гривня, and it is marked as a guess", supplier_files.tidy({"is_invoice": True, "items": [], "total": 10})["currency_known"] is False)
+    glushko = {"is_invoice": True, "items": [{"name": "Дисплей 12C", "qty": 1, "price": 8.16, "price2": 371}, {"name": "Дисплей 12C GX", "qty": 1, "price": 11.52, "price2": 524}], "total": None, "currency": None}
+    two = supplier_files.tidy(json.loads(json.dumps(glushko)))
+    check("two unlabelled price columns that differ by one rate on every line are dollars and гривня: the смета is in dollars, гривня is kept beside",
+          two["currency"] == "USD" and two["total"] == 19.68 and two["totals"] == {"USD": 19.68, "UAH": 895} and two["rate"] == 45.4776
+          and two["items"][0] == {"name": "Дисплей 12C", "qty": 1, "price": 8.16, "price2": 371})
+    flipped = supplier_files.tidy({"is_invoice": True, "items": [{"name": "x", "qty": 2, "price": 400, "price2": 10}], "total": 800, "total2": 20, "currency2": "eur"})
+    check("гривня in the left column — still a смета in the currency, named as the file names it", flipped["currency"] == "EUR" and flipped["total"] == 20
+          and flipped["totals"] == {"EUR": 20, "UAH": 800} and flipped["items"][0]["price"] == 10 and flipped["items"][0]["price2"] == 400)
+    plain = supplier_files.tidy({"is_invoice": True, "items": [{"name": "x", "qty": 30, "price": 100, "price2": 3000}, {"name": "y", "qty": 2, "price": 50, "price2": 100}], "total": 3100})
+    check("a «сумма» column taken for a second price is dropped: the lines don't give one rate", "totals" not in plain and plain["currency"] == "UAH"
+          and plain["items"][0] == {"name": "x", "qty": 30, "price": 100} and "подсказка" in supplier_files._prompt(" количество / $ / грн ") and supplier_files._prompt(None) == supplier_files._PROMPT)
     for name, words in (("price.xls", ".xlsx"), ("clip.mp4", "не читаю"), ("a.xlsx", "повреждён")):
         try:
             supplier_files.read(name, b"not a zip")
@@ -8305,7 +8316,8 @@ def scenario_supplier_chat() -> None:
 
         orig_download, orig_read, orig_post = supplier_chat._download, supplier_files.read, httpx.post
         supplier_chat._download = _no_download
-        supplier_files.read = lambda name, data: readings[name]
+        hints: list = []
+        supplier_files.read = lambda name, data, hint=None: hints.append(hint) or (supplier_files.tidy(json.loads(json.dumps(glushko))) if hint else readings[name])
         httpx.post = lambda *a, **k: asked_model.append(a) or (_ for _ in ()).throw(AssertionError("the model must not be called here"))
 
         async def run() -> None:
@@ -8313,14 +8325,14 @@ def scenario_supplier_chat() -> None:
             dp = _the_dispatcher()
             counter = 4000
 
-            async def say(user_id: int, text=None, *, chat_id=CHAT, document=None, photo=False, reply_to=None) -> int:
+            async def say(user_id: int, text=None, *, chat_id=CHAT, document=None, photo=False, reply_to=None, caption=None) -> int:
                 nonlocal counter
                 counter += 1
                 sent.clear()
                 chat = Chat(id=chat_id, type="supergroup", title="TEVIX запчасти")
                 replied = Message(message_id=reply_to, date=dt.datetime.now(), chat=chat, text="?", from_user=User(id=123456, is_bot=True, first_name="bot")) if reply_to else None
                 await dp.feed_update(bot, Update(update_id=counter, message=Message(
-                    message_id=counter, date=dt.datetime.now(), chat=chat, reply_to_message=replied, text=text,
+                    message_id=counter, date=dt.datetime.now(), chat=chat, reply_to_message=replied, text=text, caption=caption,
                     from_user=User(id=user_id, is_bot=False, first_name="T"),
                     document=Document(file_id="f", file_unique_id="u", file_name=document, file_size=1000) if document else None,
                     photo=[PhotoSize(file_id="p", file_unique_id="pu", width=10, height=10, file_size=100)] if photo else None)))
@@ -8433,6 +8445,29 @@ def scenario_supplier_chat() -> None:
                 check("everything written in the group is kept — the supplier's words and files too, with who is ours",
                       (VENDOR_TG, 0, "вот смета на дисплеи", None) in [tuple(r) for r in log] and (VENDOR_TG, 0, None, "смета.xlsx") in [tuple(r) for r in log]
                       and (OWNER_TG, 1, "бот, баланс", None) in [tuple(r) for r in log])
+
+            # ---- смета с двумя колонками цен: $ и грн
+            await say(VENDOR_TG, photo=True, caption="количество / $ / грн")
+            usd_card = sent[0]["id"]
+            with get_conn(db_path) as conn:
+                g = conn.execute("SELECT id FROM supplier_invoices ORDER BY id DESC LIMIT 1").fetchone()["id"]
+            check("a photo with two price columns: the caption goes to the reading as a hint, the card shows dollars AND гривня and the supplier's rate",
+                  hints[-1] == "количество / $ / грн" and "• Дисплей 12C — 1 × 8.16 USD · 371 грн" in sent[0]["send"]
+                  and "Итого в файле: <b>19.68 USD</b> · 895 грн (курс 45.48)" in sent[0]["send"])
+            await press(OWNER_TG, f"sup:store:{g}:2", usd_card)
+            check("…the amount asked is the dollar one", "Сумма по смете — 19.68 USD?" in sent[0]["edit"] and ("Валюта: грн", f"sup:cur:{g}:UAH") in sent[0]["buttons"])
+            await press(OWNER_TG, f"sup:cur:{g}:UAH", usd_card)
+            check("«Валюта: грн» takes the гривня column's sum, not 19.68 under another name",
+                  "Сумма по смете — 895 грн?" in sent[0]["edit"] and "Итого в файле: <b>895 грн</b> · 19.68 USD" in sent[0]["edit"])
+            await press(OWNER_TG, f"sup:cur:{g}:USD", usd_card)
+            await press(OWNER_TG, f"sup:amt:{g}", usd_card)
+            await press(OWNER_TG, f"sup:mode:{g}:now", usd_card)
+            await press(OWNER_TG, f"sup:acc:{g}:{hybrid_usd}", usd_card)
+            check("paid from a dollar account: the course is offered as the file has it", "По какому курсу?" in sent[0]["edit"] and sent[0]["buttons"][0] == ("✅ Как в смете — 45.48", f"sup:rate:{g}"))
+            await press(OWNER_TG, f"sup:rate:{g}", usd_card)
+            check("…and the гривня value is the file's гривня column to the копійка", "≈ 895 грн" in sent[0]["edit"] and "Проводим?" in sent[0]["edit"])
+            await press(OWNER_TG, f"sup:drop:{g}", usd_card)
+
             await say(OWNER_TG, "/supplier off")
             await say(VENDOR_TG, document="смета.xlsx")
             check("«/supplier off» — the group is no longer read", sent == [])

@@ -68,7 +68,7 @@ class VisionOcrError(Exception):
     pass
 
 
-def _call_vision_json(prompt: str, photo_bytes: bytes) -> dict:
+def _call_vision_json(prompt: str, photo_bytes: bytes, model: str | None = None) -> dict:
     """POST a photo + prompt to OpenAI's vision-capable chat completions
     endpoint, constrained to a JSON object response. Raises VisionOcrError
     on any failure (missing key, network error, non-200, unparseable
@@ -81,7 +81,7 @@ def _call_vision_json(prompt: str, photo_bytes: bytes) -> dict:
 
     b64 = base64.b64encode(photo_bytes).decode("ascii")
     payload = {
-        "model": _MODEL,
+        "model": model or _MODEL,
         "messages": [{
             "role": "user",
             "content": [
