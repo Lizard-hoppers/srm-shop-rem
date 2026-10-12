@@ -8294,6 +8294,7 @@ def scenario_supplier_chat() -> None:
             "гарантия.pdf": None, "photo.jpg": None,
         }
         asked_model: list = []
+        how: list = []   # (silent, as a reply) of every message the bot sent
 
         class _FakeBot(Bot):
             async def __call__(self, method, request_timeout=None):
@@ -8302,6 +8303,7 @@ def scenario_supplier_chat() -> None:
                 buttons = [(b.text, b.callback_data) for row in getattr(markup, "inline_keyboard", None) or [] for b in row]
                 if name == "SendMessage":
                     sent.append({"send": method.text, "buttons": buttons, "id": 9500 + len(sent)})
+                    how.append((bool(method.disable_notification), bool(method.reply_parameters or method.reply_to_message_id)))
                     return Message(message_id=sent[-1]["id"], date=dt.datetime.now(), chat=Chat(id=method.chat_id, type="supergroup"), text="x").as_(self)
                 if name == "EditMessageText":
                     sent.append({"edit": method.text, "buttons": buttons, "id": method.message_id})
@@ -8369,6 +8371,7 @@ def scenario_supplier_chat() -> None:
 
             await say(VENDOR_TG, document="смета.xlsx")
             card_id = sent[0]["id"]
+            check("what the supplier posted is answered without a sound and NOT as a reply to him — the bot is for the staff, he must not be rung", how[-1] == (True, False))
             check("the supplier drops a смета: «читаю…» turns into the card — what was read, the mismatch flagged, and the FIRST question: which shop",
                   sent[0]["send"] == "📄 Читаю файл…" and sent[1]["id"] == card_id and "Смета · TEVIX" in sent[1]["edit"] and "• Дисплей &lt;13&gt; — 2 × 1200" in sent[1]["edit"]
                   and "Итого в файле: <b>2500 грн</b>" in sent[1]["edit"] and "По строкам выходит 2400" in sent[1]["edit"] and "В какой магазин это?" in sent[1]["edit"]
@@ -8415,6 +8418,7 @@ def scenario_supplier_chat() -> None:
 
             await say(OWNER_TG, "бот, сколько в кассе")
             check("the general assistant does NOT answer in a supplier's group (he reads it too) — only this chat's own commands", "бот, баланс" in sent[0]["send"] and asked_model == [])
+            check("the staff are answered by reply, still without a sound", how[-1] == (True, True))
             await say(KEEPER_TG, "бот, баланс")
             check("a storekeeper's command gets no answer here", sent == [])
             await say(OWNER_TG, "бот, депозит 300 usd")

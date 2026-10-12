@@ -94,6 +94,16 @@ class InSupplierChat(Filter):
         return {"link": link} if link else False
 
 
+async def _say(message: Message, text: str, **kwargs) -> Message:
+    """Everything the bot writes in a supplier's group. The supplier reads
+    this chat and the bot is not for him (12.10): every message goes
+    without a sound, and what he posted is never answered as a reply — a
+    reply rings through even a muted chat. Staff are answered by reply."""
+    with get_conn(registry_db_path()) as conn:
+        ours = bool(message.from_user and _staff(conn, message.from_user.id))
+    return await (message.reply if ours else message.answer)(text, disable_notification=True, **kwargs)
+
+
 # ---- карточка ----
 
 def _button(text: str, *parts) -> InlineKeyboardButton:
@@ -203,9 +213,9 @@ async def _send_card(message: Message, invoice_id: int, *, into: Message | None 
             await into.edit_text(text, reply_markup=keyboard)
             sent = into
         except TelegramAPIError:
-            sent = await message.reply(text, reply_markup=keyboard)
+            sent = await _say(message, text, reply_markup=keyboard)
     else:
-        sent = await message.reply(text, reply_markup=keyboard)
+        sent = await _say(message, text, reply_markup=keyboard)
     with get_conn(registry_db_path()) as conn:
         suppliers.set_card(conn, invoice_id, sent.message_id)
 
@@ -222,20 +232,20 @@ async def link_command(message: Message, command: CommandObject) -> None:
         if not _may_decide(staff):
             return
         if store_for_chat_id(message.chat.id):
-            await message.reply("Это рабочая группа магазина — поставщика к ней не привязываю.")
+            await _say(message, "Это рабочая группа магазина — поставщика к ней не привязываю.")
             return
         if argument.lower() in ("off", "стоп", "выкл", "отвязать"):
             was = suppliers.unlink_chat(conn, message.chat.id)
-            await message.reply("Группа отвязана: больше её не читаю." if was else "Эта группа и не была привязана.")
+            await _say(message, "Группа отвязана: больше её не читаю." if was else "Эта группа и не была привязана.")
             return
         try:
             link = suppliers.link_chat(conn, message.chat.id, message.chat.title, staff["id"], argument or None)
         except suppliers.SupplierError as exc:
-            await message.reply(str(exc))
+            await _say(message, str(exc))
             return
         text = (f"Готово: это группа поставщика <b>{html.escape(link['supplier_name'])}</b>.\n"
                 f"Взаиморасчёты: {suppliers.balance_text(conn, link['supplier_id'])}\n\n{_HELP}")
-    await message.reply(text)
+    await _say(message, text)
 
 
 @router.my_chat_member(F.chat.type.in_(_GROUPS))
@@ -274,7 +284,7 @@ async def _read_file(message: Message, link, file_id: str, file_name: str, size:
     kind = supplier_files.kind_of(file_name)
     if kind not in supplier_files.READABLE and kind != ".xls":
         return   # a video, an archive — not something a смета comes as
-    status = await message.reply("📄 Читаю файл…") if is_document else None
+    status = await _say(message, "📄 Читаю файл…") if is_document else None
     try:
         if size and size > supplier_files.MAX_FILE_BYTES:
             raise supplier_files.FileError("Файл больше 15 МБ — такой не прочитаю.")
@@ -333,9 +343,9 @@ async def _command(message: Message, link, question: str) -> None:
             for row in suppliers.recent(conn, link["supplier_id"], limit=5):
                 what = suppliers.MODES[row["pay_mode"]] if row["kind"] == "invoice" else "оплата"
                 lines.append(f"• {suppliers.label(row)} · {kyiv_datetime(row['posted_at'])} · {money(row['amount'])} {_cur(row['currency'])} · {what}")
-        await message.reply("\n".join(lines))
+        await _say(message, "\n".join(lines))
         return
-    await message.reply(_HELP)
+    await _say(message, _HELP)
 
 
 async def _number_answered(message: Message, invoice, value: str, staff) -> bool:
@@ -348,7 +358,7 @@ async def _number_answered(message: Message, invoice, value: str, staff) -> bool
         with get_conn(registry_db_path()) as conn:
             (suppliers.set_amount if invoice["step"] == "amount" else suppliers.set_rate)(conn, invoice["id"], value, staff["id"])
     except suppliers.SupplierError as exc:
-        await message.reply(str(exc))
+        await _say(message, str(exc))
         return True
     try:
         await message.bot.delete_message(message.chat.id, invoice["card_message_id"])
