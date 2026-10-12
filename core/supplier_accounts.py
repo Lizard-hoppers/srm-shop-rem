@@ -80,6 +80,28 @@ def unlink_chat(conn: sqlite3.Connection, chat_id) -> bool:
     return conn.execute("DELETE FROM supplier_chats WHERE chat_id = ?", (str(chat_id),)).rowcount > 0
 
 
+def set_desk(conn: sqlite3.Connection, supplier_name: str | None, chat_id, thread_id: int | None) -> sqlite3.Row:
+    """Where this supplier's сметы are confirmed: a staff group (and a тема
+    of it) instead of his own group, where the bot then says nothing —
+    he reads that chat and the bot is not for him. `chat_id` None — back
+    to his group. The supplier is named in full or by a part of the name
+    («Глушко»), and must already have a group."""
+    wanted = " ".join((supplier_name or "").split()).casefold()
+    rows = conn.execute(
+        "SELECT supplier_chats.chat_id, suppliers.name FROM supplier_chats JOIN suppliers ON suppliers.id = supplier_chats.supplier_id ORDER BY suppliers.name"
+    ).fetchall()
+    found = [row for row in rows if row["name"].casefold() == wanted] or [row for row in rows if wanted and wanted in row["name"].casefold()]
+    if len(found) != 1:
+        known = ", ".join(f"«{row['name']}»" for row in rows) or "пока ни у кого"
+        raise SupplierError(
+            "Это рабочая группа магазина. Сюда можно направить сметы поставщика, у которого уже есть своя группа: "
+            f"/supplier Название. Группы есть у: {known}."
+        )
+    conn.execute("UPDATE supplier_chats SET desk_chat_id = ?, desk_thread_id = ? WHERE chat_id = ?",
+                 (str(chat_id) if chat_id is not None else None, thread_id if chat_id is not None else None, found[0]["chat_id"]))
+    return get_chat(conn, found[0]["chat_id"])
+
+
 def log_message(conn: sqlite3.Connection, chat_id, message_id: int | None, author_id: int | None, author_name: str | None,
                 is_staff: bool, text: str | None, file_name: str | None = None) -> None:
     conn.execute(
@@ -143,7 +165,8 @@ def get(conn: sqlite3.Connection, invoice_id: int) -> sqlite3.Row | None:
 
 def by_card(conn: sqlite3.Connection, chat_id, message_id: int) -> sqlite3.Row | None:
     return conn.execute(
-        _SELECT + " WHERE supplier_invoices.chat_id = ? AND supplier_invoices.card_message_id = ?", (str(chat_id), message_id)
+        _SELECT + " WHERE COALESCE(supplier_invoices.card_chat_id, supplier_invoices.chat_id) = ? AND supplier_invoices.card_message_id = ?",
+        (str(chat_id), message_id),
     ).fetchone()
 
 
@@ -201,8 +224,15 @@ def create(conn: sqlite3.Connection, *, supplier_id: int, chat_id=None, kind: st
     ).lastrowid
 
 
-def set_card(conn: sqlite3.Connection, invoice_id: int, message_id: int) -> None:
-    conn.execute("UPDATE supplier_invoices SET card_message_id = ? WHERE id = ?", (message_id, invoice_id))
+def set_card(conn: sqlite3.Connection, invoice_id: int, message_id: int, chat_id=None) -> None:
+    """Where the card is now: the message, and the chat when it isn't the
+    supplier's own group (see set_desk)."""
+    conn.execute("UPDATE supplier_invoices SET card_message_id = ?, card_chat_id = ? WHERE id = ?",
+                 (message_id, str(chat_id) if chat_id is not None else None, invoice_id))
+
+
+def card_chat(invoice: sqlite3.Row) -> str | None:
+    return invoice["card_chat_id"] or invoice["chat_id"]
 
 
 def _draft(conn: sqlite3.Connection, invoice_id: int) -> sqlite3.Row:

@@ -14,6 +14,11 @@ supplier («/supplier Название», by the owner or an admin), the bot:
   * takes «бот, оплата 5000» / «бот, депозит 300 usd» / «бот, баланс» from
     the owner or an admin.
 
+The supplier reads his group and the bot is not for him (12.10): what the
+bot writes there goes without a sound, and «/supplier Название» written in
+a staff group (in a тема of it) sends that supplier's cards THERE — under
+a forward of what he posted — while in his group the bot stays silent.
+
 The supplier himself sits in this chat, so: only the owner/admin can
 press the buttons or give commands, and the general assistant («бот,
 сколько в кассе…») does NOT answer here — this router takes every message
@@ -32,7 +37,7 @@ import re
 from aiogram import F, Router
 from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command, CommandObject, Filter
-from aiogram.types import CallbackQuery, ChatMemberUpdated, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, ChatMemberUpdated, InlineKeyboardButton, InlineKeyboardMarkup, Message, ReplyParameters
 
 from bot.assistant_chat import question_of
 from core import accounts as core_accounts
@@ -217,7 +222,22 @@ async def _send_card(message: Message, invoice_id: int, *, into: Message | None 
     else:
         sent = await _say(message, text, reply_markup=keyboard)
     with get_conn(registry_db_path()) as conn:
-        suppliers.set_card(conn, invoice_id, sent.message_id)
+        suppliers.set_card(conn, invoice_id, sent.message_id, sent.chat.id)
+
+
+async def _to_desk(bot, link, text: str, *, source: Message | None = None, reply_markup=None) -> Message:
+    """A message for the staff in the place chosen for this supplier
+    (suppliers.set_desk) — under a forward of what was posted in his
+    group, so the file is in front of whoever answers."""
+    chat_id, thread = int(link["desk_chat_id"]), link["desk_thread_id"]
+    forwarded = None
+    if source is not None:
+        try:
+            forwarded = await bot.forward_message(chat_id, source.chat.id, source.message_id, message_thread_id=thread)
+        except TelegramAPIError:
+            logger.warning("supplier chat %s: message %s not forwarded to the desk", source.chat.id, source.message_id)
+    return await bot.send_message(chat_id, text, message_thread_id=thread, reply_markup=reply_markup,
+                                  reply_parameters=ReplyParameters(message_id=forwarded.message_id) if forwarded else None)
 
 
 # ---- привязка группы ----
@@ -225,14 +245,26 @@ async def _send_card(message: Message, invoice_id: int, *, into: Message | None 
 @router.message(Command("supplier"), F.chat.type.in_(_GROUPS))
 async def link_command(message: Message, command: CommandObject) -> None:
     """«/supplier Название» — this group is this supplier's; «/supplier off»
-    — no longer. Anyone but the owner/admin gets no answer at all."""
+    — no longer. In a shop's work group the same command sends that
+    supplier's cards here («/supplier Название off» — back to his group).
+    Anyone but the owner/admin gets no answer at all."""
     argument = " ".join((command.args or "").split())
     with get_conn(registry_db_path()) as conn:
         staff = _staff(conn, message.from_user.id)
         if not _may_decide(staff):
             return
         if store_for_chat_id(message.chat.id):
-            await _say(message, "Это рабочая группа магазина — поставщика к ней не привязываю.")
+            name, _, last = argument.rpartition(" ")
+            back = bool(name) and last.lower() in ("off", "стоп", "выкл")
+            try:
+                desk = suppliers.set_desk(conn, name if back else argument, None if back else message.chat.id,
+                                          message.message_thread_id if message.is_topic_message else None)
+            except suppliers.SupplierError as exc:
+                await _say(message, str(exc))
+                return
+            who = html.escape(desk["supplier_name"])
+            await _say(message, f"Сметы поставщика <b>{who}</b> снова подтверждаются в его группе." if back else
+                       f"Сметы поставщика <b>{who}</b> теперь приходят сюда: карточка с вопросами — здесь, в его группе я молчу.")
             return
         if argument.lower() in ("off", "стоп", "выкл", "отвязать"):
             was = suppliers.unlink_chat(conn, message.chat.id)
@@ -284,7 +316,18 @@ async def _read_file(message: Message, link, file_id: str, file_name: str, size:
     kind = supplier_files.kind_of(file_name)
     if kind not in supplier_files.READABLE and kind != ".xls":
         return   # a video, an archive — not something a смета comes as
-    status = await _say(message, "📄 Читаю файл…") if is_document else None
+    desk = link["desk_chat_id"]   # the staff's place for this supplier: nothing is said in his group then
+    status = await _say(message, "📄 Читаю файл…") if is_document and not desk else None
+
+    async def not_read(text: str) -> None:
+        if status:
+            await status.edit_text(text)
+        elif desk and is_document:
+            try:
+                await _to_desk(message.bot, link, f"<b>{html.escape(link['supplier_name'])}</b>\n{text}", source=message)
+            except TelegramAPIError:
+                logger.warning("supplier chat %s: the desk is unreachable", message.chat.id)
+
     try:
         if size and size > supplier_files.MAX_FILE_BYTES:
             raise supplier_files.FileError("Файл больше 15 МБ — такой не прочитаю.")
@@ -295,16 +338,13 @@ async def _read_file(message: Message, link, file_id: str, file_name: str, size:
         reading = await asyncio.to_thread(supplier_files.read, file_name, data, message.caption)
     except supplier_files.FileError as exc:
         logger.info("supplier chat %s: %s not read: %s", message.chat.id, file_name, exc)
-        if status:
-            await status.edit_text(f"⚠️ {exc}")
+        await not_read(f"⚠️ {exc}")
         return
     except TelegramAPIError:
-        if status:
-            await status.edit_text("⚠️ Не смог скачать файл из Telegram — пришлите его ещё раз.")
+        await not_read("⚠️ Не смог скачать файл из Telegram — пришлите его ещё раз.")
         return
     if reading is None:
-        if status:
-            await status.edit_text("В этом файле не нашёл сметы (позиций с ценами или суммы к оплате). Если это смета — пришлите её как xlsx, pdf или чёткое фото.")
+        await not_read("В этом файле не нашёл сметы (позиций с ценами или суммы к оплате). Если это смета — пришлите её как xlsx, pdf или чёткое фото.")
         return
     with get_conn(registry_db_path()) as conn:
         invoice_id = suppliers.create(
@@ -313,6 +353,18 @@ async def _read_file(message: Message, link, file_id: str, file_name: str, size:
         )
     logger.info("supplier chat %s: смета %s read from %s: %s %s, %s поз.", message.chat.id, invoice_id, file_name,
                 reading["total"], reading["currency"], len(reading["items"]))
+    if desk:
+        with get_conn(registry_db_path()) as conn:
+            text, keyboard = card(conn, suppliers.get(conn, invoice_id))
+        try:
+            sent = await _to_desk(message.bot, link, text, source=message, reply_markup=keyboard)
+        except TelegramAPIError:
+            # Better a card in his group than a смета nobody was asked about.
+            logger.warning("supplier chat %s: the desk is unreachable — смета %s goes to the group itself", message.chat.id, invoice_id)
+        else:
+            with get_conn(registry_db_path()) as conn:
+                suppliers.set_card(conn, invoice_id, sent.message_id, sent.chat.id)
+            return
     await _send_card(message, invoice_id, into=status)
 
 
@@ -395,6 +447,30 @@ async def in_chat(message: Message, link) -> None:
             await _command(message, link, question)
 
 
+class OnDeskCard(Filter):
+    """A number, by the owner or an admin, in reply to a card that lives
+    outside the supplier's group and is waiting for one (сумма or курс).
+    Anything else written there is not this router's."""
+
+    async def __call__(self, message: Message) -> bool | dict:
+        replied = message.reply_to_message
+        if message.chat.type not in _GROUPS or not replied or not message.text or not message.from_user:
+            return False
+        if core_accounts.parse_amount(message.text) is None:
+            return False
+        with get_conn(registry_db_path()) as conn:
+            invoice = suppliers.by_card(conn, message.chat.id, replied.message_id)
+            staff = _staff(conn, message.from_user.id)
+        if not invoice or invoice["status"] != "draft" or invoice["step"] not in ("amount", "rate") or not _may_decide(staff):
+            return False
+        return {"invoice": invoice, "staff": staff}
+
+
+@router.message(OnDeskCard())
+async def desk_answer(message: Message, invoice, staff) -> None:
+    await _number_answered(message, invoice, message.text, staff)
+
+
 # ---- кнопки карточки ----
 
 @router.callback_query(F.data.startswith("sup:"))
@@ -408,7 +484,7 @@ async def pressed(callback: CallbackQuery) -> None:
                 await callback.answer(_NOT_YOURS, show_alert=True)
                 return
             invoice = suppliers.get(conn, int(invoice_id))
-            if not invoice or invoice["chat_id"] != str(callback.message.chat.id):
+            if not invoice or suppliers.card_chat(invoice) != str(callback.message.chat.id):
                 await callback.answer("Запись не найдена.", show_alert=True)
                 return
             if action == "store":

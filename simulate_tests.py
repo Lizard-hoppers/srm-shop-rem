@@ -8295,6 +8295,7 @@ def scenario_supplier_chat() -> None:
         }
         asked_model: list = []
         how: list = []   # (silent, as a reply) of every message the bot sent
+        where: list = []   # (send|forward, chat, тема) of the same
 
         class _FakeBot(Bot):
             async def __call__(self, method, request_timeout=None):
@@ -8304,7 +8305,11 @@ def scenario_supplier_chat() -> None:
                 if name == "SendMessage":
                     sent.append({"send": method.text, "buttons": buttons, "id": 9500 + len(sent)})
                     how.append((bool(method.disable_notification), bool(method.reply_parameters or method.reply_to_message_id)))
+                    where.append(("send", method.chat_id, method.message_thread_id))
                     return Message(message_id=sent[-1]["id"], date=dt.datetime.now(), chat=Chat(id=method.chat_id, type="supergroup"), text="x").as_(self)
+                if name == "ForwardMessage":
+                    where.append(("forward", method.chat_id, method.message_thread_id))
+                    return Message(message_id=9400, date=dt.datetime.now(), chat=Chat(id=method.chat_id, type="supergroup"), text="x").as_(self)
                 if name == "EditMessageText":
                     sent.append({"edit": method.text, "buttons": buttons, "id": method.message_id})
                 if name == "DeleteMessage":
@@ -8327,7 +8332,7 @@ def scenario_supplier_chat() -> None:
             dp = _the_dispatcher()
             counter = 4000
 
-            async def say(user_id: int, text=None, *, chat_id=CHAT, document=None, photo=False, reply_to=None, caption=None) -> int:
+            async def say(user_id: int, text=None, *, chat_id=CHAT, document=None, photo=False, reply_to=None, caption=None, thread=None) -> int:
                 nonlocal counter
                 counter += 1
                 sent.clear()
@@ -8335,16 +8340,17 @@ def scenario_supplier_chat() -> None:
                 replied = Message(message_id=reply_to, date=dt.datetime.now(), chat=chat, text="?", from_user=User(id=123456, is_bot=True, first_name="bot")) if reply_to else None
                 await dp.feed_update(bot, Update(update_id=counter, message=Message(
                     message_id=counter, date=dt.datetime.now(), chat=chat, reply_to_message=replied, text=text, caption=caption,
+                    message_thread_id=thread, is_topic_message=bool(thread) or None,
                     from_user=User(id=user_id, is_bot=False, first_name="T"),
                     document=Document(file_id="f", file_unique_id="u", file_name=document, file_size=1000) if document else None,
                     photo=[PhotoSize(file_id="p", file_unique_id="pu", width=10, height=10, file_size=100)] if photo else None)))
                 return counter
 
-            async def press(user_id: int, data: str, card_id: int) -> None:
+            async def press(user_id: int, data: str, card_id: int, chat_id=CHAT) -> None:
                 nonlocal counter
                 counter += 1
                 sent.clear()
-                chat = Chat(id=CHAT, type="supergroup")
+                chat = Chat(id=chat_id, type="supergroup")
                 await dp.feed_update(bot, Update(update_id=counter, callback_query=CallbackQuery(
                     id=str(counter), from_user=User(id=user_id, is_bot=False, first_name="T"), chat_instance="c", data=data,
                     message=Message(message_id=card_id, date=dt.datetime.now(), chat=chat, text="x", from_user=User(id=123456, is_bot=True, first_name="bot")))))
@@ -8471,6 +8477,45 @@ def scenario_supplier_chat() -> None:
             await press(OWNER_TG, f"sup:rate:{g}", usd_card)
             check("…and the гривня value is the file's гривня column to the копійка", "≈ 895 грн" in sent[0]["edit"] and "Проводим?" in sent[0]["edit"])
             await press(OWNER_TG, f"sup:drop:{g}", usd_card)
+
+            # ---- карточки — в теме рабочей группы, в группе поставщика бот молчит
+            await say(OWNER_TG, "/supplier nobody", chat_id=WORK, thread=143)
+            check("in a work group «/supplier X» for a supplier without a group says who has one", "рабочая группа" in sent[0]["send"] and "«TEVIX»" in sent[0]["send"])
+            await say(OWNER_TG, "/supplier tev", chat_id=WORK, thread=143)
+            check("«/supplier <part of the name>» in a тема of the work group sends his сметы there", "<b>TEVIX</b> теперь приходят сюда" in sent[0]["send"])
+            where.clear()
+            await say(VENDOR_TG, document="смета.xlsx")
+            desk_card = sent[-1]["id"]
+            with get_conn(db_path) as conn:
+                k = conn.execute("SELECT * FROM supplier_invoices ORDER BY id DESC LIMIT 1").fetchone()
+            check("the supplier drops a смета: NOTHING is written in his group — his file is forwarded to the staff's тема and the card comes under it, as a reply",
+                  where == [("forward", WORK, 143), ("send", WORK, 143)] and len(sent) == 1 and "В какой магазин это?" in sent[0]["send"]
+                  and how[-1] == (False, True) and k["card_chat_id"] == str(WORK) and k["chat_id"] == str(CHAT))
+            await press(OWNER_TG, f"sup:store:{k['id']}:2", desk_card)
+            check("the same button pressed from his group does nothing", sent == [{"answer": "Запись не найдена.", "alert": True}])
+            await press(OWNER_TG, f"sup:store:{k['id']}:2", desk_card, chat_id=WORK)
+            check("…the buttons work in the тема", "Сумма по смете — 2500 грн?" in sent[0]["edit"])
+            await say(KEEPER_TG, "2400", chat_id=WORK, reply_to=desk_card, thread=143)
+            with get_conn(db_path) as conn:
+                check("a storekeeper's number under the card changes nothing", sup.get(conn, k["id"])["amount"] == 2500)
+            where.clear()
+            await say(OWNER_TG, "2400", chat_id=WORK, reply_to=desk_card, thread=143)
+            with get_conn(db_path) as conn:
+                check("the owner answers the card with a number right there: the next question is the last message of the тема",
+                      sent[0] == {"delete": desk_card} and "Как рассчитываемся?" in sent[1]["send"] and where == [("send", WORK, 143)]
+                      and sup.get(conn, k["id"])["card_chat_id"] == str(WORK) and sup.get(conn, k["id"])["card_message_id"] == sent[1]["id"])
+            await press(OWNER_TG, f"sup:drop:{k['id']}", sent[1]["id"], chat_id=WORK)
+            where.clear()
+            await say(VENDOR_TG, document="price.xls")
+            check("a file that can't be read is reported to the staff, not to him", where == [("forward", WORK, 143), ("send", WORK, 143)] and ".xlsx" in sent[-1]["send"] and "TEVIX" in sent[-1]["send"])
+            where.clear()
+            await say(VENDOR_TG, photo=True)
+            check("a photo that isn't a смета — silence everywhere", sent == [] and where == [])
+            await say(OWNER_TG, "/supplier tevix off", chat_id=WORK, thread=143)
+            back = "снова подтверждаются в его группе" in sent[0]["send"]
+            where.clear()
+            await say(VENDOR_TG, document="гарантия.pdf")
+            check("«/supplier Название off» in the work group — back to his own group", back and where == [("send", CHAT, None)])
 
             await say(OWNER_TG, "/supplier off")
             await say(VENDOR_TG, document="смета.xlsx")

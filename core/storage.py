@@ -1092,6 +1092,12 @@ def init_db(db_path: str = DB_PATH) -> None:
         _ensure_column(conn, "repair_orders", "ext_sig", "ext_sig TEXT")
         _ensure_column(conn, "repair_orders", "manual_parts_cost", "manual_parts_cost REAL")
         _ensure_column(conn, "repair_orders", "manual_master_pay", "manual_master_pay REAL")
+        # Сметы поставщика подтверждаются не в его группе, а там, где
+        # только свои (12.10): куда слать карточки этого поставщика и где
+        # лежит карточка каждой сметы.
+        _ensure_column(conn, "supplier_chats", "desk_chat_id", "desk_chat_id TEXT")
+        _ensure_column(conn, "supplier_chats", "desk_thread_id", "desk_thread_id INTEGER")
+        _ensure_column(conn, "supplier_invoices", "card_chat_id", "card_chat_id TEXT")
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_repair_orders_ext ON repair_orders(ext_source, ext_id) "
             "WHERE ext_source IS NOT NULL"
