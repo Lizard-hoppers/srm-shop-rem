@@ -48,7 +48,7 @@
         <p class="meta">{{ t('pay_section_title') }}: {% for p in payments %}{{ p.account_name or '—' }} — {{ p.amount | money }} {{ p.currency or '' }}{% if p.cancelled_at %} ({{ t('doc_cancelled') }}){% endif %}{% if not loop.last %} · {% endif %}{% endfor %}</p>
         {% else %}
         <h3 style="margin-bottom:0;">{{ t('pay_section_title') }}</h3>
-        <p class="meta" style="margin:0;">{{ t('payment_method_hint') }}{% if repair.price_final %} {{ t('pay_total_label') }}: {{ repair.price_final }} грн.{% endif %}</p>
+        <p class="meta" style="margin:0;">{{ t('payment_method_hint') }}{% set to_pay = repair.price_final if repair.price_final is not none else repair.price_estimate %}{% if to_pay %} {{ t('pay_total_label') }}: {{ to_pay }} грн.{% endif %}</p>
         {{ pay.rows(accounts, t) }}
         {% endif %}
         <label>{{ t('comment_label') }}<input type="text" name="comment"></label>

@@ -308,7 +308,10 @@ async def status_view(
         if not current or status not in core_repairs.STATUS_LABELS:
             return RedirectResponse(link(request, "/repairs"), status_code=303)
         becoming_issued = status == "issued" and current["status"] != "issued"
-        takes_money = becoming_issued and current["price_final"]
+        # Only an estimate on record (every repair taken in through the
+        # bot) is still what the client pays — it becomes the final price.
+        price = core_repairs.current_price(current)
+        takes_money = becoming_issued and price
 
         resolved = None
         if takes_money:
@@ -321,7 +324,7 @@ async def status_view(
             else:
                 try:
                     resolved = core_cash.resolve_payments(
-                        conn, current["location_id"], current["price_final"], payments or None, payment_method,
+                        conn, current["location_id"], price, payments or None, payment_method,
                     )
                 except core_cash.PaymentError as exc:
                     error = str(exc)
@@ -329,6 +332,8 @@ async def status_view(
                 ctx = _detail_context(conn, order_id, loc(request))
                 return render(request, "repair_detail.html", staff=staff, error=error, **ctx)
 
+        if resolved and current["price_final"] is None:
+            core_repairs.set_price(conn, order_id, current["price_estimate"], price)
         core_repairs.update_status(conn, order_id, status, staff["id"], comment.strip() or None)
         repair = core_repairs.get_repair(conn, order_id)
 

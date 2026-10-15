@@ -2855,6 +2855,30 @@ def scenario_webapp_forms(db_path: str) -> None:
             check("re-submitting an already-issued repair does not double-charge the касса",
                   cash.cash_balance(conn) == balance_before_issue + 800)
 
+        # 15.10 (РК-1128 на проде): a repair taken in through the bot has
+        # only an estimate — «Выдан» in the app handed it over with no money
+        # in the касса. The estimate is what the client pays.
+        with get_conn(db_path) as conn:
+            est_repair_id = repairs.create_repair(
+                conn, cash_client_id, "Смартфон", "Xiaomi", "Mi 5s Plus", None, "батарея", "offline", None, 1200, staff_id,
+            )
+            check("a bot-style repair has only an estimate", repairs.get_repair(conn, est_repair_id)["price_final"] is None)
+            est_balance_before = cash.cash_balance(conn)
+        est_detail = client.get(f"/repairs/{est_repair_id}?t={token}")
+        check("the repair page shows the estimate as the amount to take", "1200 грн" in est_detail.text)
+        est_no_pay = client.post(f"/repairs/{est_repair_id}/status?t={token}", data={"status": "issued", "comment": ""})
+        check("issuing an estimate-only repair without payment is refused",
+              "Укажите способ оплаты" in est_no_pay.text)
+        client.post(f"/repairs/{est_repair_id}/status?t={token}", data={
+            "status": "issued", "comment": "", "payment_method": "cash",
+        })
+        with get_conn(db_path) as conn:
+            est_after = repairs.get_repair(conn, est_repair_id)
+            check("issuing an estimate-only repair puts the estimate into the касса",
+                  cash.cash_balance(conn) == est_balance_before + 1200)
+            check("the estimate becomes the final price on issue", est_after["price_final"] == 1200)
+            check("the estimate-only repair is issued", est_after["status"] == "issued")
+
         # /cash dashboard + manual expense/adjustment forms.
         dash_resp = client.get(f"/cash?t={token}")
         check("cash dashboard renders for an owner", dash_resp.status_code == 200 and "Касса" in dash_resp.text)
