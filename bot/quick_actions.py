@@ -43,6 +43,7 @@ from core import cash as core_cash
 from core import clients as core_clients
 from core import documents as core_documents
 from core import inventory as core_inventory
+from core import money_ops as core_money_ops
 from core import production as core_production
 from core import repairs as core_repairs
 from core import overview as core_overview
@@ -209,7 +210,11 @@ class PhoneBuy(StatesGroup):
 
 
 class CashExpense(StatesGroup):
+    """`rate` is asked only when the expense is not in гривня — without it
+    a 100 $ расход would count as 100 грн in прибыль."""
+    currency = State()
     amount = State()
+    rate = State()
     category = State()
     comment = State()
     confirm = State()
@@ -220,8 +225,18 @@ class CashAdjustment(StatesGroup):
     the FSM data ("in"/"out", set at entry by cash_menu_in/cash_menu_out)
     tells the two apart — one flow with a branch rather than two
     separate StatesGroups."""
+    currency = State()
     amount = State()
     comment = State()
+    confirm = State()
+
+
+class CashExchange(StatesGroup):
+    """«💱 Обмен» гривна ↔ доллар — what was handed over and what was
+    received; the rate is derived from the two (core.money_ops.exchange)."""
+    direction = State()
+    amount_from = State()
+    amount_to = State()
     confirm = State()
 
 
@@ -565,28 +580,49 @@ def _summary_contact(data: dict) -> list[str]:
     return [f"Имя: {html.escape(data['name'])}"] if data.get("name") else []
 
 
-def _steps_cash_expense(_data: dict) -> list[str]:
-    return ["amount", "category", "comment"]
+def _steps_cash_expense(data: dict) -> list[str]:
+    rate = ["rate"] if data.get("currency", core_accounts.BASE_CURRENCY) != core_accounts.BASE_CURRENCY else []
+    return ["currency", "amount", *rate, "category", "comment"]
+
+
+def _cur(data: dict) -> str:
+    return core_accounts.currency_label(data.get("currency") or core_accounts.BASE_CURRENCY)
 
 
 def _summary_cash_expense(data: dict) -> list[str]:
     lines = []
     if data.get("amount"):
-        lines.append(f"Сумма: {data['amount']} грн")
+        lines.append(f"Сумма: {data['amount']} {_cur(data)}")
+    if data.get("rate"):
+        lines.append(f"Курс: {data['rate']} грн")
     if data.get("category"):
         lines.append(f"Категория: {core_cash.EXPENSE_CATEGORIES[data['category']]}")
     return lines
 
 
 def _steps_cash_adjustment(_data: dict) -> list[str]:
-    return ["amount", "comment"]
+    return ["currency", "amount", "comment"]
 
 
 def _summary_cash_adjustment(data: dict) -> list[str]:
     if not data.get("amount"):
         return []
     verb = "Внести" if data.get("direction") == "in" else "Снять"
-    return [f"{verb}: {data['amount']} грн"]
+    return [f"{verb}: {data['amount']} {_cur(data)}"]
+
+
+def _steps_cash_exchange(_data: dict) -> list[str]:
+    return ["direction", "amount_from", "amount_to"]
+
+
+def _summary_cash_exchange(data: dict) -> list[str]:
+    lines = []
+    if data.get("from_currency"):
+        lines.append(f"Обмен: {core_accounts.currency_label(data['from_currency'])} → "
+                     f"{core_accounts.currency_label(data['to_currency'])}")
+    if data.get("amount_from"):
+        lines.append(f"Отдаём: {data['amount_from']} {core_accounts.currency_label(data['from_currency'])}")
+    return lines
 
 
 def _steps_sale(data: dict) -> list[str]:
@@ -616,6 +652,7 @@ _FLOWS = {
     "QuickContact": ("👤 Новый клиент", _steps_contact, _summary_contact),
     "CashExpense": ("💵 Расход", _steps_cash_expense, _summary_cash_expense),
     "CashAdjustment": ("💵 Касса", _steps_cash_adjustment, _summary_cash_adjustment),
+    "CashExchange": ("💱 Обмен", _steps_cash_exchange, _summary_cash_exchange),
 }
 
 
@@ -955,17 +992,52 @@ async def summary_view(message: Message) -> None:
     await message.answer("\n".join(lines))
 
 
-# --- Касса: расход / внести / снять, прямо из чата ---
+# --- Касса: расход / внести / снять (в грн, $ или USDT) и обмен, прямо из чата ---
+
+# Валюты, которые предлагает Касса в боте. Деньги ложатся на счёт точки в
+# этой валюте — наличные, если такой есть (у USDT это криптокошелёк).
+_CASH_CURRENCIES = (("UAH", "🇺🇦 Гривна"), ("USD", "💵 Доллар"), ("USDT", "₮ USDT"))
+# «💱 Обмен» в боте — гривна ↔ доллар; остальное — в приложении.
+_EXCHANGE_DIRECTIONS = (("UAH", "USD"), ("USD", "UAH"))
+
+
+def _currency_account(conn, location_id: int, currency: str):
+    accounts = [a for a in core_accounts.list_accounts(conn, location_id) if a["currency"] == currency]
+    cash = [a for a in accounts if a["kind"] == "cash"]
+    return (cash or accounts or [None])[0]
+
+
+def _last_rate(conn, currency: str):
+    """Последний курс, по которому эта валюта ходила в кассе — подсказка
+    кнопкой, чтобы не набирать один и тот же курс каждый раз."""
+    row = conn.execute(
+        """SELECT cash_transactions.rate FROM cash_transactions
+           JOIN money_accounts ON money_accounts.id = cash_transactions.account_id
+           WHERE money_accounts.currency = ? AND cash_transactions.rate IS NOT NULL
+             AND cash_transactions.cancelled_at IS NULL
+           ORDER BY cash_transactions.id DESC LIMIT 1""",
+        (currency,),
+    ).fetchone()
+    return money(row["rate"]) if row else None
+
+
+def _currency_keyboard(store: StoreConfig) -> InlineKeyboardMarkup:
+    with get_conn(store.db_path) as conn:
+        offered = [(c, label) for c, label in _CASH_CURRENCIES if _currency_account(conn, store.location_id, c)]
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text=label, callback_data=f"cash_cur_{c}") for c, label in offered
+    ]])
+
 
 @router.message(F.text == BTN_CASH, F.chat.type == "private")
 async def cash_start(message: Message, state: FSMContext) -> None:
-    """Not itself an FSM flow — a small menu (баланс + 3 действия) whose
-    buttons start CashExpense/CashAdjustment. Uses _repost (not a bare
-    message.answer) so prompt_message_id is already tracked from this
-    very first screen: CashExpense/CashAdjustment's real first step is a
-    button tap on THIS menu (a callback), not a typed reply — unlike
-    every other flow above, there's no earlier message-triggered _advance
-    to have set prompt_message_id first."""
+    """Not itself an FSM flow — a small menu (баланс + действия) whose
+    buttons start CashExpense/CashAdjustment/CashExchange. Uses _repost
+    (not a bare message.answer) so prompt_message_id is already tracked
+    from this very first screen: each flow's real first step is a button
+    tap on THIS menu (a callback), not a typed reply — unlike every other
+    flow above, there's no earlier message-triggered _advance to have set
+    prompt_message_id first."""
     resolved = _resolve_staff_for_dm(message.from_user.id)
     if not resolved:
         return
@@ -991,6 +1063,7 @@ async def cash_start(message: Message, state: FSMContext) -> None:
             InlineKeyboardButton(text="➕ Внести", callback_data="cash_menu_in", style="success"),
             InlineKeyboardButton(text="➖ Снять", callback_data="cash_menu_out"),
         ])
+    rows.append([InlineKeyboardButton(text="💱 Обмен", callback_data="cash_menu_exchange")])
     rows.append([InlineKeyboardButton(text="🔒 Закрыть смену", callback_data="shift_close")])
     lines = ["💵 <b>Касса</b>", f"Баланс: {balance} грн"]
     lines += [f"{html.escape(a['name'])}: {a['balance']} {a['currency_label']}" for a in other_accounts]
@@ -1022,8 +1095,9 @@ async def _resolve_cash_actor(callback: CallbackQuery, state: FSMContext):
 async def cash_menu_expense(callback: CallbackQuery, state: FSMContext) -> None:
     if not await _resolve_cash_actor(callback, state):
         return
-    await state.set_state(CashExpense.amount)
-    await _advance_callback(callback, state, "Сумма расхода (грн):")
+    store = get_store((await state.get_data())["store_id"])
+    await state.set_state(CashExpense.currency)
+    await _advance_callback(callback, state, "В какой валюте расход?", _currency_keyboard(store))
     await callback.answer()
 
 
@@ -1049,47 +1123,112 @@ def _may_adjust(staff) -> bool:
     return staff["role"] in _ADJUST_ROLES
 
 
-@router.callback_query(F.data == "cash_menu_in")
-async def cash_menu_in(callback: CallbackQuery, state: FSMContext) -> None:
+async def _cash_menu_adjust(callback: CallbackQuery, state: FSMContext, direction: str) -> None:
     staff = await _resolve_cash_actor(callback, state)
     if not staff:
         return
     if not _may_adjust(staff):
         await callback.answer("Корректировать остаток может только владелец.", show_alert=True)
         return
-    await state.set_state(CashAdjustment.amount)
-    await state.update_data(direction="in")
-    await _advance_callback(callback, state, "Сумма для внесения (грн):")
+    store = get_store((await state.get_data())["store_id"])
+    await state.set_state(CashAdjustment.currency)
+    await state.update_data(direction=direction)
+    verb = "вносите" if direction == "in" else "снимаете"
+    await _advance_callback(callback, state, f"В какой валюте {verb}?", _currency_keyboard(store))
     await callback.answer()
+
+
+@router.callback_query(F.data == "cash_menu_in")
+async def cash_menu_in(callback: CallbackQuery, state: FSMContext) -> None:
+    await _cash_menu_adjust(callback, state, "in")
 
 
 @router.callback_query(F.data == "cash_menu_out")
 async def cash_menu_out(callback: CallbackQuery, state: FSMContext) -> None:
-    staff = await _resolve_cash_actor(callback, state)
-    if not staff:
+    await _cash_menu_adjust(callback, state, "out")
+
+
+@router.callback_query(F.data.startswith("cash_cur_"), StateFilter(CashExpense.currency, CashAdjustment.currency))
+async def cash_got_currency(callback: CallbackQuery, state: FSMContext) -> None:
+    """Валюта → счёт этой валюты на точке; дальше сумма, в этой валюте."""
+    currency = callback.data.removeprefix("cash_cur_")
+    data = await state.get_data()
+    try:
+        store = get_store(data["store_id"])
+    except KeyError:
+        await callback.answer("Магазин больше не настроен.", show_alert=True)
         return
-    if not _may_adjust(staff):
-        await callback.answer("Корректировать остаток может только владелец.", show_alert=True)
+    with get_conn(store.db_path) as conn:
+        account = _currency_account(conn, store.location_id, currency)
+    if currency not in dict(_CASH_CURRENCIES) or not account:
+        await callback.answer("Нет счёта в этой валюте.", show_alert=True)
         return
-    await state.set_state(CashAdjustment.amount)
-    await state.update_data(direction="out")
-    await _advance_callback(callback, state, "Сумма для снятия (грн):")
+    data = await state.update_data(currency=currency, account_id=account["id"], account_name=account["name"])
+    label = core_accounts.currency_label(currency)
+    if await state.get_state() == CashExpense.currency.state:
+        await state.set_state(CashExpense.amount)
+        question = f"Сумма расхода ({label}):"
+    else:
+        await state.set_state(CashAdjustment.amount)
+        question = f"Сумма для {'внесения' if data.get('direction') == 'in' else 'снятия'} ({label}):"
+    await _advance_callback(callback, state, question)
     await callback.answer()
 
 
-@router.message(CashExpense.amount, F.text)
-async def cash_expense_got_amount(message: Message, state: FSMContext) -> None:
-    amount = _parse_positive_int(message.text)
-    if not amount:
-        await _nudge(message, state, "Введите сумму числом, например: 250.")
-        return
-    await state.update_data(amount=amount)
+async def _ask_category(message_or_callback, state: FSMContext) -> None:
     await state.set_state(CashExpense.category)
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=label, callback_data=f"cash_cat_{key}")]
         for key, label in core_cash.EXPENSE_CATEGORIES.items()
     ])
-    await _advance(message, state, "Категория расхода:", reply_markup=keyboard)
+    if isinstance(message_or_callback, CallbackQuery):
+        await _advance_callback(message_or_callback, state, "Категория расхода:", keyboard)
+    else:
+        await _advance(message_or_callback, state, "Категория расхода:", reply_markup=keyboard)
+
+
+@router.message(CashExpense.amount, F.text)
+async def cash_expense_got_amount(message: Message, state: FSMContext) -> None:
+    amount = core_accounts.parse_amount(message.text)
+    if not amount:
+        await _nudge(message, state, "Введите сумму числом, например: 250.")
+        return
+    data = await state.update_data(amount=amount)
+    currency = data.get("currency", core_accounts.BASE_CURRENCY)
+    if currency == core_accounts.BASE_CURRENCY:
+        await _ask_category(message, state)
+        return
+    await state.set_state(CashExpense.rate)
+    with get_conn(get_store(data["store_id"]).db_path) as conn:
+        last = _last_rate(conn, currency)
+    keyboard = None
+    if last:
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text=f"По курсу {last}", callback_data=f"cash_rate_{last}"),
+        ]])
+    label = core_accounts.currency_label(currency)
+    await _advance(message, state, f"Курс: сколько гривен за 1 {label}?", reply_markup=keyboard)
+
+
+@router.message(CashExpense.rate, F.text)
+async def cash_expense_got_rate(message: Message, state: FSMContext) -> None:
+    rate = core_accounts.parse_amount(message.text)
+    if not rate:
+        await _nudge(message, state, "Введите курс числом, например: 41.5.")
+        return
+    await state.update_data(rate=rate)
+    await _ask_category(message, state)
+
+
+@router.callback_query(F.data.startswith("cash_rate_"), CashExpense.rate)
+async def cash_expense_took_rate(callback: CallbackQuery, state: FSMContext) -> None:
+    rate = core_accounts.parse_amount(callback.data.removeprefix("cash_rate_"))
+    if not rate:
+        await callback.answer()
+        return
+    await state.update_data(rate=rate)
+    await _ask_category(callback, state)
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("cash_cat_"), CashExpense.category)
@@ -1107,12 +1246,21 @@ async def cash_expense_got_category(callback: CallbackQuery, state: FSMContext) 
     await callback.answer()
 
 
+def _in_uah(data: dict) -> str:
+    """« (= 4 150 грн)» после суммы в валюте — сколько это в гривне по курсу."""
+    if not data.get("rate"):
+        return ""
+    return f" (= {money(data['amount'] * data['rate'])} грн по курсу {data['rate']})"
+
+
 def _cash_expense_confirm_text(data: dict) -> str:
     lines = [
         "📋 Расход:",
-        f"Сумма: {data['amount']} грн",
+        f"Сумма: {data['amount']} {_cur(data)}{_in_uah(data)}",
         f"Категория: {core_cash.EXPENSE_CATEGORIES[data['category']]}",
     ]
+    if data.get("account_name"):
+        lines.append(f"Счёт: {html.escape(data['account_name'])}")
     if data.get("comment"):
         lines.append(f"Комментарий: {html.escape(data['comment'])}")
     return "\n".join(lines)
@@ -1161,6 +1309,7 @@ async def cash_expense_confirm(callback: CallbackQuery, state: FSMContext) -> No
         core_cash.record_expense(
             conn, "cash", data["amount"], data["category"], data.get("comment"), staff["id"],
             location_id=store.location_id, key=_tap_key(callback),
+            account_id=data.get("account_id"), rate=data.get("rate"),
         )
 
     user_message_ids = data.get("user_message_ids", [])
@@ -1170,7 +1319,7 @@ async def cash_expense_confirm(callback: CallbackQuery, state: FSMContext) -> No
         InlineKeyboardButton(text="Открыть в CRM", web_app=WebAppInfo(url=crm_link("/cash", staff["id"], store.id))),
     ]])
     await callback.message.edit_text(
-        f"✅ Расход записан: {data['amount']} грн ({core_cash.EXPENSE_CATEGORIES[data['category']]}).",
+        f"✅ Расход записан: {data['amount']} {_cur(data)} ({core_cash.EXPENSE_CATEGORIES[data['category']]}).",
         reply_markup=open_keyboard,
     )
     await callback.answer("Готово")
@@ -1179,7 +1328,7 @@ async def cash_expense_confirm(callback: CallbackQuery, state: FSMContext) -> No
 @router.message(CashAdjustment.amount, F.text)
 async def cash_adjustment_got_amount(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
-    amount = _parse_positive_int(message.text)
+    amount = core_accounts.parse_amount(message.text)
     if not amount:
         hint = "Введите сумму числом, например: 500." if data.get("direction") == "in" else "Введите сумму числом, например: 300."
         await _nudge(message, state, hint)
@@ -1194,7 +1343,9 @@ async def cash_adjustment_got_amount(message: Message, state: FSMContext) -> Non
 
 def _cash_adjustment_confirm_text(data: dict) -> str:
     verb = "Внести" if data.get("direction") == "in" else "Снять"
-    lines = [f"📋 {verb} наличные:", f"Сумма: {data['amount']} грн"]
+    lines = [f"📋 {verb}:", f"Сумма: {data['amount']} {_cur(data)}"]
+    if data.get("account_name"):
+        lines.append(f"Счёт: {html.escape(data['account_name'])}")
     if data.get("comment"):
         lines.append(f"Комментарий: {html.escape(data['comment'])}")
     return "\n".join(lines)
@@ -1247,7 +1398,7 @@ async def cash_adjustment_confirm(callback: CallbackQuery, state: FSMContext) ->
             return
         core_cash.record_adjustment(
             conn, signed_amount, data.get("comment"), staff["id"],
-            location_id=store.location_id, key=_tap_key(callback),
+            location_id=store.location_id, key=_tap_key(callback), account_id=data.get("account_id"),
         )
 
     user_message_ids = data.get("user_message_ids", [])
@@ -1257,7 +1408,144 @@ async def cash_adjustment_confirm(callback: CallbackQuery, state: FSMContext) ->
     open_keyboard = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="Открыть в CRM", web_app=WebAppInfo(url=crm_link("/cash", staff["id"], store.id))),
     ]])
-    await callback.message.edit_text(f"✅ {verb}: {data['amount']} грн.", reply_markup=open_keyboard)
+    await callback.message.edit_text(f"✅ {verb}: {data['amount']} {_cur(data)}.", reply_markup=open_keyboard)
+    await callback.answer("Готово")
+
+
+# --- 💱 Обмен: гривна ↔ доллар между счетами точки ---
+
+@router.callback_query(F.data == "cash_menu_exchange")
+async def cash_menu_exchange(callback: CallbackQuery, state: FSMContext) -> None:
+    if not await _resolve_cash_actor(callback, state):
+        return
+    await state.set_state(CashExchange.direction)
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(
+            text=f"{core_accounts.currency_label(src)} → {core_accounts.currency_label(dst)}",
+            callback_data=f"cash_ex_{src}_{dst}",
+        )
+        for src, dst in _EXCHANGE_DIRECTIONS
+    ]])
+    await _advance_callback(callback, state, "Что меняем?", keyboard)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("cash_ex_"), CashExchange.direction)
+async def cash_exchange_got_direction(callback: CallbackQuery, state: FSMContext) -> None:
+    src, _, dst = callback.data.removeprefix("cash_ex_").partition("_")
+    if (src, dst) not in _EXCHANGE_DIRECTIONS:
+        await callback.answer()
+        return
+    data = await state.get_data()
+    try:
+        store = get_store(data["store_id"])
+    except KeyError:
+        await callback.answer("Магазин больше не настроен.", show_alert=True)
+        return
+    with get_conn(store.db_path) as conn:
+        source = _currency_account(conn, store.location_id, src)
+        target = _currency_account(conn, store.location_id, dst)
+        available = core_accounts.balance(conn, source["id"]) if source else 0
+    if not source or not target:
+        await callback.answer("На точке нет счёта в одной из валют — заведите его в CRM.", show_alert=True)
+        return
+    await state.update_data(
+        from_currency=src, to_currency=dst, from_account_id=source["id"], to_account_id=target["id"],
+        from_account_name=source["name"], to_account_name=target["name"],
+    )
+    await state.set_state(CashExchange.amount_from)
+    label = core_accounts.currency_label(src)
+    await _advance_callback(
+        callback, state, f"Сколько {label} отдаёте? (на счёте «{html.escape(source['name'])}»: {available} {label})",
+    )
+    await callback.answer()
+
+
+@router.message(CashExchange.amount_from, F.text)
+async def cash_exchange_got_from(message: Message, state: FSMContext) -> None:
+    amount = core_accounts.parse_amount(message.text)
+    if not amount:
+        await _nudge(message, state, "Введите сумму числом, например: 41500.")
+        return
+    data = await state.update_data(amount_from=amount)
+    await state.set_state(CashExchange.amount_to)
+    label = core_accounts.currency_label(data["to_currency"])
+    await _advance(message, state, f"Сколько {label} получаете?")
+
+
+def _exchange_rate(data: dict):
+    """Гривен за доллар — с какой стороны ни стояла бы гривна."""
+    if data["from_currency"] == core_accounts.BASE_CURRENCY:
+        return money(data["amount_from"] / data["amount_to"])
+    return money(data["amount_to"] / data["amount_from"])
+
+
+def _cash_exchange_confirm_text(data: dict) -> str:
+    src = core_accounts.currency_label(data["from_currency"])
+    dst = core_accounts.currency_label(data["to_currency"])
+    return "\n".join([
+        "📋 Обмен:",
+        f"Отдаём: −{data['amount_from']} {src} ({html.escape(data['from_account_name'])})",
+        f"Получаем: +{data['amount_to']} {dst} ({html.escape(data['to_account_name'])})",
+        f"Курс: {_exchange_rate(data)}",
+    ])
+
+
+@router.message(CashExchange.amount_to, F.text)
+async def cash_exchange_got_to(message: Message, state: FSMContext) -> None:
+    amount = core_accounts.parse_amount(message.text)
+    if not amount:
+        await _nudge(message, state, "Введите сумму числом, например: 1000.")
+        return
+    data = await state.update_data(amount_to=amount)
+    await state.set_state(CashExchange.confirm)
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Подтвердить", callback_data="cash_exchange_confirm", style="success"),
+        InlineKeyboardButton(text="❌ Отмена", callback_data="cash_cancel", style="danger"),
+    ]])
+    await _advance(message, state, _cash_exchange_confirm_text(data), reply_markup=keyboard)
+
+
+@router.callback_query(F.data == "cash_exchange_confirm", CashExchange.confirm)
+async def cash_exchange_confirm(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    try:
+        store = get_store(data["store_id"])
+    except KeyError:
+        await state.clear()
+        await callback.answer("Магазин больше не настроен.", show_alert=True)
+        return
+    if await _already_done(callback, store.db_path):
+        return
+
+    with get_conn(store.db_path) as conn:
+        staff = core_auth.get_staff_by_telegram_id(conn, callback.from_user.id)
+        if not staff or staff["role"] not in _CASH_ROLES:
+            await state.clear()
+            await callback.answer("Недостаточно прав.", show_alert=True)
+            return
+        try:
+            core_money_ops.exchange(
+                conn, data["from_account_id"], data["to_account_id"], data["amount_from"], data["amount_to"],
+                staff["id"], key=_tap_key(callback),
+            )
+        except core_accounts.AccountError as exc:
+            # Карточка остаётся — можно отменить и начать с другой суммой.
+            await callback.answer(str(exc), show_alert=True)
+            return
+
+    user_message_ids = data.get("user_message_ids", [])
+    await state.clear()
+    await _safe_delete_many(callback.bot, callback.message.chat.id, user_message_ids)
+    open_keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="Открыть в CRM", web_app=WebAppInfo(url=crm_link("/cash", staff["id"], store.id))),
+    ]])
+    src = core_accounts.currency_label(data["from_currency"])
+    dst = core_accounts.currency_label(data["to_currency"])
+    await callback.message.edit_text(
+        f"✅ Обмен проведён: −{data['amount_from']} {src} → +{data['amount_to']} {dst}, курс {_exchange_rate(data)}.",
+        reply_markup=open_keyboard,
+    )
     await callback.answer("Готово")
 
 
@@ -1376,7 +1664,7 @@ async def client_search_pick(callback: CallbackQuery, state: FSMContext) -> None
     await callback.answer()
 
 
-@router.message(F.text == BTN_CANCEL, StateFilter(RepairIntake, QuickContact, PhoneBuy, CashExpense, CashAdjustment, ClientSearch, ShiftOpen, TransferFlow, SaleFlow, PartAdd))
+@router.message(F.text == BTN_CANCEL, StateFilter(RepairIntake, QuickContact, PhoneBuy, CashExpense, CashAdjustment, CashExchange, ClientSearch, ShiftOpen, TransferFlow, SaleFlow, PartAdd))
 async def cancel_flow(message: Message, state: FSMContext) -> None:
     """Deletes EVERYTHING from this flow attempt — the bot's own tracked
     message, every reply the staff member typed along the way (name,
@@ -1855,6 +2143,6 @@ async def quick_cancel_callback(callback: CallbackQuery, state: FSMContext) -> N
 # message while waiting on inline-button confirm) gets a nudge instead of
 # silence ---
 
-@router.message(StateFilter(RepairIntake, QuickContact, PhoneBuy, CashExpense, CashAdjustment, ClientSearch, ShiftOpen, TransferFlow, SaleFlow, PartAdd))
+@router.message(StateFilter(RepairIntake, QuickContact, PhoneBuy, CashExpense, CashAdjustment, CashExchange, ClientSearch, ShiftOpen, TransferFlow, SaleFlow, PartAdd))
 async def quick_flow_fallback(message: Message, state: FSMContext) -> None:
     await _nudge(message, state, "Не понял ответ. Следуйте подсказке выше, либо ❌ Отмена.")

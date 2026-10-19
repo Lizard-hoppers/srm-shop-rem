@@ -1143,8 +1143,17 @@ def scenario_quick_cash_chat(db_path: str) -> None:
         check("and offers to close the shift",
               any(b.callback_data == "shift_close" for row in screen()["markup"].inline_keyboard for b in row))
 
+        check("cash menu offers «💱 Обмен»",
+              any(b.callback_data == "cash_menu_exchange" for row in screen()["markup"].inline_keyboard for b in row))
+
         await qa.cash_menu_expense(tap("cash_menu_expense"), state)
-        check("expense flow asks for the amount", "Сумма расхода" in screen()["text"])
+        check("expense flow first asks the currency: грн, $ and USDT",
+              "валюте" in screen()["text"]
+              and [b.callback_data for b in screen()["markup"].inline_keyboard[0]]
+              == ["cash_cur_UAH", "cash_cur_USD", "cash_cur_USDT"])
+        await qa.cash_got_currency(tap("cash_cur_UAH"), state)
+        check("expense flow then asks for the amount in that currency",
+              "Сумма расхода (грн)" in screen()["text"])
 
         await qa.cash_expense_got_amount(say("250"), state)
         check("expense flow then asks for a category", "Категория расхода" in screen()["text"])
@@ -1168,6 +1177,7 @@ def scenario_quick_cash_chat(db_path: str) -> None:
         # --- Внести ---
         await qa.cash_start(say(qa.BTN_CASH), state)
         await qa.cash_menu_in(tap("cash_menu_in"), state)
+        await qa.cash_got_currency(tap("cash_cur_UAH"), state)
         check("«Внести» flow asks for the amount to bring in", "внесения" in screen()["text"])
         await qa.cash_adjustment_got_amount(say("500"), state)
         check("«Внести» flow then asks for an optional comment", "Комментарий" in screen()["text"])
@@ -1183,6 +1193,7 @@ def scenario_quick_cash_chat(db_path: str) -> None:
         # --- Снять ---
         await qa.cash_start(say(qa.BTN_CASH), state)
         await qa.cash_menu_out(tap("cash_menu_out"), state)
+        await qa.cash_got_currency(tap("cash_cur_UAH"), state)
         check("«Снять» flow asks for the amount to take out", "снятия" in screen()["text"])
         await qa.cash_adjustment_got_amount(say("100"), state)
         await qa.cash_adjustment_got_comment(say("В сейф"), state)
@@ -1193,6 +1204,82 @@ def scenario_quick_cash_chat(db_path: str) -> None:
         check("«Снять» actually decreases the drawer balance by exactly its amount",
               after_out == after_in - 100)
 
+        # --- Валюта: внести $ и расход в $ (с курсом) ---
+        with get_conn(db_path) as conn:
+            usd = qa._currency_account(conn, 1, "USD")
+            usd_before = accounts.balance(conn, usd["id"])
+        await qa.cash_start(say(qa.BTN_CASH), state)
+        await qa.cash_menu_in(tap("cash_menu_in"), state)
+        await qa.cash_got_currency(tap("cash_cur_USD"), state)
+        check("«Внести» in dollars asks the amount in USD", "внесения (USD)" in screen()["text"])
+        await qa.cash_adjustment_got_amount(say("200"), state)
+        await qa.cash_adjustment_skip_comment(tap("cash_comment_skip"), state)
+        check("its confirm card names the dollar account", "200 USD" in screen()["text"]
+              and usd["name"] in screen()["text"])
+        await qa.cash_adjustment_confirm(tap("cash_adjustment_confirm"), state)
+        with get_conn(db_path) as conn:
+            check("200 $ land on the dollar account, the гривня drawer is untouched",
+                  accounts.balance(conn, usd["id"]) == usd_before + 200 and cash.cash_balance(conn) == after_out)
+
+        await qa.cash_start(say(qa.BTN_CASH), state)
+        await qa.cash_menu_expense(tap("cash_menu_expense"), state)
+        await qa.cash_got_currency(tap("cash_cur_USD"), state)
+        await qa.cash_expense_got_amount(say("10"), state)
+        check("an expense in dollars asks the rate", "гривен за 1 USD" in screen()["text"])
+        await qa.cash_expense_got_rate(say("41,5"), state)
+        check("then the category, as for гривня", "Категория расхода" in screen()["text"])
+        await qa.cash_expense_got_category(tap("cash_cat_other"), state)
+        await qa.cash_expense_skip_comment(tap("cash_comment_skip"), state)
+        check("its confirm card shows the гривня value at that rate", "10 USD (= 415 грн" in screen()["text"])
+        await qa.cash_expense_confirm(tap("cash_expense_confirm"), state)
+        with get_conn(db_path) as conn:
+            row = conn.execute("SELECT * FROM cash_transactions WHERE account_id = ? ORDER BY id DESC LIMIT 1",
+                               (usd["id"],)).fetchone()
+            check("the expense leaves the dollar account and is worth 415 грн in прибыль",
+                  row["kind"] == "expense" and row["amount"] == 10 and row["amount_uah"] == 415
+                  and accounts.balance(conn, usd["id"]) == usd_before + 190)
+            check("the гривня drawer is untouched by a dollar expense", cash.cash_balance(conn) == after_out)
+
+        await qa.cash_start(say(qa.BTN_CASH), state)
+        await qa.cash_menu_expense(tap("cash_menu_expense"), state)
+        await qa.cash_got_currency(tap("cash_cur_USD"), state)
+        await qa.cash_expense_got_amount(say("1"), state)
+        check("the next dollar expense offers the last rate as a button",
+              screen()["markup"].inline_keyboard[0][0].callback_data == "cash_rate_41.5")
+        await qa.cancel_flow(say(qa.BTN_CANCEL), state)
+
+        # --- Обмен $ → грн ---
+        await qa.cash_start(say(qa.BTN_CASH), state)
+        await qa.cash_menu_exchange(tap("cash_menu_exchange"), state)
+        check("«Обмен» offers грн → $ and $ → грн",
+              [b.callback_data for b in screen()["markup"].inline_keyboard[0]] == ["cash_ex_UAH_USD", "cash_ex_USD_UAH"])
+        await qa.cash_exchange_got_direction(tap("cash_ex_USD_UAH"), state)
+        check("it asks how many dollars are handed over, showing what the account holds",
+              "Сколько USD отдаёте" in screen()["text"] and f"{usd_before + 190} USD" in screen()["text"])
+        await qa.cash_exchange_got_from(say("100"), state)
+        check("then how many гривен are received", "Сколько грн получаете" in screen()["text"])
+        await qa.cash_exchange_got_to(say("4150"), state)
+        check("the confirm card shows both sides and the rate",
+              "−100 USD" in screen()["text"] and "+4150 грн" in screen()["text"] and "Курс: 41.5" in screen()["text"])
+        await qa.cash_exchange_confirm(tap("cash_exchange_confirm"), state)
+        with get_conn(db_path) as conn:
+            check("the exchange moves the money between the two accounts",
+                  accounts.balance(conn, usd["id"]) == usd_before + 90 and cash.cash_balance(conn) == after_out + 4150)
+            check("and it is a document (ОБ) in the journal",
+                  conn.execute("SELECT COUNT(*) AS n FROM documents WHERE doc_type = 'exchange'").fetchone()["n"] >= 1)
+        after_out = after_out + 4150
+
+        await qa.cash_start(say(qa.BTN_CASH), state)
+        await qa.cash_menu_exchange(tap("cash_menu_exchange"), state)
+        await qa.cash_exchange_got_direction(tap("cash_ex_USD_UAH"), state)
+        await qa.cash_exchange_got_from(say("100000"), state)
+        await qa.cash_exchange_got_to(say("1"), state)
+        cb = tap("cash_exchange_confirm")
+        await qa.cash_exchange_confirm(cb, state)
+        check("exchanging more than the account holds is refused with an alert, nothing moves",
+              cb.answered and cb.answered[-1][1] is True and "только" in cb.answered[-1][0])
+        await qa.quick_cancel_callback(tap("cash_cancel"), state)
+
         # --- Отмена посреди диалога ---
         # Three finished confirmations (Расход/Внести/Снять above) are
         # legitimately still sitting in the chat at this point — a
@@ -1202,6 +1289,7 @@ def scenario_quick_cash_chat(db_path: str) -> None:
         messages_before = len(chat.bot_messages)
         await qa.cash_start(say(qa.BTN_CASH), state)
         await qa.cash_menu_expense(tap("cash_menu_expense"), state)
+        await qa.cash_got_currency(tap("cash_cur_UAH"), state)
         await qa.cash_expense_got_amount(say("999"), state)
         await qa.cancel_flow(say(qa.BTN_CANCEL), state)
         check("❌ Отмена mid-flow wipes its own screen, leaving earlier confirmations untouched",
