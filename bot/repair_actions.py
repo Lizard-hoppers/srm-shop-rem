@@ -218,6 +218,7 @@ def _part_picker(order_id: int, lines: list[dict], *, done_button: bool) -> Inli
         )]
         for line in lines[:_PART_PICK_LIMIT]
     ]
+    rows.append([InlineKeyboardButton(text="➕ Новая запчасть (фото)", callback_data=f"rp_new:{order_id}")])
     last = [InlineKeyboardButton(text="Без запчасти", callback_data=f"rp_none:{order_id}")]
     if done_button:
         last.append(InlineKeyboardButton(text="✅ Готово", callback_data=f"rp_done:{order_id}", style="success"))
@@ -241,6 +242,7 @@ def _part_screen(conn, order_id: int) -> tuple[str, InlineKeyboardMarkup]:
         text.append("Отмечено: без запчасти")
     text.append("")
     text.append("Что установили? Одно нажатие — одна штука." if lines else "На вашем складе нет свободных деталей.")
+    text.append("Купили деталь сами — «➕ Новая запчасть»: фото этикетки и цена закупки.")
     done = repair["status"] == "in_progress" and (bool(used) or bool(repair["no_parts"]))
     return "\n".join(text), _part_picker(order_id, lines, done_button=done)
 

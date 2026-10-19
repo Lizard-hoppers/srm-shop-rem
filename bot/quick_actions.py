@@ -248,6 +248,15 @@ class SaleFlow(StatesGroup):
     confirm = State()
 
 
+class PartAdd(StatesGroup):
+    """«➕ Новая запчасть» from the part picker — handlers live in
+    bot/part_add_flow.py; declared here so the shared cancel/fallback
+    handlers at the bottom of this module cover it like every other flow."""
+    photo = State()
+    name = State()
+    cost = State()
+
+
 class ShiftOpen(StatesGroup):
     """«Есть расхождение» — one text step: what exactly doesn't match."""
     note = State()
@@ -1367,7 +1376,7 @@ async def client_search_pick(callback: CallbackQuery, state: FSMContext) -> None
     await callback.answer()
 
 
-@router.message(F.text == BTN_CANCEL, StateFilter(RepairIntake, QuickContact, PhoneBuy, CashExpense, CashAdjustment, ClientSearch, ShiftOpen, TransferFlow, SaleFlow))
+@router.message(F.text == BTN_CANCEL, StateFilter(RepairIntake, QuickContact, PhoneBuy, CashExpense, CashAdjustment, ClientSearch, ShiftOpen, TransferFlow, SaleFlow, PartAdd))
 async def cancel_flow(message: Message, state: FSMContext) -> None:
     """Deletes EVERYTHING from this flow attempt — the bot's own tracked
     message, every reply the staff member typed along the way (name,
@@ -1846,6 +1855,6 @@ async def quick_cancel_callback(callback: CallbackQuery, state: FSMContext) -> N
 # message while waiting on inline-button confirm) gets a nudge instead of
 # silence ---
 
-@router.message(StateFilter(RepairIntake, QuickContact, PhoneBuy, CashExpense, CashAdjustment, ClientSearch, ShiftOpen, TransferFlow, SaleFlow))
+@router.message(StateFilter(RepairIntake, QuickContact, PhoneBuy, CashExpense, CashAdjustment, ClientSearch, ShiftOpen, TransferFlow, SaleFlow, PartAdd))
 async def quick_flow_fallback(message: Message, state: FSMContext) -> None:
     await _nudge(message, state, "Не понял ответ. Следуйте подсказке выше, либо ❌ Отмена.")

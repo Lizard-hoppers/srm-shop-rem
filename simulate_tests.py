@@ -6860,6 +6860,176 @@ def scenario_bot_dispatch() -> None:
         asyncio.run(run())
 
 
+def scenario_part_add_chat() -> None:
+    """15.10 (Павел): «➕ Новая запчасть» в списке деталей — мастер купил
+    деталь сам: фото этикетки → распознали → цена закупки → деталь
+    оприходована на его склад партией с этой ценой и сразу списана в ремонт.
+    Всё через настоящий диспетчер."""
+    print("scenario: мастер добавляет купленную запчасть фото + ценой закупки")
+    import asyncio
+    import datetime
+
+    from aiogram import Bot
+    from aiogram.fsm.storage.base import StorageKey
+    from aiogram.types import CallbackQuery, Chat, File, Message, PhotoSize, Update, User
+
+    from bot import part_add_flow as paf
+    from bot import repair_actions as ra
+    from core import barcode_scan, vision_ocr, warehouses
+
+    MASTER_TG, OTHER_TG = 886002, 886003
+
+    check("cost parsing: «1 200 грн», «350,50», «0», «дорого»",
+          paf.parse_cost("1 200 грн") == 1200 and paf.parse_cost("350,50") == 350.5
+          and paf.parse_cost("0") is None and paf.parse_cost("дорого") is None)
+
+    with tempfile.TemporaryDirectory() as tmp, _separate_base(tmp, "part-add.sqlite3", ("Мастерская",)) as db_path:
+        with get_conn(db_path) as conn:
+            owner = auth.create_staff(conn, "pa-owner", "pass", "Владелец", "owner")
+            master = auth.create_master(conn, "Эдик", MASTER_TG, "percent", 33)
+            auth.create_master(conn, "Чужой", OTHER_TG, "percent", 33)
+            client_id = clients.get_or_create_by_phone(conn, "Зоя", "+380956988209", source="offline")
+            repair_id = repairs.create_repair(conn, client_id, "Смартфон", "Xiaomi", "Mi 5s Plus", None, "Замена батареи", "offline", master, 1000, owner, location_id=1)
+            repairs.claim_repair(conn, repair_id, master)
+            master_wh = warehouses.master_warehouse(conn, master)["id"]
+            text, keyboard = ra._part_screen(conn, repair_id)
+        check("the picker offers «➕ Новая запчасть» even with an empty склад",
+              f"rp_new:{repair_id}" in [b.callback_data for row in keyboard.inline_keyboard for b in row]
+              and "Новая запчасть" in text)
+
+        log: list[dict] = []
+
+        class _FakeBot(Bot):
+            async def __call__(self, method, request_timeout=None):
+                name = type(method).__name__
+                markup = getattr(method, "reply_markup", None)
+                buttons = [b.callback_data for row in markup.inline_keyboard for b in row] if markup else []
+                if name == "AnswerCallbackQuery":
+                    log.append({"kind": "answer", "text": method.text or "", "alert": bool(method.show_alert)})
+                    return True
+                if name == "GetFile":
+                    return File(file_id=method.file_id, file_unique_id="u", file_path="photos/part.jpg")
+                if name in ("SendMessage", "EditMessageText"):
+                    log.append({"kind": name, "text": method.text, "buttons": buttons})
+                if name == "SendMessage":
+                    return Message(message_id=9000 + len(log), date=datetime.datetime.now(), chat=Chat(id=method.chat_id, type="private"), text="x")
+                return True
+
+            async def download_file(self, file_path, destination=None, timeout=30, chunk_size=65536, seek=True):
+                return io.BytesIO(b"fake-jpeg")
+
+        read = {"barcode": None, "label": {"name": None, "sku": None}}
+        orig_decode, orig_label = barcode_scan.decode_barcode, vision_ocr.extract_product_label
+        barcode_scan.decode_barcode = lambda _b: read["barcode"]
+        vision_ocr.extract_product_label = lambda _b: dict(read["label"])
+        orig_sync = ra._sync_after_change
+        ra._sync_after_change = lambda *_a: None
+
+        async def run() -> None:
+            bot = _FakeBot(token="123456:test-bot-token-not-real")
+            dp = _the_dispatcher()
+            counter = 50000
+            user = lambda uid: User(id=uid, is_bot=False, first_name="M")
+            chat = lambda uid: Chat(id=uid, type="private")
+
+            async def tap(data: str, uid: int = MASTER_TG):
+                nonlocal counter
+                counter += 1
+                log.clear()
+                await dp.feed_update(bot, Update(update_id=counter, callback_query=CallbackQuery(
+                    id=str(counter), from_user=user(uid), chat_instance="ci", data=data,
+                    message=Message(message_id=4242, date=datetime.datetime.now(), chat=chat(uid), text="picker"))))
+
+            async def say(text: str | None = None, photo: bool = False, uid: int = MASTER_TG):
+                nonlocal counter
+                counter += 1
+                log.clear()
+                extra = {"photo": [PhotoSize(file_id="p1", file_unique_id="p1u", width=40, height=40)]} if photo else {"text": text}
+                await dp.feed_update(bot, Update(update_id=counter, message=Message(
+                    message_id=counter, date=datetime.datetime.now(), chat=chat(uid), from_user=user(uid), **extra)))
+
+            screens = lambda: [e for e in log if e["kind"] in ("SendMessage", "EditMessageText")]
+            last = lambda: screens()[-1] if screens() else {"text": "", "buttons": []}
+            alert = lambda: next((e for e in log if e["kind"] == "answer" and e["alert"]), None)
+
+            key = StorageKey(bot_id=123456, chat_id=MASTER_TG, user_id=MASTER_TG)
+            await dp.storage.set_state(key=key, state=None)
+
+            await tap(f"rp_new:{repair_id}", OTHER_TG)
+            check("another master can't add a part to someone else's repair", alert() and "не за вами" in alert()["text"])
+
+            await tap(f"rp_new:{repair_id}")
+            check("«➕ Новая запчасть» asks for a photo of the label, in place", last()["kind"] == "EditMessageText" and "Пришлите фото запчасти" in last()["text"])
+
+            # nothing readable on the photo
+            await say(photo=True)
+            check("an unreadable photo asks again (closer shot or type the name)", "Не разобрал фото" in last()["text"])
+
+            # barcode + name read off the label; product unknown
+            read["barcode"], read["label"] = "6941059612345", {"name": "Аккумулятор Xiaomi BM3M", "sku": None}
+            await say(photo=True)
+            check("a read label shows the name and the barcode and asks the purchase price",
+                  "Аккумулятор Xiaomi BM3M" in last()["text"] and "6941059612345" in last()["text"] and "при закупке" in last()["text"]
+                  and f"rp_rename:{repair_id}" in last()["buttons"])
+            await say("дорого")
+            check("a price that isn't a number is asked again", "числом" in last()["text"])
+            await say("450 грн")
+            check("after the price the picker comes back with the part written off and «Готово»",
+                  "Аккумулятор Xiaomi BM3M — 450 грн" in last()["text"] and "Списано: Аккумулятор Xiaomi BM3M × 1" in last()["text"]
+                  and f"rp_done:{repair_id}" in last()["buttons"])
+            check("…and the dialog is closed", await dp.storage.get_state(key=key) is None)
+            with get_conn(db_path) as conn:
+                product = inventory.get_product_by_sku(conn, "6941059612345")
+                used = repairs.get_used_parts(conn, repair_id)
+                batch = inventory.get_batch(conn, used[0]["batch_id"]) if used else None
+                check("a new repair-part card is made with the barcode as its SKU",
+                      product is not None and product["name"] == "Аккумулятор Xiaomi BM3M" and product["is_repair_part"] == 1)
+                check("one piece is written off into the repair at the purchase price",
+                      [(p["product_name"], p["qty"], p["unit_cost"]) for p in used] == [("Аккумулятор Xiaomi BM3M", 1, 450)])
+                check("the партия is marked as bought by the master", batch is not None and batch["source"] == "master" and batch["unit_cost_uah"] == 450)
+                check("nothing is left over on the master's склад (in and straight out)", warehouses.total_qty(conn, master_wh) == 0)
+                check("the приход is a document in the journal (stock_in)",
+                      conn.execute("SELECT COUNT(*) FROM documents WHERE doc_type = 'stock_in' AND status = 'posted'").fetchone()[0] == 1)
+                check("the repair no longer needs a part", not repairs.needs_part(conn, repairs.get_repair(conn, repair_id)))
+
+            # second time: typed barcode of a known part → last price offered
+            await tap(f"rp_new:{repair_id}")
+            await say("6941059612345")
+            check("typing a known barcode finds the part and offers last time's price",
+                  "уже есть в базе" in last()["text"] and f"rp_cost_last:{repair_id}" in last()["buttons"])
+            await tap(f"rp_cost_last:{repair_id}")
+            with get_conn(db_path) as conn:
+                check("«как в прошлый раз» adds one more at the same price, same product, no duplicate card",
+                      [(p["qty"], p["unit_cost"]) for p in repairs.get_used_parts(conn, repair_id)] == [(1, 450), (1, 450)]
+                      and conn.execute("SELECT COUNT(*) FROM products").fetchone()[0] == 1)
+
+            # rename + back
+            read["barcode"], read["label"] = None, {"name": "Шлейф", "sku": None}
+            await tap(f"rp_new:{repair_id}")
+            await say(photo=True)
+            await tap(f"rp_rename:{repair_id}")
+            check("«Другое название» asks for the name", "Напишите название" in last()["text"])
+            await say("Лоток SIM Xiaomi Mi 5s Plus")
+            check("the typed name replaces the recognised one", "Лоток SIM Xiaomi Mi 5s Plus" in last()["text"] and "при закупке" in last()["text"])
+            await tap(f"rp_back:{repair_id}")
+            check("«К списку деталей» returns to the picker and closes the dialog",
+                  "Аккумулятор Xiaomi BM3M × 1 (партия 2)" in last()["text"] and f"rp_new:{repair_id}" in last()["buttons"]
+                  and await dp.storage.get_state(key=key) is None)
+            with get_conn(db_path) as conn:
+                check("going back adds nothing", len(repairs.get_used_parts(conn, repair_id)) == 2)
+
+            # the reply-keyboard ❌ Отмена still cancels this flow
+            await tap(f"rp_new:{repair_id}")
+            await say("❌ Отмена")
+            check("❌ Отмена ends the dialog", await dp.storage.get_state(key=key) is None)
+
+        try:
+            asyncio.run(run())
+        finally:
+            barcode_scan.decode_barcode, vision_ocr.extract_product_label = orig_decode, orig_label
+            ra._sync_after_change = orig_sync
+
+
 def scenario_repair_notes() -> None:
     """Заметки по ремонту: ответ на карточку в рабочей группе — текстом или
     голосом — остаётся в ремонте, коротко, с оригиналом рядом."""
@@ -9180,6 +9350,7 @@ def main() -> None:
     scenario_sale_chat()
     scenario_overview()
     scenario_bot_dispatch()
+    scenario_part_add_chat()
     scenario_repair_notes()
     scenario_bot_questions()
     scenario_reminders()

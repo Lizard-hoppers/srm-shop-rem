@@ -248,6 +248,71 @@ def use_part(conn: sqlite3.Connection, order_id: int, batch_id: int, cell_id: in
     return movement_id
 
 
+def buy_part(
+    conn: sqlite3.Connection, order_id: int, staff_id: int, *, unit_cost,
+    product_id: int | None = None, name: str | None = None, sku: str | None = None,
+) -> dict:
+    """A part the master bought himself for this repair — it wasn't on his
+    склад. It comes onto the repair's parts склад as its own партия at the
+    price he paid (a «stock_in» document) and goes straight into the repair,
+    so the repair's profit is netted against the real purchase cost. A
+    product already known by its штрихкод is reused; otherwise a new
+    repair-part card is made from the name.
+
+    Returns {"product_id", "name", "batch_id", "unit_cost", "created"}."""
+    from core import warehouses as _warehouses  # local: see parts_warehouse
+
+    repair = get_repair(conn, order_id)
+    if not repair:
+        raise RepairPartError("Ремонт не найден.")
+    if repair["status"] not in ("in_progress", "ready"):
+        raise RepairPartError("Запчасть добавляют, пока ремонт в работе или готов.")
+    try:
+        cost = round(float(unit_cost), 2)
+    except (TypeError, ValueError):
+        raise RepairPartError("Укажите цену закупки числом.") from None
+    if cost <= 0:
+        raise RepairPartError("Цена закупки должна быть больше нуля.")
+    warehouse = parts_warehouse(conn, repair)
+    cells = _warehouses.cells(conn, warehouse["id"]) if warehouse else []
+    if not cells:
+        raise RepairPartError("У исполнителя нет склада — обратитесь к владельцу.")
+    cell_id = cells[0]["id"]
+
+    sku = (sku or "").strip() or None
+    product = _inventory.get_product(conn, product_id) if product_id else None
+    if not product and sku:
+        product = _inventory.get_product_by_sku(conn, sku)
+    created = False
+    if not product:
+        name = " ".join((name or "").split())
+        if not name:
+            raise RepairPartError("Укажите название запчасти.")
+        product = _inventory.get_product(
+            conn, _inventory.create_product(conn, name[:200], sku, None, "шт", True, False, 0, None),
+        )
+        created = True
+    if product["is_serial"]:
+        raise RepairPartError("Это серийный товар (по IMEI) — так его не добавить.")
+    if not product["is_repair_part"]:
+        conn.execute("UPDATE products SET is_repair_part = 1 WHERE id = ?", (product["id"],))
+
+    batch_id = _inventory.create_batch(conn, product["id"], source="master", unit_cost=cost)
+    movement_id = _inventory.record_movement(
+        conn, product["id"], 1, "receipt", staff_id, to_cell_id=cell_id, batch_id=batch_id,
+        comment=f"Куплено мастером для {_documents.label('repair', order_id)}",
+    )
+    _inventory._manual_movement_document(conn, "stock_in", movement_id, product["id"], 1, staff_id, cell_id, None)
+    use_part(conn, order_id, batch_id, cell_id, 1, staff_id)
+    return {"product_id": product["id"], "name": product["name"], "batch_id": batch_id, "unit_cost": cost, "created": created}
+
+
+def last_part_cost(conn: sqlite3.Connection, product_id: int):
+    """What this part cost last time it was bought — offered as a one-tap
+    answer to «сколько стоила»."""
+    return _inventory._latest_unit_cost(conn, product_id)
+
+
 def declare_no_parts(conn: sqlite3.Connection, order_id: int) -> None:
     """«Без запчасти» — the repair needed none (a cleaning, a firmware).
     Said explicitly, so that «запчасть не указана» always means «forgot»."""

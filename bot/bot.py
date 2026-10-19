@@ -24,6 +24,7 @@ from bot.purchase_photo import router as purchase_photo_router
 from bot.quick_actions import ButtonTextMiddleware
 from bot.quick_actions import router as quick_actions_router
 from bot.repair_actions import router as repair_actions_router
+from bot.part_add_flow import router as part_add_router
 from bot.repair_attachments import router as repair_attachments_router
 from bot.repairs_button import router as repairs_button_router
 from bot.sale_flow import router as sale_flow_router
@@ -68,6 +69,7 @@ def build_dispatcher() -> Dispatcher:
     # state (TransferFlow's included), which would otherwise take this
     # flow's text steps first.
     dp.include_router(transfer_flow_router)
+    dp.include_router(part_add_router)
     dp.include_router(buyback_flow_router)
     dp.include_router(sale_flow_router)
     dp.include_router(quick_actions_router)
