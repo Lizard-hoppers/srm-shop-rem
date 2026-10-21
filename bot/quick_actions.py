@@ -62,13 +62,13 @@ router = Router()
 # copy (same convention as bot/repair_attachments.py's _REPAIR_ROLES)
 # rather than importing from webapp, which would pull FastAPI-only code
 # into the bot process for no reason.
-_REPAIR_ROLES = ("owner", "admin", "master")
+_REPAIR_ROLES = ("owner", "admin", "manager", "master")
 # Mirrors webapp.routers.buyback._BUYBACK_ROLES.
-_BUYBACK_ROLES = ("owner", "admin", "storekeeper")
+_BUYBACK_ROLES = ("owner", "admin", "storekeeper", "manager")
 # Mirrors bot.purchase_photo._DRAFT_ROLES.
-_PURCHASE_ROLES = ("owner", "admin", "storekeeper")
+_PURCHASE_ROLES = ("owner", "admin", "storekeeper", "manager")
 # Mirrors webapp.routers.cash._CASH_ROLES.
-_CASH_ROLES = ("owner", "admin", "storekeeper")
+_CASH_ROLES = ("owner", "admin", "storekeeper", "manager")
 # «Видят все, корректируют только владельцы» — внести/снять is a correction
 # of a balance (mirrors webapp.routers.cash._OWNER_ROLES).
 _ADJUST_ROLES = ("owner", "admin")

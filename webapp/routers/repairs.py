@@ -27,7 +27,7 @@ from webapp.templating import render
 
 router = APIRouter(prefix="/repairs")
 
-_REPAIR_WRITE_ROLES = ("owner", "admin", "master")
+_REPAIR_WRITE_ROLES = ("owner", "admin", "manager", "master")
 
 _PHOTO_EXT_BY_CONTENT_TYPE = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
 _MAX_PHOTO_BYTES = 15 * 1024 * 1024  # comfortably under nginx's client_max_body_size (20M)

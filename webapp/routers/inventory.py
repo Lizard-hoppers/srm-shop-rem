@@ -25,7 +25,7 @@ from webapp.templating import render
 
 router = APIRouter(prefix="/inventory")
 
-_STOCK_WRITE_ROLES = ("owner", "admin", "storekeeper")
+_STOCK_WRITE_ROLES = ("owner", "admin", "storekeeper", "manager")
 
 _PHOTO_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", "product_photos")
 _PHOTO_EXT_BY_CONTENT_TYPE = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}

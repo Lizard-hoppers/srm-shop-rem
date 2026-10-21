@@ -50,7 +50,7 @@ from core.stores import get_store
 
 router = Router()
 
-_ROLES = ("owner", "admin", "storekeeper")
+_ROLES = ("owner", "admin", "storekeeper", "manager")
 _SLOTS = core_buyback.PHOTO_SLOTS
 
 # A six-photo album arrives as six separate updates that aiogram handles

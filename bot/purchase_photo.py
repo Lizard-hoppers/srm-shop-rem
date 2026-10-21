@@ -32,7 +32,7 @@ from core.stores import get_store
 
 router = Router()
 
-_DRAFT_ROLES = ("owner", "admin", "storekeeper")
+_DRAFT_ROLES = ("owner", "admin", "storekeeper", "manager")
 
 
 def _resolve_store_for_dm(telegram_id: int):

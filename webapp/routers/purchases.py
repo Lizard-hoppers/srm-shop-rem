@@ -19,7 +19,7 @@ from webapp.templating import render
 router = APIRouter(prefix="/purchases")
 
 ITEM_ROWS = 3
-_PURCHASE_ROLES = ("owner", "admin", "storekeeper")
+_PURCHASE_ROLES = ("owner", "admin", "storekeeper", "manager")
 _MAX_PHOTO_BYTES = 15 * 1024 * 1024  # comfortably under nginx's client_max_body_size (20M)
 
 

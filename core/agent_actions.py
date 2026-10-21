@@ -46,10 +46,10 @@ from core.accounts import money
 from core.agent_tools import _REPAIR_NUMBER, _digits, matches
 from core.timefmt import kyiv_datetime
 
-_EVERYONE = ("owner", "admin", "storekeeper", "master")
-_CASH = ("owner", "admin", "storekeeper")
+_EVERYONE = ("owner", "admin", "storekeeper", "manager", "master")
+_CASH = ("owner", "admin", "storekeeper", "manager")
 _BOSS = ("owner", "admin")
-_INTAKE = ("owner", "admin", "master")
+_INTAKE = ("owner", "admin", "manager", "master")
 
 MAX_AMOUNT = 1_000_000
 

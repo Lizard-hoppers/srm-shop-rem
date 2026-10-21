@@ -138,7 +138,7 @@
     <div class="chevron">{{ icons.icon('chevron', 18) }}</div>
   </a>
   {% endfor %}
-  {% if staff.role in ('owner', 'admin', 'storekeeper') %}
+  {% if staff.role in ('owner', 'admin', 'storekeeper', 'manager') %}
   <a class="card nav-card" href="{{ link('/cash') }}">
     <div class="card-icon">{{ icons.icon('cash', 18) }}</div>
     <div class="nav-card-body"><div class="nav-card-title">{{ t('nav_cash') }}</div></div>

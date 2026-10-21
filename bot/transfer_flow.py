@@ -37,7 +37,7 @@ from core.stores import StoreConfig, get_store, registry_db_path
 
 router = Router()
 
-_TRANSFER_ROLES = ("owner", "admin", "storekeeper", "master")
+_TRANSFER_ROLES = ("owner", "admin", "storekeeper", "manager", "master")
 _PICK_LIMIT = 8
 _ASK_WHAT = "Что перемещаем? Отсканируйте или введите IMEI, штрихкод либо часть названия:"
 
@@ -316,7 +316,7 @@ def _recipients(conn, target, sender_id: int) -> list:
         chosen = [
             s for s in staff
             if s["role"] in ("owner", "admin")
-            or (s["role"] == "storekeeper" and (s["location_id"] or 0) == target["location_id"])
+            or (s["role"] in ("storekeeper", "manager") and (s["location_id"] or 0) == target["location_id"])
         ]
     return [s for s in chosen if s["telegram_id"] and s["id"] != sender_id]
 

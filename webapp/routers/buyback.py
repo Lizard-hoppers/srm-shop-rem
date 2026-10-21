@@ -27,7 +27,7 @@ router = APIRouter(prefix="/buyback")
 
 # Buying touches both cash (money out) and stock (a unit entering it) —
 # same trust boundary as receiving from a supplier.
-_BUYBACK_ROLES = ("owner", "admin", "storekeeper")
+_BUYBACK_ROLES = ("owner", "admin", "storekeeper", "manager")
 
 _PHOTO_EXT_BY_CONTENT_TYPE = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
 _MAX_PHOTO_BYTES = 15 * 1024 * 1024  # comfortably under nginx's client_max_body_size (20M)

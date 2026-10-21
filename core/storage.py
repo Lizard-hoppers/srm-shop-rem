@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS staff (
     login TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
     name TEXT NOT NULL,
-    role TEXT NOT NULL CHECK(role IN ('owner','admin','master','storekeeper')),
+    role TEXT NOT NULL CHECK(role IN ('owner','admin','master','storekeeper','manager')),
     telegram_id INTEGER,
     active INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -1013,6 +1013,33 @@ def _backfill_batches(conn: sqlite3.Connection) -> None:
         )
 
 
+_OLD_ROLE_CHECK = "CHECK(role IN ('owner','admin','master','storekeeper'))"
+_NEW_ROLE_CHECK = "CHECK(role IN ('owner','admin','master','storekeeper','manager'))"
+
+
+def _widen_staff_roles(conn: sqlite3.Connection) -> None:
+    """21.10: роль «Менеджер». SQLite can't ALTER a CHECK, so a base made
+    before it gets its staff table rebuilt from its own DDL with only the
+    role list widened — same columns in the same order, same ids, so every
+    REFERENCES staff(id) elsewhere keeps pointing at the right row. Runs on
+    init_db's own connection, where foreign_keys is off (the SQLite-
+    documented way to rebuild a referenced table)."""
+    row = conn.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'staff'").fetchone()
+    if not row or _OLD_ROLE_CHECK not in row["sql"]:
+        return
+    new_sql = row["sql"].replace(_OLD_ROLE_CHECK, _NEW_ROLE_CHECK).replace("CREATE TABLE staff", "CREATE TABLE staff_new", 1)
+    conn.execute("BEGIN")
+    try:
+        conn.execute(new_sql)
+        conn.execute("INSERT INTO staff_new SELECT * FROM staff")
+        conn.execute("DROP TABLE staff")
+        conn.execute("ALTER TABLE staff_new RENAME TO staff")
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+
+
 def init_db(db_path: str = DB_PATH) -> None:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -1074,6 +1101,7 @@ def init_db(db_path: str = DB_PATH) -> None:
         # a client repair remembers that its master said «без запчасти».
         _ensure_column(conn, "staff", "master_kind", "master_kind TEXT NOT NULL DEFAULT 'staff'")
         _ensure_column(conn, "staff", "skills", "skills TEXT")
+        _widen_staff_roles(conn)
         _ensure_column(conn, "repair_orders", "no_parts", "no_parts INTEGER NOT NULL DEFAULT 0")
         # «Стадия» (09.10): where the repair stands in a few words, as
         # read from the latest chat note about it (core.ai_notes) — a

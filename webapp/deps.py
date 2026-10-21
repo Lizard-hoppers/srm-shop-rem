@@ -12,6 +12,7 @@ ROLE_LABELS = {
     "admin": "Администратор",
     "master": "Мастер",
     "storekeeper": "Кладовщик",
+    "manager": "Менеджер",
 }
 
 

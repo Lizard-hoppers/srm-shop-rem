@@ -56,7 +56,7 @@ from core.stores import store_for_chat_id
 router = Router()
 logger = logging.getLogger(__name__)
 
-_REPAIR_ROLES = ("owner", "admin", "master")
+_REPAIR_ROLES = ("owner", "admin", "manager", "master")
 
 _ATTACH_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "webapp", "static", "repair_photos")
 

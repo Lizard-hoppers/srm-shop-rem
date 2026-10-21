@@ -30,7 +30,7 @@ from webapp.templating import render
 
 router = APIRouter(prefix="/production")
 
-_MANAGE_ROLES = ("owner", "admin", "storekeeper")
+_MANAGE_ROLES = ("owner", "admin", "storekeeper", "manager")
 EXTRA_ROWS = 4
 
 

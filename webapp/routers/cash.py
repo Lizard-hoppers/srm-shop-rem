@@ -28,7 +28,7 @@ from webapp.templating import render
 
 router = APIRouter(prefix="/cash")
 
-_CASH_ROLES = ("owner", "admin", "storekeeper")
+_CASH_ROLES = ("owner", "admin", "storekeeper", "manager")
 _OWNER_ROLES = ("owner", "admin")
 
 

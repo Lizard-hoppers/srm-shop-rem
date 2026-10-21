@@ -14,7 +14,7 @@ from core import storage as _storage
 KIND_LABELS = {"point": "Точка", "master": "Мастер", "transit": "В пути"}
 
 # Who may send from / receive into a точка's склад.
-STOCK_ROLES = ("owner", "admin", "storekeeper")
+STOCK_ROLES = ("owner", "admin", "storekeeper", "manager")
 _EVERYWHERE_ROLES = ("owner", "admin")
 
 

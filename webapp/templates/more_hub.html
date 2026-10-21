@@ -69,7 +69,7 @@
     </div>
     <div class="chevron">{{ icons.icon('chevron', 18) }}</div>
   </a>
-  {% if staff.role in ('owner', 'admin', 'storekeeper') %}
+  {% if staff.role in ('owner', 'admin', 'storekeeper', 'manager') %}
   <a class="card nav-card" href="{{ link('/cash') }}">
     <div class="card-icon">{{ icons.icon('cash', 18) }}</div>
     <div class="nav-card-body">
