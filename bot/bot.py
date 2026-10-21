@@ -23,6 +23,7 @@ from bot.handlers import router
 from bot.purchase_photo import router as purchase_photo_router
 from bot.quick_actions import ButtonTextMiddleware
 from bot.quick_actions import router as quick_actions_router
+from bot.quick_actions import cancel_router
 from bot.repair_actions import router as repair_actions_router
 from bot.part_add_flow import router as part_add_router
 from bot.repair_attachments import router as repair_attachments_router
@@ -55,6 +56,9 @@ def build_dispatcher() -> Dispatcher:
     # supplier sits there, so nothing of it may reach the assistant or the
     # repair handlers below (bot/supplier_chat.py).
     dp.include_router(supplier_chat_router)
+    # «❌ Отмена» before every flow router — each of them takes any text as
+    # an answer to its current step (bot.quick_actions.cancel_router).
+    dp.include_router(cancel_router)
     # Before `router`: its bare CommandStart() matches every /start, deep
     # link or not — see bot/channel_orders.py.
     dp.include_router(channel_orders_router)

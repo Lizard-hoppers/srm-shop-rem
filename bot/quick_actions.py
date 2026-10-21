@@ -57,6 +57,11 @@ from core.stores import StoreConfig, get_store
 from core.timefmt import kyiv_date_range_utc, kyiv_today
 
 router = Router()
+# «❌ Отмена» lives in a router of its own, included FIRST in bot.bot: every
+# flow router (sale, transfer, buyback, part add) and the касса text steps
+# here take any text as an answer, so a cancel registered after them was
+# read as a product search, a comment, an amount (21.10).
+cancel_router = Router()
 
 # Mirrors webapp.routers.repairs._REPAIR_WRITE_ROLES — kept as its own
 # copy (same convention as bot/repair_attachments.py's _REPAIR_ROLES)
@@ -1664,14 +1669,16 @@ async def client_search_pick(callback: CallbackQuery, state: FSMContext) -> None
     await callback.answer()
 
 
-@router.message(F.text == BTN_CANCEL, StateFilter(RepairIntake, QuickContact, PhoneBuy, CashExpense, CashAdjustment, CashExchange, ClientSearch, ShiftOpen, TransferFlow, SaleFlow, PartAdd))
+@cancel_router.message(F.text == BTN_CANCEL, F.chat.type == "private")
 async def cancel_flow(message: Message, state: FSMContext) -> None:
     """Deletes EVERYTHING from this flow attempt — the bot's own tracked
     message, every reply the staff member typed along the way (name,
     phone, ...), the tap on the entry button (🔧 Ремонт etc.), and this
     very "❌ Отмена" tap itself. Telegram's Bot API explicitly allows a
     bot to delete incoming messages in a private chat, not just its own,
-    so nothing has to survive a cancel."""
+    so nothing has to survive a cancel. Any state, any flow — and no state
+    at all: a menu (Касса, Клиент) is tracked the same way without one, and
+    with nothing open only the tap itself goes."""
     data = await state.get_data()
     ids = list(data.get("user_message_ids", []))
     ids.append(message.message_id)
@@ -1680,14 +1687,6 @@ async def cancel_flow(message: Message, state: FSMContext) -> None:
         ids.append(prompt_message_id)
     await state.clear()
     await _safe_delete_many(message.bot, message.chat.id, ids)
-
-
-@router.message(F.text == BTN_CANCEL, F.chat.type == "private")
-async def cancel_noop(message: Message) -> None:
-    """❌ Отмена tapped with nothing active — cancel_flow above (state-
-    gated) doesn't match, so this would otherwise sit in the chat
-    un-acted-on forever. Nothing to clean up but the tap itself."""
-    await _safe_delete_many(message.bot, message.chat.id, [message.message_id])
 
 
 # --- Ремонт: step by step ---

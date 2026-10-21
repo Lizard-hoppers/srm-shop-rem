@@ -7111,6 +7111,35 @@ def scenario_part_add_chat() -> None:
             await say("❌ Отмена")
             check("❌ Отмена ends the dialog", await dp.storage.get_state(key=key) is None)
 
+            # …and so does every other flow's text step, though their routers
+            # (sale, transfer, buyback) come before quick_actions
+            from bot import quick_actions as qa_mod
+            text_steps = [
+                qa_mod.SaleFlow.item, qa_mod.SaleFlow.price, qa_mod.SaleFlow.phone, qa_mod.SaleFlow.name,
+                qa_mod.TransferFlow.search, qa_mod.TransferFlow.qty,
+                qa_mod.PhoneBuy.phone, qa_mod.PhoneBuy.model, qa_mod.PhoneBuy.imei, qa_mod.PhoneBuy.comment, qa_mod.PhoneBuy.price,
+                qa_mod.CashExpense.amount, qa_mod.CashExpense.rate, qa_mod.CashExpense.comment,
+                qa_mod.CashAdjustment.amount, qa_mod.CashAdjustment.comment,
+                qa_mod.CashExchange.amount_from, qa_mod.CashExchange.amount_to,
+                qa_mod.PartAdd.name, qa_mod.PartAdd.cost,
+                qa_mod.RepairIntake.phone, qa_mod.RepairIntake.comment,
+                qa_mod.QuickContact.name, qa_mod.ClientSearch.query, qa_mod.ShiftOpen.note,
+            ]
+            missed = []
+            for step in text_steps:
+                await dp.storage.set_state(key=key, state=step)
+                await dp.storage.set_data(key=key, data={"store_id": "1", "prompt_message_id": 777})
+                await say("❌ Отмена")
+                if await dp.storage.get_state(key=key) is not None or await dp.storage.get_data(key=key):
+                    missed.append(step.state)
+            check("❌ Отмена ends every flow at any text step (sale, transfer, buyback, касса, …)", not missed)
+            if missed:
+                print("       not cancelled:", missed)
+            await dp.storage.set_state(key=key, state=None)
+            await dp.storage.set_data(key=key, data={"store_id": "1", "prompt_message_id": 777})
+            await say("❌ Отмена")
+            check("❌ Отмена with only a menu open (no state) clears it too", not await dp.storage.get_data(key=key))
+
         try:
             asyncio.run(run())
         finally:
