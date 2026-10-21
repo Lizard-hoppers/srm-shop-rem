@@ -37,7 +37,7 @@
   </tbody>
 </table>
 </div>
-{% if can_adjust %}<p class="meta"><a href="{{ link('/cash/accounts') }}">{{ t('accounts_manage_link') }} →</a></p>{% endif %}
+{% if can_manage_accounts %}<p class="meta"><a href="{{ link('/cash/accounts') }}">{{ t('accounts_manage_link') }} →</a></p>{% endif %}
 
 {% if incoming %}
 <h2>{{ t('transit_incoming_title') }}</h2>

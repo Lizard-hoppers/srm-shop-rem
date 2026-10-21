@@ -69,9 +69,9 @@ _BUYBACK_ROLES = ("owner", "admin", "storekeeper", "manager")
 _PURCHASE_ROLES = ("owner", "admin", "storekeeper", "manager")
 # Mirrors webapp.routers.cash._CASH_ROLES.
 _CASH_ROLES = ("owner", "admin", "storekeeper", "manager")
-# «Видят все, корректируют только владельцы» — внести/снять is a correction
-# of a balance (mirrors webapp.routers.cash._OWNER_ROLES).
-_ADJUST_ROLES = ("owner", "admin")
+# «Видят все, корректируют владельцы и менеджеры» — внести/снять is a
+# correction of a balance (mirrors webapp.routers.cash._ADJUST_ROLES).
+_ADJUST_ROLES = ("owner", "admin", "manager")
 
 # Real button colors: `style` isn't a typed aiogram field (not in
 # KeyboardButton.model_fields), but the Pydantic model has extra="allow"
@@ -455,7 +455,7 @@ async def shift_got_note(message: Message, state: FSMContext) -> None:
         core_shifts.open_shift(conn, staff["id"], store.location_id, discrepancy_note=note)
         owners = [
             row["telegram_id"] for row in core_auth.list_staff(conn)
-            if row["role"] in _ADJUST_ROLES and row["telegram_id"] and row["telegram_id"] != message.from_user.id
+            if row["role"] in ("owner", "admin") and row["telegram_id"] and row["telegram_id"] != message.from_user.id
         ]
     await _consume(state, message)
     await _repost(

@@ -30,6 +30,8 @@ router = APIRouter(prefix="/cash")
 
 _CASH_ROLES = ("owner", "admin", "storekeeper", "manager")
 _OWNER_ROLES = ("owner", "admin")
+# Внести/изъять (корректировка) — also the точка's manager (21.10).
+_ADJUST_ROLES = ("owner", "admin", "manager")
 
 
 def _dashboard_context(conn, date_from: str, date_to: str, location_id: int, staff) -> dict:
@@ -50,7 +52,8 @@ def _dashboard_context(conn, date_from: str, date_to: str, location_id: int, sta
         "transactions": core_cash.list_transactions(conn, location_id=location_id),
         "date_from": date_from,
         "date_to": date_to,
-        "can_adjust": staff["role"] in _OWNER_ROLES,
+        "can_adjust": staff["role"] in _ADJUST_ROLES,
+        "can_manage_accounts": staff["role"] in _OWNER_ROLES,
         "location_id": location_id,
     }
 
@@ -121,7 +124,7 @@ def expense_view(
 def adjustment_view(
     request: Request, direction: str = Form("in"), amount: str = Form(""), comment: str = Form(""),
     idem: str = Form(""), account_id: str = Form(""),
-    staff=Depends(require_role(*_OWNER_ROLES)),
+    staff=Depends(require_role(*_ADJUST_ROLES)),
 ):
     amount_value = core_accounts.parse_amount(amount)
     if not amount_value:
