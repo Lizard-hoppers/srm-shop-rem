@@ -423,10 +423,13 @@ async def card_command(message: Message, store, order_id: int, staff, text: str)
 
 @router.message(F.reply_to_message, F.chat.type != "private", F.text | F.voice | F.audio)
 async def note_reply_to_repair(message: Message) -> None:
-    """A text or voice message sent in reply to a repair's card (or to an
-    earlier note on it). Anyone in the work group may leave one — a master
-    who was never linked to a staff card is recorded under his Telegram
-    name. Replies to anything else in the group are none of our business."""
+    """A text or voice message sent in reply to a repair's card. Anyone in
+    the work group may leave one — a master who was never linked to a staff
+    card is recorded under his Telegram name. A reply to someone's note is
+    talk between people, not a note (22.10 — «Допилю, ещё есть моменты»
+    landed on РК-1228 that way); the one thing it may do is «удали», which
+    takes that note off. Replies to anything else in the group are none of
+    our business."""
     store = store_for_chat_id(message.chat.id)
     if not store:
         return
@@ -434,13 +437,15 @@ async def note_reply_to_repair(message: Message) -> None:
         return
     chat_id, replied_id = str(message.chat.id), message.reply_to_message.message_id
     with get_conn(store.db_path) as conn:
-        order_id = (
-            core_repairs.find_order_by_message(conn, chat_id, replied_id)
-            or core_notes.find_order_by_note_message(conn, chat_id, replied_id)
-        )
-        if not order_id or core_notes.exists(conn, chat_id, message.message_id):
+        order_id = core_repairs.find_order_by_message(conn, chat_id, replied_id)
+        to_note = None if order_id else core_notes.find_order_by_note_message(conn, chat_id, replied_id)
+        if not (order_id or to_note) or core_notes.exists(conn, chat_id, message.message_id):
             return
         staff = core_auth.get_staff_by_telegram_id(conn, message.from_user.id)
+    if to_note:
+        if message.text and _REMOVE_THIS.match(message.text):
+            await card_command(message, store, to_note, staff, message.text.strip())
+        return
     label = core_documents.label("repair", order_id)
 
     if message.text:

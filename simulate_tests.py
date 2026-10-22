@@ -7367,15 +7367,20 @@ def scenario_repair_notes() -> None:
             check("what was heard is said back in a reply, so the sender can check it",
                   sent[0]["kind"] == "message" and sent[0]["reply_to"] == voice_msg and f"🎤 РК-{repair_id:03d}:" in sent[0]["text"])
 
-            # ответ на ответ — тот же ремонт; повтор — не дубль
-            await post(OUTSIDER_TG, "Сергей Аутсорс", long_msg, text="Крышка есть, 650")
+            # ответ на ответ — разговор, не заметка (22.10); повтор — не дубль
+            await post(MASTER_TG, "Эдик", long_msg, text="Допилю, ещё есть моменты")
+            with get_conn(db_path) as conn:
+                check("a reply to someone's note is talk, not a note — nothing is written into the repair",
+                      len(repair_notes.list_notes(conn, repair_id)) == 3
+                      and "Допилю, ещё есть моменты" not in [n["original_text"] for n in repair_notes.list_notes(conn, repair_id)])
+            await post(OUTSIDER_TG, "Сергей Аутсорс", CARD_MESSAGE, text="Крышка есть, 650")
             before = counter
             with get_conn(db_path) as conn:
-                check("a reply to an earlier note lands in the same repair", [n["text"] for n in repair_notes.list_notes(conn, repair_id)][-1] == "Крышка есть, 650"
+                check("a reply to the card itself is the note", [n["text"] for n in repair_notes.list_notes(conn, repair_id)][-1] == "Крышка есть, 650"
                       and repair_notes.list_notes(conn, other_repair) == [])
                 check("the same message delivered twice is one note", repair_notes.exists(conn, str(GROUP), before) and len(repair_notes.list_notes(conn, repair_id)) == 4)
             counter = before - 1
-            await post(OUTSIDER_TG, "Сергей Аутсорс", long_msg, text="Крышка есть, 650")
+            await post(OUTSIDER_TG, "Сергей Аутсорс", CARD_MESSAGE, text="Крышка есть, 650")
             with get_conn(db_path) as conn:
                 check("…checked: still four", len(repair_notes.list_notes(conn, repair_id)) == 4)
 
