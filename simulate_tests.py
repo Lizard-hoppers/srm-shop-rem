@@ -4548,8 +4548,13 @@ def scenario_money() -> None:
                   new_shift != shift_id
                   and conn.execute("SELECT closed_at FROM shifts WHERE id = ?", (shift_id,)).fetchone()["closed_at"] is not None
                   and [s["id"] for s in shifts.list_discrepancies(conn)] == [new_shift])
-            shifts.close_shift(conn, new_shift, owner)
-            check("a closed shift is no longer current", shifts.current_shift(conn, owner, 1) is None)
+            other = auth.create_staff(conn, "shift-other", "pass", "Продавец", "manager", location_id=1)
+            check("one shift per точка: whoever opened it, it is open for everyone there",
+                  shifts.current_shift(conn, other, 1)["id"] == new_shift and shifts.open_shift(conn, other, 1) == new_shift
+                  and conn.execute("SELECT COUNT(*) AS n FROM shifts WHERE location_id = 1 AND closed_at IS NULL").fetchone()["n"] == 1)
+            shifts.close_shift(conn, new_shift, other)
+            check("a closed shift is no longer current — for anyone at the точка",
+                  shifts.current_shift(conn, owner, 1) is None and shifts.current_shift(conn, other, 1) is None)
 
         # ---- a base from before accounts: rows knew only cash/card
         with get_conn(db_path) as conn:
@@ -4697,7 +4702,10 @@ def scenario_money_http() -> None:
                 shift = shifts.current_shift(conn, master, 1)
                 check("the shift opens with the discrepancy on record", shift is not None and shift["discrepancy_note"] == "не хватает 50 грн")
             check("the dashboard stops asking once the shift is open", "/cash/shift" not in client.get(f"/?t={master_token}").text)
-            check("the owner's own shift is separate — still not open", "/cash/shift" in client.get(f"/?t={token}").text)
+            check("the master opened it for the точка — the owner isn't asked again", "/cash/shift" not in client.get(f"/?t={token}").text)
+            client.post(f"/cash/shift/close?t={token}", data={})
+            with get_conn(db_path) as conn:
+                check("«закрыть смену» closes the точка's shift", shifts.current_shift(conn, owner, 1) is None and shifts.current_shift(conn, master, 1) is None)
             client.post(f"/cash/shift/open?t={token}", data={})
             client.post(f"/cash/shift/close?t={token}", data={})
             with get_conn(db_path) as conn:

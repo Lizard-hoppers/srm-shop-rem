@@ -6,9 +6,12 @@ discrepancy is written down with the shift (and lands in the journal and,
 later, the owner's «Проблемы») — it is a signal, not a correction: «видят
 все, корректируют только владельцы».
 
-One shift is one person at one точка for one Kyiv calendar day. Yesterday's
-shift that nobody closed simply stops being current; opening today's closes
-it for the record.
+One shift is one точка for one Kyiv calendar day (22.10 — it was one
+person's: Макс and София each had to open their own the same morning).
+Whoever comes first opens it and checks the balances; for everyone else at
+that точка it is already open. «Закрыть смену» closes it for the точка.
+Yesterday's shift that nobody closed simply stops being current; opening
+today's closes it for the record.
 """
 from __future__ import annotations
 
@@ -35,14 +38,16 @@ def snapshot(conn: sqlite3.Connection, location_id: int) -> dict:
 
 
 def current_shift(conn: sqlite3.Connection, staff_id: int, location_id: int) -> sqlite3.Row | None:
-    """This person's open shift at this точка, if it was opened today."""
+    """The точка's open shift, if it was opened today — by anyone.
+    staff_id stays in the signature for the callers (whose shift is asked
+    about); it no longer narrows the search."""
     today = kyiv_today()
     day_start, day_end = kyiv_date_range_utc(today, today)
     return conn.execute(
         """SELECT * FROM shifts
-           WHERE staff_id = ? AND location_id = ? AND closed_at IS NULL AND opened_at >= ? AND opened_at < ?
+           WHERE location_id = ? AND closed_at IS NULL AND opened_at >= ? AND opened_at < ?
            ORDER BY id DESC LIMIT 1""",
-        (staff_id, location_id, day_start, day_end),
+        (location_id, day_start, day_end),
     ).fetchone()
 
 
@@ -50,13 +55,13 @@ def open_shift(
     conn: sqlite3.Connection, staff_id: int, location_id: int, discrepancy_note: str | None = None,
     key: str | None = None,
 ) -> int:
-    """Open today's shift (returns the already-open one if there is one —
-    a second tap changes nothing)."""
+    """Open today's shift at the точка (returns the already-open one if
+    anybody opened it — a second tap, or a second person, changes nothing)."""
     existing = current_shift(conn, staff_id, location_id)
     if existing:
         return existing["id"]
     conn.execute(
-        "UPDATE shifts SET closed_at = datetime('now') WHERE staff_id = ? AND closed_at IS NULL", (staff_id,)
+        "UPDATE shifts SET closed_at = datetime('now') WHERE location_id = ? AND closed_at IS NULL", (location_id,)
     )
     note = (discrepancy_note or "").strip() or None
     shift_id = conn.execute(
