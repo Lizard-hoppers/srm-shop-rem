@@ -30,6 +30,7 @@ import re
 import sqlite3
 
 from core import accounts as _accounts
+from core import agent_lessons as _lessons
 from core import cash as _cash
 from core import clients as _clients
 from core import doc_cancel as _doc_cancel
@@ -49,6 +50,10 @@ from core.timefmt import kyiv_datetime
 _EVERYONE = ("owner", "admin", "storekeeper", "manager", "master")
 _CASH = ("owner", "admin", "storekeeper", "manager")
 _BOSS = ("owner", "admin")
+# Внести/изъять — as in the касса itself (webapp.routers.cash._ADJUST_ROLES).
+_ADJUST = ("owner", "admin", "manager")
+# Who may teach the assistant a lesson (core.agent_lessons).
+_TEACH = ("owner", "admin", "manager")
 _INTAKE = ("owner", "admin", "manager", "master")
 
 MAX_AMOUNT = 1_000_000
@@ -78,16 +83,31 @@ def _qty(value) -> int:
     return qty
 
 
+_ACCOUNT_HINTS = {"нал": "cash", "кэш": "cash", "cash": "cash", "карт": "card", "card": "card", "терминал": "card",
+                  "перевод": "card", "фоп": "fop", "fop": "fop", "крипт": "crypto", "usdt": "crypto"}
+
+
+def _account_word(question) -> str | None:
+    """The account named in the request itself — only when it names
+    exactly one kind (cash is the default anyway, so it isn't looked for)."""
+    lowered = str(question or "").casefold()
+    kinds = {kind: key for key, kind in _ACCOUNT_HINTS.items() if kind != "cash" and key in lowered}
+    return next(iter(kinds.values())) if len(kinds) == 1 else None
+
+
 def _account(conn, ctx, word) -> sqlite3.Row:
     """The account money goes onto / comes off: by a word («наличные»,
     «карта», «фоп», «доллары») among the точка's accounts; the cash
     гривня one when nothing is said."""
     accounts = [a for a in _accounts.list_accounts(conn, ctx["location_id"]) if a["active"]]
+    # The model may drop the account it was told (22.10, replay: «счёт ФОП
+    # ноль» came without one — and the наличные would have been zeroed).
+    # The person's own words are looked at before falling back to cash.
+    word = word or _account_word(ctx.get("question"))
     if not word:
         return _accounts.default_account(conn, ctx["location_id"], "cash")
     lowered = str(word).casefold()
-    hints = {"нал": "cash", "кэш": "cash", "cash": "cash", "карт": "card", "card": "card", "терминал": "card",
-             "перевод": "card", "фоп": "fop", "fop": "fop", "крипт": "crypto", "usdt": "crypto"}
+    hints = _ACCOUNT_HINTS
     currency = next((code for key, code in (("дол", "USD"), ("usd", "USD"), ("$", "USD"), ("евр", "EUR"), ("eur", "EUR"), ("usdt", "USDT"))
                      if key in lowered), None)
     kind = next((value for key, value in hints.items() if key in lowered), None)
@@ -308,13 +328,39 @@ def add_expense(conn, ctx, a) -> dict:
     )
 
 
+def _target(value):
+    """The balance an account should end up at — unlike an amount, 0 is
+    a fine answer («сделай, чтобы на ФОП было 0»)."""
+    cleaned = str(value).strip().replace(" ", "").replace("\u00a0", "").replace(",", ".")
+    try:
+        target = float(cleaned)
+    except ValueError as exc:
+        raise Refused("Назовите остаток числом.") from exc
+    if not 0 <= target <= MAX_AMOUNT:
+        raise Refused("Назовите остаток числом.")
+    return money(target)
+
+
 def cash_correction(conn, ctx, a) -> dict:
+    """Внести / изъять. With `target` — «сделай, чтобы было 0», «касса:
+    3120» — the difference from the account's balance is counted here, not
+    by the model (22.10: of «ФОП ноль» it made +1, then −1)."""
     _need_shift(conn, ctx)
-    amount, account = _amount(a.get("amount")), _account(conn, ctx, a.get("account"))
-    direction = "out" if a.get("direction") == "out" else "in"
+    account = _account(conn, ctx, a.get("account"))
     comment = " ".join(str(a.get("comment") or "").split())
-    if not comment:
-        raise Refused("Укажите причину корректировки кассы — без неё она не проводится.")
+    if a.get("target") not in (None, ""):
+        target = _target(a.get("target"))
+        delta = money(target - _accounts.balance(conn, account["id"]))
+        if not delta:
+            raise Refused(f"На счёте «{account['name']}» уже {target} грн — корректировать нечего.")
+        direction, amount = ("in" if delta > 0 else "out"), money(abs(delta))
+        comment = comment or f"пересчёт: по факту {target} грн"
+    else:
+        amount = _amount(a.get("amount"))
+        direction = "out" if a.get("direction") == "out" else "in"
+    # «Делай, а не переспрашивай» (Павел): no reason said — the document
+    # says where it came from instead of the bot asking for one.
+    comment = comment or "корректировка из чата"
     transaction_id = _cash.record_adjustment(
         conn, amount if direction == "in" else -amount, comment, ctx["staff"]["id"], location_id=ctx["location_id"], account_id=account["id"],
     )
@@ -322,6 +368,26 @@ def cash_correction(conn, ctx, a) -> dict:
         ctx, _doc(conn, "cash_adjust", "cash_transactions", transaction_id),
         f"{'внесено' if direction == 'in' else 'изъято'} {amount} грн · {html.escape(account['name'])} · {html.escape(comment)}" + _low(conn, account),
     )
+
+
+def remember_lesson(conn, ctx, a) -> dict:
+    """«Не так, …» / «бот, запомни: …» — the rule the model drew from the
+    conversation, kept for every request from now on (core.agent_lessons)."""
+    rule = " ".join(str(a.get("rule") or "").split())
+    if len(rule) < 5:
+        raise Refused("Что именно запомнить? Скажите правилом, например: «Эдик — это мастер Эдик Gybrid».")
+    lesson_id = _lessons.add(conn, rule, ctx["staff"]["id"], a.get("example"))
+    _receipt(ctx, f"📝 Запомнил (урок №{lesson_id}): {html.escape(rule[:_lessons.MAX_RULE])}", undo=("lesson", lesson_id))
+    return {"done": True, "lesson": lesson_id}
+
+
+def forget_lesson(conn, ctx, a) -> dict:
+    digits = re.sub(r"\D", "", str(a.get("number") or ""))
+    row = _lessons.forget(conn, int(digits)) if digits else None
+    if not row:
+        raise Refused("Такого урока нет. «Бот, что ты запомнил» покажет список с номерами.")
+    _receipt(ctx, f"🗑 Забыл урок №{row['id']}: {html.escape(row['rule'])}")
+    return {"done": True}
 
 
 def sell(conn, ctx, a) -> dict:
@@ -494,8 +560,12 @@ ACTIONS: dict[str, tuple] = {
     "restore_repair_notes": (restore_repair_notes, _EVERYONE, "Вернуть на карточку ремонта заметки, убранные раньше.", {"repair": _REPAIR}, ["repair"]),
     "add_expense": (add_expense, _CASH, "Записать расход из кассы (аренда, зарплата, закупка, прочее).",
         {"amount": _N, "category": {"type": "string", "enum": list(_cash.EXPENSE_CATEGORIES)}, "comment": {"type": "string", "description": "на что"}, "account": _ACCOUNT}, ["amount"]),
-    "cash_correction": (cash_correction, _BOSS, "Внести деньги в кассу или изъять из неё (корректировка, не расход). Нужна причина.",
-        {"direction": {"type": "string", "enum": ["in", "out"]}, "amount": _N, "comment": {"type": "string", "description": "причина"}, "account": _ACCOUNT}, ["direction", "amount", "comment"]),
+    "cash_correction": (cash_correction, _ADJUST,
+        "Внести деньги в кассу / на счёт или изъять (корректировка, не расход): direction + amount (+ причина, если названа). "
+        "Названо, сколько ДОЛЖНО СТАТЬ («сделай, чтобы было 0», «касса: 3120», «по факту 2500») — только target, разницу посчитает бот.",
+        {"direction": {"type": "string", "enum": ["in", "out"]}, "amount": _N,
+         "target": {"type": "number", "description": "каким должен стать остаток счёта"},
+         "comment": {"type": "string", "description": "причина"}, "account": _ACCOUNT}, []),
     "sell": (sell, _EVERYONE, "Продать товар со склада точки. account — куда оплата, или «в долг» (тогда нужен клиент).",
         {"product": _PRODUCT, "qty": {"type": "integer"}, "price": {"type": "number", "description": "цена за штуку; не названа — из карточки товара"},
          **_CLIENT, "account": {"type": "string", "description": "«наличные», «карта»… или «в долг»"}}, ["product"]),
@@ -511,6 +581,12 @@ ACTIONS: dict[str, tuple] = {
         "Отменить (удалить) проведённый документ: продажу, расход, корректировку… Нужна причина («это был тест» — причина). "
         "Номер назван — number («ПД-12»). Не назван («удали ту продажу») — last_of_type с типом документа.",
         {"number": _S, "last_of_type": {"type": "string", "enum": list(_doc_cancel.CANCELLABLE_TYPES)}, "reason": _S}, ["reason"]),
+    "remember_lesson": (remember_lesson, _TEACH,
+        "Запомнить урок навсегда — когда тебя поправили («не так», «я имел в виду», «надо было») или сказали «запомни». "
+        "rule — одно общее правило, понятное без этого диалога.",
+        {"rule": {"type": "string", "description": "правило, например: «добавь в наличные N» без клиента — это cash_correction in на наличные"},
+         "example": {"type": "string", "description": "исходная просьба, на которой ошибся"}}, ["rule"]),
+    "forget_lesson": (forget_lesson, _TEACH, "Забыть урок по номеру («забудь урок 3»).", {"number": _S}, ["number"]),
     "open_shift": (open_shift, _EVERYONE, "Открыть смену на сегодня (нужна для операций с деньгами). discrepancy — если человек назвал расхождение в остатках.",
         {"discrepancy": _S}, []),
 }
@@ -582,6 +658,13 @@ def undo(conn: sqlite3.Connection, what: tuple, staff) -> str:
         return f"↩️ <b>{_documents.doc_label(doc)}</b> отменён."
     if not staff:
         raise Refused("Вернуть может сотрудник, подключённый к CRM.")
+    if kind == "lesson":
+        if staff["role"] not in _TEACH:
+            raise Refused("Уроки забывают владелец, админ или менеджер.")
+        row = _lessons.forget(conn, int(what[1]))
+        if not row:
+            raise Refused("Этот урок уже забыт.")
+        return f"↩️ Урок №{row['id']} забыт."
     order_id = int(what[1])
     label = _documents.label("repair", order_id)
     if kind == "repair_new":

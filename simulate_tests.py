@@ -8838,6 +8838,14 @@ def scenario_supplier_chat() -> None:
             supplier_chat._download, supplier_files.read, httpx.post = orig_download, orig_read, orig_post
 
 
+def _raises(fn, exc_type) -> bool:
+    try:
+        fn()
+    except exc_type:
+        return True
+    return False
+
+
 def scenario_agent_actions() -> None:
     """«Бот, запиши расход…», «бот, прими ремонт…», «бот, продай…» — the
     assistant fills in a form, code decides and does, a receipt with
@@ -8850,7 +8858,7 @@ def scenario_agent_actions() -> None:
     from aiogram.types import CallbackQuery, Chat, Message, Update, User
 
     from bot import assistant_chat
-    from core import agent_actions, ai_agent, notify, orders, repair_notes, settlements
+    from core import agent_actions, agent_tools, ai_agent, notify, orders, repair_notes, settlements
 
     GROUP, OWNER_TG, KEEPER_TG, STRANGER_TG = -1004480000111, 889001, 889002, 889003
 
@@ -8936,10 +8944,84 @@ def scenario_agent_actions() -> None:
             check("refusals wrote nothing", accounts.balance(conn, cash_uah) == till and accounts.balance(conn, card_uah) == -700)
 
             # ---- касса: внести / изъять
-            check("a cash correction needs a reason", "причину" in do(owner_row, "cash_correction", direction="in", amount=1000, comment="")[0]["refused"])
+            result, receipts = do(owner_row, "cash_correction", direction="in", amount=1000, comment="")
+            check("a cash correction without a reason goes through, marked as from the chat", result.get("done") and "корректировка из чата" in receipts[0]["text"])
+            agent_actions.undo(conn, receipts[0]["undo"], owner_row)
             do(owner_row, "cash_correction", direction="out", amount=1000, comment="инкассация")
             check("«изъять 1000, инкассация» is a КР, not an expense", accounts.balance(conn, cash_uah) == till - 1000
-                  and conn.execute("SELECT COUNT(*) AS n FROM documents WHERE doc_type = 'cash_adjust'").fetchone()["n"] == 2)
+                  and conn.execute("SELECT COUNT(*) AS n FROM documents WHERE doc_type = 'cash_adjust' AND status = 'posted'").fetchone()["n"] == 2)
+
+            # ---- «сделай, чтобы было X»: разницу считает код (22.10)
+            fop = acc[("fop", "UAH")]
+            cash.record_adjustment(conn, 1500, "старт фоп", owner, location_id=1, account_id=fop)
+            result, receipts = do(owner_row, "cash_correction", target=0, account="фоп")
+            check("«сделай, чтобы на ФОП было 0» takes exactly the balance off, with a reason of its own",
+                  result.get("done") and accounts.balance(conn, fop) == 0 and "изъято 1500 грн · Счёт ФОП · пересчёт: по факту 0 грн" in receipts[0]["text"])
+            result, receipts = do(owner_row, "cash_correction", target="2 000", account="фоп", comment="пересчёт")
+            check("«на ФОП должно быть 2000» puts the difference in", accounts.balance(conn, fop) == 2000 and "внесено 2000 грн" in receipts[0]["text"])
+            check("a balance that is already right is not corrected", "уже 2000 грн" in do(owner_row, "cash_correction", target=2000, account="фоп")[0]["refused"])
+            ctx = ctx_for(owner_row)
+            ctx["question"] = "сделай чтобы на фопе было 500"
+            agent_actions.run(conn, ctx, "cash_correction", {"target": 500})
+            check("the account the model dropped is taken from the person's words, not the наличные",
+                  accounts.balance(conn, fop) == 500 and "Счёт ФОП" in ctx["receipts"][0]["text"])
+            agent_actions.undo(conn, ctx["receipts"][0]["undo"], owner_row)
+            check("a target that isn't a number is asked again", "остаток числом" in do(owner_row, "cash_correction", target="много")[0]["refused"])
+            check("«поко х3» typed in Cyrillic finds Poco X3; «с65» — C65",
+                  agent_tools.matches("поко х3", "Poco X3") and agent_tools.matches("с65", "Poco C65") and not agent_tools.matches("х3", "Poco X5"))
+            with_issued = repairs.create_repair(conn, anna, "Смартфон", None, "Poco X3", None, "Вход питания", "offline", None, 900, owner, location_id=1)
+            repairs.update_status(conn, with_issued, "issued", owner, "")
+            found_closed = agent_tools.call(conn, ctx_for(owner_row), "find_repairs", {"query": "поко х3"})
+            check("a named repair found only among the выданные is shown, marked as closed",
+                  found_closed["total"] == 1 and found_closed["repairs"][0]["id"] == with_issued and "уже выданные" in found_closed["note"])
+            check("…while a request for open ones only still says none",
+                  agent_tools.call(conn, ctx_for(owner_row), "find_repairs", {"query": "поко х3", "status": "new"})["total"] == 0)
+            check("without target or amount nothing moves", "числом" in do(owner_row, "cash_correction", comment="x")[0]["refused"])
+            mgr = auth.create_staff(conn, "aa-mgr", "pass", "Менеджер", "manager", location_id=1)
+            shifts.open_shift(conn, mgr, 1)
+            mgr_row = auth.get_staff_by_id(conn, mgr)
+            check("a manager may correct the касса too, as in the Mini App", do(mgr_row, "cash_correction", target=1000, account="фоп")[0].get("done")
+                  and accounts.balance(conn, fop) == 1000)
+
+            # ---- уроки: «не так…» / «запомни» (22.10)
+            from core import agent_lessons
+            result, receipts = do(owner_row, "remember_lesson", rule="«добавь в наличные N» без клиента — это cash_correction in на наличные",
+                                  example="добавь в наличные 10")
+            lesson = result.get("lesson")
+            check("a correction is kept as a lesson, with a «Вернуть» that forgets it",
+                  lesson and receipts[0]["undo"] == ("lesson", lesson) and "📝 Запомнил (урок №" in receipts[0]["text"]
+                  and "добавь в наличные N" in agent_lessons.for_prompt(conn))
+            check("the same rule again is not a second lesson",
+                  do(owner_row, "remember_lesson", rule="«Добавь в наличные N» без клиента — это cash_correction in на наличные")[0]["lesson"] == lesson)
+            check("a storekeeper can't teach it", "недоступно" in do(keeper_row, "remember_lesson", rule="всё продавай в долг")[0]["refused"])
+            check("an empty rule is asked again", "Что именно запомнить" in do(owner_row, "remember_lesson", rule=" ")[0]["refused"])
+            listed = agent_tools.call(conn, ctx_for(keeper_row), "list_lessons", {})
+            check("«что ты запомнил» lists the lessons with numbers", listed["lessons"][0]["number"] == lesson)
+            captured = []
+            orig_complete = ai_agent._complete
+            ai_agent._complete = lambda messages, tools: (captured.append((messages, tools)), {"content": "ок"})[1]
+            try:
+                ai_agent.ask(conn, "привет", location_id=1, point_name="Мастерская", can_money=True, staff=owner_row)
+                ai_agent.ask(conn, "привет", location_id=1, point_name="Мастерская", can_money=False, staff=keeper_row)
+            finally:
+                ai_agent._complete = orig_complete
+            check("every request carries the lessons in its instructions, and the one who may teach is told how",
+                  "№{}: «добавь в наличные N»".format(lesson) in captured[0][0][0]["content"] and "remember_lesson" in captured[0][0][0]["content"]
+                  and "добавь в наличные N" in captured[1][0][0]["content"] and "вызови remember_lesson" not in captured[1][0][0]["content"])
+            check("«Вернуть» under «Запомнил» forgets it — and a storekeeper may not",
+                  _raises(lambda: agent_actions.undo(conn, ("lesson", str(lesson)), keeper_row), agent_actions.Refused)
+                  and "забыт" in agent_actions.undo(conn, ("lesson", str(lesson)), owner_row) and agent_lessons.for_prompt(conn) == "")
+            second = do(owner_row, "remember_lesson", rule="Эдик — это мастер Эдик Gybrid")[0]["lesson"]
+            check("«забудь урок N» switches it off", do(owner_row, "forget_lesson", number=f"№{second}")[0].get("done")
+                  and agent_lessons.active(conn) == [] and "Такого урока нет" in do(owner_row, "forget_lesson", number="999")[0]["refused"])
+            os.environ.pop("OPENAI_AGENT_MODEL", None)
+            body = ai_agent.request_body([], [])
+            os.environ["OPENAI_AGENT_MODEL"] = "gpt-4o-mini"
+            old_body = ai_agent.request_body([], [])
+            os.environ.pop("OPENAI_AGENT_MODEL", None)
+            check("the default model gets no temperature and reasoning off (tools need it on gpt-5.4); an old one keeps temperature 0",
+                  body["model"] == ai_agent.DEFAULT_MODEL and "temperature" not in body and body["reasoning_effort"] == "none" and body["max_completion_tokens"] > 900
+                  and old_body["temperature"] == 0 and "reasoning_effort" not in old_body)
 
             # ---- ремонт: приём, цена, мастер, без запчасти, заметка
             result, receipts = do(owner_row, "new_repair", client_phone="067 123 70 02", client_name="Борис", device="iPhone 13 Pro", defect="не заряжается", price=2500, master="эдик")

@@ -12,7 +12,11 @@ decided by its code, not by the model: the model only fills in the form
 receipts the code writes.
 
 OpenAI's function calling (the only provider configured). The model's
-name is OPENAI_AGENT_MODEL.
+name is OPENAI_AGENT_MODEL, DEFAULT_MODEL without it (22.10: gpt-4o-mini
+took «добавь в наличные 10» for a client's payment and «ФОП ноль» for +1).
+
+Lessons (core.agent_lessons) — rules staff taught it by correcting it —
+go into the instructions of every request.
 """
 from __future__ import annotations
 
@@ -24,6 +28,7 @@ import sqlite3
 import httpx
 
 from core import agent_actions
+from core import agent_lessons
 from core import agent_tools
 from core.timefmt import kyiv_now_text, kyiv_today
 
@@ -32,13 +37,15 @@ logger = logging.getLogger(__name__)
 MAX_ROUNDS = 6
 HISTORY_TURNS = 4
 MAX_ANSWER = 3500
+DEFAULT_MODEL = "gpt-5.4-mini"
 
 _SYSTEM = (
     "Ты — помощник в рабочем чате мастерской и магазина электроники «{point}». К тебе обращаются сотрудники "
     "словом «бот». Сейчас {now} по Киеву (для аргументов инструментов сегодняшняя дата — {today}).\n"
     "Словом «заказ» здесь почти всегда называют РЕМОНТ (find_repairs, repairs_stats), а не резерв товара. "
     "Вопросы «сколько всего», «за всё время» — repairs_stats / base_totals без дат.\n"
-    "Отвечай ТОЛЬКО по данным инструментов. Нужных данных нет или инструмент вернул пусто — так и скажи, "
+    "Отвечай ТОЛЬКО по данным инструментов, вызванных в этом ходе: цифры из прошлых ответов в истории (остатки, суммы, "
+    "статусы) уже устарели — на «касса», «сколько», «что с ремонтом» каждый раз вызывай инструмент заново. Нужных данных нет или инструмент вернул пусто — так и скажи, "
     "ничего не выдумывай: ни ремонтов, ни сумм, ни имён. Сомневаешься, что именно ищут, — сначала поищи "
     "шире (другое написание модели, без лишних слов), потом ответь.\n"
     "{actions}\n"
@@ -64,8 +71,19 @@ _ACTIONS_YES = (
     "• инструмент ответил refused — ничего не сделано: передай человеку причину или вопрос из ответа как есть;\n"
     "• одно действие — один вызов; не повторяй вызов, который уже прошёл;\n"
     "• смена не открыта, а просят денежное действие — сам открой её (open_shift) и продолжай;\n"
-    "• «расход» — add_expense; «внести/положить/пополнить счёт, изъять из кассы» — cash_correction; «клиент принёс/отдал долг, аванс» — "
-    "client_money in; «вернуть клиенту» — client_money out."
+    "• «расход» — add_expense; «внести/положить/добавить в кассу, в наличные, на карту, на фоп», «изъять из кассы» — "
+    "cash_correction, клиента не спрашивай; client_money — только когда назван клиент или сказано «долг», «аванс» "
+    "(«клиент принёс/отдал долг, аванс» — in, «вернуть клиенту» — out);\n"
+    "• «сделай, чтобы было X», «на счету должно быть X», «касса: X», «по факту X» — cash_correction с target=X; "
+    "разницу посчитает бот, amount сам не считай;\n"
+    "• короткий ответ («1», «наличными», «да») сразу после твоего вопроса — это ответ на него; не подходит по смыслу — "
+    "переспроси, наугад не выполняй."
+)
+_TEACH_RULE = (
+    "Тебя поправили («не так», «неправильно», «я имел в виду», «надо было») или прямо сказали «запомни» — вызови "
+    "remember_lesson: одно общее правило, понятное без этого диалога (не «я ошибся», а: «добавь в наличные N» без "
+    "клиента — это cash_correction in на наличные), и сразу выполни просьбу как надо. Спасибо, похвалу и болтовню "
+    "не запоминай."
 )
 _ACTIONS_NO = ("Действий в учёте (записать расход, принять ремонт, продать) ты для этого человека не выполняешь: "
                "он не подключён к CRM как сотрудник. Скажи, что для этого нужно привязать его Telegram в карточке "
@@ -89,6 +107,19 @@ class AgentError(Exception):
     pass
 
 
+def request_body(messages: list[dict], tools: list[dict]) -> dict:
+    """The chat-completions body for the configured model. The reasoning
+    ones (gpt-5…, o3/o4) take no temperature, and their limit counts the
+    thinking too — hence a larger one, and low effort to stay quick."""
+    model = os.environ.get("OPENAI_AGENT_MODEL") or DEFAULT_MODEL
+    body = {"model": model, "messages": messages, "tools": tools, "tool_choice": "auto"}
+    if model.startswith(("gpt-5", "o3", "o4")):
+        # gpt-5.4+ in chat completions takes tools only without reasoning.
+        effort = "none" if model.startswith(("gpt-5.4", "gpt-5.5", "gpt-5.6")) else "low"
+        return body | {"max_completion_tokens": 4000, "reasoning_effort": effort}
+    return body | {"temperature": 0, "max_tokens": 900}
+
+
 def _complete(messages: list[dict], tools: list[dict]) -> dict:
     key = os.environ.get("OPENAI_API_KEY")
     if not key:
@@ -97,9 +128,8 @@ def _complete(messages: list[dict], tools: list[dict]) -> dict:
         resp = httpx.post(
             "https://api.openai.com/v1/chat/completions",
             headers={"Authorization": f"Bearer {key}"},
-            json={"model": os.environ.get("OPENAI_AGENT_MODEL", "gpt-4o-mini"), "temperature": 0, "max_tokens": 900,
-                  "messages": messages, "tools": tools, "tool_choice": "auto"},
-            timeout=60,
+            json=request_body(messages, tools),
+            timeout=90,
         )
     except httpx.HTTPError as exc:
         raise AgentError("Не удалось связаться с моделью") from exc
@@ -126,13 +156,18 @@ def ask(conn: sqlite3.Connection, question: str, *, location_id: int, point_name
     never gets to an answer — nothing done in that call is kept then (the
     caller's transaction is not committed)."""
     ctx = {"location_id": location_id, "can_money": can_money, "chat_id": chat_id, "topics": topics or {},
-           "actions": [], "last_found": [], "staff": staff, "receipts": [], "done": set()}
+           "actions": [], "last_found": [], "staff": staff, "receipts": [], "done": set(), "question": question}
     action_names = list(agent_actions.available(staff))
     tools = agent_tools.schemas(can_money) + agent_actions.schemas(staff)
     system = _SYSTEM.format(
         point=point_name, now=kyiv_now_text(), today=kyiv_today(), money=_MONEY_YES if can_money else _MONEY_NO,
         actions=_ACTIONS_YES.format(names=", ".join(action_names)) if action_names else _ACTIONS_NO,
     )
+    if "remember_lesson" in action_names:
+        system += "\n" + _TEACH_RULE
+    lessons = agent_lessons.for_prompt(conn)
+    if lessons:
+        system += "\n" + lessons
     messages = [{"role": "system", "content": system}, *(history or [])[-HISTORY_TURNS * 2:],
                 {"role": "user", "content": question.strip()[:1500]}]
     for _round in range(MAX_ROUNDS):

@@ -197,6 +197,18 @@ CREATE TABLE IF NOT EXISTS reminders (
 );
 CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(status, due_at);
 
+-- Уроки ИИ-помощника (22.10, core.agent_lessons): правило, которому его
+-- научили поправкой или «бот, запомни: …»; active = 0 — забыто.
+CREATE TABLE IF NOT EXISTS agent_lessons (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rule TEXT NOT NULL,
+    example TEXT,
+    staff_id INTEGER REFERENCES staff(id),
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    forgotten_at TEXT
+);
+
 -- Заметки по ремонту из рабочего чата (09.10): a text or voice message
 -- sent in reply to the repair's card (core.repair_notes). original_text
 -- is what was written / what the voice message was transcribed as;

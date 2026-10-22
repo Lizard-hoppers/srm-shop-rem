@@ -21,6 +21,7 @@ import re
 import sqlite3
 from datetime import datetime
 
+from core import agent_lessons as _lessons
 from core import accounts as _accounts
 from core import cash as _cash
 from core import documents as _documents
@@ -52,9 +53,17 @@ _SYNONYMS = {
 }
 
 
+# «х3», «с65», «а05» typed in Cyrillic are Poco X3, Poco C65, Galaxy A05:
+# in a token with a digit the look-alike letters are read as Latin.
+_LOOKALIKE = str.maketrans("хсаеоркмтвну", "xcaeopkmtbhy")
+
+
 def _tokens(text) -> list[str]:
     cleaned = "".join(ch if ch.isalnum() else " " for ch in str(text or "").casefold())
-    return [_SYNONYMS.get(token, token) for token in cleaned.split()]
+    return [
+        _SYNONYMS.get(token, token.translate(_LOOKALIKE) if any(ch.isdigit() for ch in token) else token)
+        for token in cleaned.split()
+    ]
 
 
 def matches(query: str, *fields) -> bool:
@@ -192,6 +201,18 @@ def intake_pattern(conn, ctx, args) -> dict:
 
 
 def find_repairs(conn, ctx, args) -> dict:
+    result = _find_repairs(conn, ctx, args)
+    # Nothing among the open ones for a named query — the phone may have
+    # been handed back already («найди поко, где делали вход питания»,
+    # 22.10: РК-024 was выдан the day before and the bot said «нет»).
+    if args.get("query") and not args.get("include_closed") and not args.get("status") and not result.get("total") and not result.get("closest"):
+        closed = _find_repairs(conn, ctx, {**args, "include_closed": True})
+        if closed.get("total") or closed.get("closest"):
+            return closed | {"note": "среди невыданных нет — это уже выданные или отменённые ремонты"}
+    return result
+
+
+def _find_repairs(conn, ctx, args) -> dict:
     query, status = args.get("query") or "", args.get("status")
     found, partial = [], []
     for row in _repairs.list_repairs(conn, location_id=_scope(ctx, args)):
@@ -480,6 +501,10 @@ def sales_list(conn, ctx, args) -> dict:
     ]}
 
 
+def list_lessons(conn, ctx, a) -> dict:
+    return {"lessons": [{"number": row["id"], "rule": row["rule"]} for row in _lessons.active(conn)]}
+
+
 # name -> (function, money only?, description for the model, JSON-schema properties, required)
 _STATUS_ENUM = {"type": "string", "enum": list(_repairs.STATUS_LABELS)}
 _DATES = {
@@ -499,7 +524,7 @@ TOOLS: dict[str, tuple] = {
         "«Самый старый» — sort=oldest, limit=1; «последний» — sort=newest, limit=1 (спрашивают про «вообще последний "
         "принятый/первый за всё время» — добавь include_closed=true).",
         {"query": {"type": "string", "description": "модель («iPhone 13»), имя, телефон или «РК-48»"},
-         "status": _STATUS_ENUM, "include_closed": {"type": "boolean"},
+         "status": {**_STATUS_ENUM, "description": "только если человек сам назвал статус; иначе не передавай"}, "include_closed": {"type": "boolean"},
          "sort": {"type": "string", "enum": ["newest", "oldest"]}, "limit": {"type": "integer"}, **_ALL}, []),
     "repairs_stats": (repairs_stats, False,
         "Статистика ремонтов: сколько всего принято, сколько сделано и выдано, сколько по каждому статусу и на "
@@ -537,6 +562,7 @@ TOOLS: dict[str, tuple] = {
     "masters": (masters, True, "Мастера: ставка, начислено, выплачено, долг, сколько ремонтов в работе.", {}, []),
     "journal": (journal, True, "Журнал документов за период, можно одного типа.",
         {**_DATES, "doc_type": {"type": "string", "enum": list(_documents.DOC_TYPES)}, **_ALL}, []),
+    "list_lessons": (list_lessons, False, "Что ты запомнил: уроки от сотрудников с номерами («что ты запомнил», «какие уроки»).", {}, []),
     "sales_list": (sales_list, True, "Продажи за период: что продано и на сколько.", {**_DATES, **_ALL}, []),
 }
 
