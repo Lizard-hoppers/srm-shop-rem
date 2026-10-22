@@ -131,6 +131,22 @@ def list_masters(conn: sqlite3.Connection, include_inactive: bool = False) -> li
     ).fetchall()
 
 
+def location_repairers(conn: sqlite3.Connection, location_id: int) -> list[sqlite3.Row]:
+    """Who a repair of this точка may go to: its masters and the ones not
+    tied to any точка, then an owner/admin who repairs here himself — one
+    who has been the master of a repair at this точка (22.10: at 007 that
+    is the whole list; there's no staff with role master there)."""
+    masters = [m for m in list_masters(conn) if m["location_id"] in (None, location_id)]
+    taken = {m["id"] for m in masters}
+    bosses = conn.execute(
+        """SELECT * FROM staff WHERE active = 1 AND role IN ('owner', 'admin')
+           AND id IN (SELECT master_id FROM repair_orders WHERE location_id = ? AND master_id IS NOT NULL)
+           ORDER BY name""",
+        (location_id,),
+    ).fetchall()
+    return masters + [b for b in bosses if b["id"] not in taken]
+
+
 def get_master(conn: sqlite3.Connection, staff_id: int) -> sqlite3.Row | None:
     """Unlike get_staff_by_id, doesn't filter active=1 — an admin needs to
     open a deactivated master's card to review history or reactivate them."""

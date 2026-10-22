@@ -1746,6 +1746,8 @@ def scenario_quick_intake_chat() -> None:
     # …and no staff table for the «мастер» step's list of masters.
     original_list_masters = auth.list_masters
     auth.list_masters = lambda conn, include_inactive=False: []
+    original_repairers = auth.location_repairers
+    auth.location_repairers = lambda conn, location_id: []
 
     async def run() -> None:
         chat = _Chat()
@@ -1867,6 +1869,7 @@ def scenario_quick_intake_chat() -> None:
         qa.get_store = original_get_store
         auth.get_staff_by_telegram_id = original_get_staff
         auth.list_masters = original_list_masters
+        auth.location_repairers = original_repairers
 
     # Покупка телефона: шесть нумерованных шагов; курс, оплата и карточка
     # подтверждения идут без шапки «шаг N из M».
@@ -8989,6 +8992,14 @@ def scenario_agent_actions() -> None:
                   found_closed["total"] == 1 and found_closed["repairs"][0]["id"] == with_issued and "уже выданные" in found_closed["note"])
             check("…while a request for open ones only still says none",
                   agent_tools.call(conn, ctx_for(owner_row), "find_repairs", {"query": "поко х3", "status": "new"})["total"] == 0)
+            check("a точка's repairers: its masters and the free ones; an owner who never repaired here isn't on the list",
+                  [m["name"] for m in auth.location_repairers(conn, 1)] == ["Сергей", "Эдик"])
+            by_owner = repairs.create_repair(conn, anna, "Смартфон", None, "Galaxy A05", None, "Экран", "offline", None, 700, owner, location_id=1)
+            repairs.assign_master(conn, by_owner, owner)
+            repairs.update_status(conn, by_owner, "issued", owner, "")
+            check("…one who has repaired at this точка himself is offered too, after the masters — and only at that точка",
+                  [m["name"] for m in auth.location_repairers(conn, 1)] == ["Сергей", "Эдик", "Павел"]
+                  and "Павел" not in [m["name"] for m in auth.location_repairers(conn, 2)])
             check("without target or amount nothing moves", "числом" in do(owner_row, "cash_correction", comment="x")[0]["refused"])
             mgr = auth.create_staff(conn, "aa-mgr", "pass", "Менеджер", "manager", location_id=1)
             shifts.open_shift(conn, mgr, 1)

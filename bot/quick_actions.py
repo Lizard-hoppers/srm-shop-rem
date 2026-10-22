@@ -1824,11 +1824,24 @@ async def repair_skip_password(callback: CallbackQuery, state: FSMContext) -> No
 
 
 def _store_masters(store) -> list:
-    """Masters a repair of this точка may go to: its own and the ones not
-    tied to any точка — another shop's masters are not offered."""
+    """Who a repair of this точка may go to (core.auth.location_repairers) —
+    another shop's masters are not offered."""
     with get_conn(store.db_path) as conn:
-        masters = core_auth.list_masters(conn)
-    return [m for m in masters if m["location_id"] in (None, store.location_id)]
+        return core_auth.location_repairers(conn, store.location_id)
+
+
+def _master_rows(store, prefix: str, none_text: str) -> list[list[InlineKeyboardButton]]:
+    """The masters two to a row (Гибрид has 13 — one per row ran off the
+    screen), «не назначать» on a row of its own at the bottom."""
+    buttons = [InlineKeyboardButton(text=m["name"][:28], callback_data=f"{prefix}:{m['id']}") for m in _store_masters(store)]
+    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+    rows.append([InlineKeyboardButton(text=none_text, callback_data=f"{prefix}:0")])
+    return rows
+
+
+def _pickable_master(store, master_id: int):
+    """The staff row if this id is on the точка's list, else None."""
+    return next((m for m in _store_masters(store) if m["id"] == master_id), None)
 
 
 def _master_step_keyboard(data: dict) -> InlineKeyboardMarkup | None:
@@ -1836,9 +1849,7 @@ def _master_step_keyboard(data: dict) -> InlineKeyboardMarkup | None:
         store = get_store(data["store_id"])
     except KeyError:
         return None
-    rows = [[InlineKeyboardButton(text=m["name"][:40], callback_data=f"rm_pick:{m['id']}")] for m in _store_masters(store)]
-    rows.append([InlineKeyboardButton(text="Не назначать ➡️", callback_data="rm_pick:0")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    return InlineKeyboardMarkup(inline_keyboard=_master_rows(store, "rm_pick", "Не назначать ➡️"))
 
 
 @router.message(RepairIntake.comment, F.text)
@@ -1869,9 +1880,8 @@ async def repair_master_pick(callback: CallbackQuery, state: FSMContext) -> None
         except KeyError:
             await callback.answer("Магазин больше не настроен.", show_alert=True)
             return
-        with get_conn(store.db_path) as conn:
-            master = core_auth.get_master(conn, master_id)
-        if not master or not master["active"]:
+        master = _pickable_master(store, master_id)
+        if not master:
             await callback.answer("Этого мастера выбрать нельзя.", show_alert=True)
             return
         master_name = master["name"]
@@ -1951,9 +1961,7 @@ async def repair_master_menu(callback: CallbackQuery, state: FSMContext) -> None
     except KeyError:
         await callback.answer("Магазин больше не настроен.", show_alert=True)
         return
-    rows = [[InlineKeyboardButton(text=m["name"][:40], callback_data=f"rm_set:{m['id']}")] for m in _store_masters(store)]
-    rows.append([InlineKeyboardButton(text="Не назначать", callback_data="rm_set:0")])
-    await callback.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await callback.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=_master_rows(store, "rm_set", "Не назначать")))
     await callback.answer()
 
 
@@ -1968,9 +1976,8 @@ async def repair_master_set(callback: CallbackQuery, state: FSMContext) -> None:
         except KeyError:
             await callback.answer("Магазин больше не настроен.", show_alert=True)
             return
-        with get_conn(store.db_path) as conn:
-            master = core_auth.get_master(conn, master_id)
-        if not master or not master["active"]:
+        master = _pickable_master(store, master_id)
+        if not master:
             await callback.answer("Этого мастера выбрать нельзя.", show_alert=True)
             return
         master_name = master["name"]
