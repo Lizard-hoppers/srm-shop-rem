@@ -157,8 +157,9 @@ class ButtonTextMiddleware(BaseMiddleware):
 # what other messages/edits happen, so there's no need to re-attach it.
 QUICK_ACTIONS_KEYBOARD = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text=BTN_SALE, style="success"), KeyboardButton(text=BTN_BUYBACK, style="success")],
+        # ремонт — первым, продажа и покупка — под ним (Павел, 23.10)
         [KeyboardButton(text=BTN_REPAIR), KeyboardButton(text=BTN_OUR_REPAIR)],
+        [KeyboardButton(text=BTN_SALE, style="success"), KeyboardButton(text=BTN_BUYBACK, style="success")],
         [KeyboardButton(text=BTN_PURCHASE), KeyboardButton(text=BTN_TRANSFER)],
         [KeyboardButton(text=BTN_CLIENT, style="primary"), KeyboardButton(text=BTN_CASH)],
         [KeyboardButton(text=BTN_SUMMARY), KeyboardButton(text=BTN_CANCEL, style="danger")],
