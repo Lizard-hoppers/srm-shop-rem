@@ -197,6 +197,21 @@ CREATE TABLE IF NOT EXISTS reminders (
 );
 CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(status, due_at);
 
+-- Журнал Telegram (23.10, core.tg_journal): кто пишет каждому боту CRM.
+CREATE TABLE IF NOT EXISTS tg_users (
+    bot_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    username TEXT,
+    full_name TEXT,
+    private_messages INTEGER NOT NULL DEFAULT 0,
+    group_messages INTEGER NOT NULL DEFAULT 0,
+    callbacks INTEGER NOT NULL DEFAULT 0,
+    last_chat TEXT,
+    first_seen TEXT NOT NULL DEFAULT (datetime('now')),
+    last_seen TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (bot_id, user_id)
+);
+
 -- Уроки ИИ-помощника (22.10, core.agent_lessons): правило, которому его
 -- научили поправкой или «бот, запомни: …»; active = 0 — забыто.
 CREATE TABLE IF NOT EXISTS agent_lessons (
@@ -1109,6 +1124,16 @@ def init_db(db_path: str = DB_PATH) -> None:
         # the Kyiv date it last went out.
         _ensure_column(conn, "locations", "assistant_digest", "assistant_digest INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "locations", "assistant_last_digest", "assistant_last_digest TEXT")
+        # Режим точки (23.10, перенос Гибрида — core.simple_flow): кнопки и
+        # статусы старого бота, смена по желанию, чат для этикеток.
+        _ensure_column(conn, "locations", "simple_flow", "simple_flow INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "locations", "shift_required", "shift_required INTEGER NOT NULL DEFAULT 1")
+        _ensure_column(conn, "locations", "label_chat_id", "label_chat_id INTEGER")
+        # Копии карточки мастеру: его тема в группе точки и его личная группа.
+        _ensure_column(conn, "staff", "topic_id", "topic_id INTEGER")
+        _ensure_column(conn, "staff", "personal_chat_id", "personal_chat_id INTEGER")
+        # «📦 Наш» — ремонт устройства самой точки (выплата мастеру вручную).
+        _ensure_column(conn, "repair_orders", "own_order", "own_order INTEGER NOT NULL DEFAULT 0")
         # Заход 5: a master is штатный or аутсорс and has skills on record;
         # a client repair remembers that its master said «без запчасти».
         _ensure_column(conn, "staff", "master_kind", "master_kind TEXT NOT NULL DEFAULT 'staff'")

@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% import "_icons.html" as icons %}
+{% block title %}{{ t('tg_users_title') }}{% endblock %}
+{% block content %}
+<a class="back-link" href="{{ link('/more') }}">{{ icons.icon('back', 16) }} {{ t('nav_more') }}</a>
+<p class="meta">{{ t('tg_users_hint') }}</p>
+
+<div class="table-scroll">
+<table class="table">
+  <thead><tr><th>{{ t('tg_users_col_person') }}</th><th>{{ t('tg_users_col_activity') }}</th><th>{{ t('tg_users_col_seen') }}</th><th>{{ t('tg_users_col_crm') }}</th></tr></thead>
+  <tbody>
+    {% for r in rows %}
+    <tr>
+      <td><b>{{ r.full_name or '—' }}</b>{% if r.username %}<div class="meta">@{{ r.username }}</div>{% endif %}<div class="meta">id {{ r.user_id }}</div></td>
+      <td>{{ t('tg_users_private') }}: {{ r.private_messages }}<br>{{ t('tg_users_group') }}: {{ r.group_messages }}<br>{{ t('tg_users_buttons') }}: {{ r.callbacks }}{% if r.last_chat %}<div class="meta">{{ r.last_chat }}</div>{% endif %}</td>
+      <td>{{ r.last_seen | kyiv }}<div class="meta">{{ t('tg_users_first') }} {{ r.first_seen | kyiv }}</div></td>
+      <td>
+        {% if r.staff_id %}
+          {{ r.staff_name }}<div class="meta">{{ role_labels.get(r.staff_role, r.staff_role) }}</div>
+        {% else %}
+        <form method="post" action="{{ link('/tg-users/make-staff') }}" class="edit-form" style="margin:0;">
+          <input type="hidden" name="user_id" value="{{ r.user_id }}">
+          <input type="text" name="name" value="{{ r.full_name or '' }}" placeholder="{{ t('tg_users_name') }}">
+          <select name="role">{% for role in roles %}<option value="{{ role }}">{{ role_labels.get(role, role) }}</option>{% endfor %}</select>
+          <button type="submit" class="secondary">{{ t('tg_users_make_staff') }}</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="4">{{ t('tg_users_empty') }}</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}

@@ -115,9 +115,16 @@ def token_for_chat(chat_id) -> str | None:
         telegram_id = int(chat_id)
     except (TypeError, ValueError):
         return None
-    if telegram_id < 0:
-        return None
     with get_conn(registry_db_path()) as conn:
+        # the точка's label printer, a master's own group (core.simple_flow)
+        row = conn.execute("SELECT id FROM locations WHERE label_chat_id = ?", (telegram_id,)).fetchone()
+        if row:
+            return points.get(row["id"])
+        row = conn.execute("SELECT location_id FROM staff WHERE personal_chat_id = ? AND active = 1", (telegram_id,)).fetchone()
+        if row:
+            return points.get(row["location_id"])
+        if telegram_id < 0:
+            return None
         staff = auth.get_staff_by_telegram_id(conn, telegram_id)
     if staff and staff["role"] not in ("owner", "admin"):
         return points.get(staff["location_id"])

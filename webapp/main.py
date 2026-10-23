@@ -10,6 +10,7 @@ from core.storage import init_db
 from core.store_prefs import init_db as init_store_prefs_db
 from core.stores import load_stores
 from webapp.deps import resolve_store_for_request
+from webapp.routers import tg_users
 from webapp.routers import buyback, cash, clients, dashboard, hubs, inventory, journal, masters, miniapp, print_agent, orders, production, purchases, reports, repairs, sales, settings, store, transfers
 
 if not os.environ.get("CRM_SECRET_KEY"):
@@ -37,6 +38,7 @@ app.include_router(journal.router)
 app.include_router(transfers.router)
 app.include_router(production.router)
 app.include_router(orders.router)
+app.include_router(tg_users.router)
 
 
 @app.middleware("http")

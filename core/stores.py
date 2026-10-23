@@ -37,6 +37,11 @@ class StoreConfig:
     # Forum topic of the staff group where a покупка's card is posted
     # (core.buyback.card_text); None -> not posted to the group at all.
     buyback_topic_id: int | None = None
+    # Режим точки (core.simple_flow): кнопки старого бота Гибрида; смена
+    # обязательна или нет; куда слать этикетки.
+    simple_flow: bool = False
+    shift_required: bool = True
+    label_chat_id: int | None = None
 
     @property
     def location_id(self) -> int:
@@ -78,6 +83,9 @@ def load_stores() -> list[StoreConfig]:
             masters_group_chat_id=row["masters_group_chat_id"],
             sales_topic_id=row["sales_topic_id"],
             buyback_topic_id=row["buyback_topic_id"] if "buyback_topic_id" in row.keys() else None,
+            simple_flow=bool(row["simple_flow"]) if "simple_flow" in row.keys() else False,
+            shift_required=bool(row["shift_required"]) if "shift_required" in row.keys() else True,
+            label_chat_id=row["label_chat_id"] if "label_chat_id" in row.keys() else None,
         )
         for row in rows
     ]

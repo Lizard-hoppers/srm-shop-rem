@@ -15,6 +15,12 @@
   <p class="meta">{{ t('store_settings_buyback_topic_hint') }}</p>
   <label style="display:flex; align-items:center; gap:8px;"><input type="checkbox" name="assistant_digest" value="1" style="width:auto;" {% if settings.assistant_digest %}checked{% endif %}> {{ t('store_settings_assistant') }}</label>
   <p class="meta">{{ t('store_settings_assistant_hint') }}</p>
+  <label style="display:flex; align-items:center; gap:8px;"><input type="checkbox" name="simple_flow" value="1" style="width:auto;" {% if settings.simple_flow %}checked{% endif %}> {{ t('store_settings_simple_flow') }}</label>
+  <p class="meta">{{ t('store_settings_simple_flow_hint') }}</p>
+  <label style="display:flex; align-items:center; gap:8px;"><input type="checkbox" name="shift_required" value="1" style="width:auto;" {% if settings.shift_required %}checked{% endif %}> {{ t('store_settings_shift_required') }}</label>
+  <p class="meta">{{ t('store_settings_shift_required_hint') }}</p>
+  <label>{{ t('store_settings_label_chat') }}<input type="text" inputmode="numeric" name="label_chat_id" value="{{ settings.label_chat_id or '' }}"></label>
+  <p class="meta">{{ t('store_settings_label_chat_hint') }}</p>
   <button type="submit">{{ t('store_settings_save') }}</button>
 </form>
 {% endblock %}

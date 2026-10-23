@@ -70,6 +70,25 @@ def set_assistant_digest(conn: sqlite3.Connection, enabled: bool, location_id: i
     )
 
 
+def _chat_id(value) -> int | None:
+    try:
+        return int(str(value or "").strip())
+    except ValueError:
+        return None
+
+
+def set_point_mode(
+    conn: sqlite3.Connection, simple_flow: bool, shift_required: bool, label_chat_id, location_id: int | None = None,
+) -> None:
+    """Режим точки (core.simple_flow): кнопки и статусы старого бота
+    Гибрида; нужна ли смена; чат или аккаунт для этикеток (id, может быть
+    отрицательным у группы)."""
+    conn.execute(
+        "UPDATE locations SET simple_flow = ?, shift_required = ?, label_chat_id = ?, updated_at = datetime('now') WHERE id = ?",
+        (1 if simple_flow else 0, 1 if shift_required else 0, _chat_id(label_chat_id), _locations.resolve(conn, location_id)),
+    )
+
+
 def set_buyback_topic(conn: sqlite3.Connection, topic_id: str | int | None, location_id: int | None = None) -> None:
     """The forum topic of the точка's staff group that покупки are posted
     to (the number from a t.me/c/<group>/<topic> link). Blank or anything

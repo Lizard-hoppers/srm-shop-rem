@@ -96,7 +96,8 @@ def dashboard(request: Request, period: str = "day", point: str = "", staff=Depe
             low_stock_count=len(low_stock_report(conn, location_id)),
             open_repairs_count=standing["open_repairs"],
             sales_count=activity["sales"],
-            shift=current_shift(conn, staff["id"], loc(request)),
+            # точка без смены не просит её открыть
+            shift=current_shift(conn, staff["id"], loc(request)) or (None if getattr(request.state.store, "shift_required", True) else True),
         )
 
 

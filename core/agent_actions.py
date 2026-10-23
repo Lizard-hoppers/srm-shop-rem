@@ -193,6 +193,9 @@ def _product(conn, ctx, query) -> tuple[sqlite3.Row, int | None]:
 
 
 def _need_shift(conn, ctx) -> None:
+    row = conn.execute("SELECT shift_required FROM locations WHERE id = ?", (ctx["location_id"],)).fetchone()
+    if row is not None and not row["shift_required"]:
+        return
     if not _shifts.current_shift(conn, ctx["staff"]["id"], ctx["location_id"]):
         raise Refused("Смена сегодня не открыта. Сначала откройте её — действие open_shift (человеку достаточно сказать «открой смену»), потом повторите.")
 

@@ -108,6 +108,9 @@
     </select>
   </label>
   <label>{{ t('master_skills_label') }}<input type="text" name="skills" value="{{ master.skills or '' }}" placeholder="{{ t('master_skills_placeholder') }}"></label>
+  <label>{{ t('master_topic_label') }}<input type="text" inputmode="numeric" name="topic_id" value="{{ master.topic_id or '' }}"></label>
+  <label>{{ t('master_personal_chat_label') }}<input type="text" name="personal_chat_id" value="{{ master.personal_chat_id or '' }}"></label>
+  <p class="meta">{{ t('master_chats_hint') }}</p>
   <label>{{ t('pay_type_label') }}
     <select name="pay_type">
       <option value="" {% if not master.pay_type %}selected{% endif %}>{{ t('pay_type_none_option') }}</option>

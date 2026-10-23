@@ -129,6 +129,7 @@ def edit_view(
     request: Request, master_id: int, name: str = Form(""), telegram_id: str = Form(""),
     pay_type: str = Form(""), pay_value: str = Form(""), location_id: str = Form(""),
     master_kind: str = Form("staff"), skills: str = Form(""),
+    topic_id: str = Form(""), personal_chat_id: str = Form(""),
     staff=Depends(require_role(*_MASTERS_ROLES)),
 ):
     with get_conn() as conn:
@@ -147,7 +148,15 @@ def edit_view(
             conn, master_id, name.strip(), optional_int(telegram_id), clean_type, clean_value,
             location_id=optional_int(location_id), master_kind=master_kind, skills=skills,
         )
+        core_auth.set_master_chats(conn, master_id, _chat(topic_id), _chat(personal_chat_id))
     return RedirectResponse(link(request, f"/masters/{master_id}"), status_code=303)
+
+
+def _chat(value: str) -> int | None:
+    try:
+        return int(value.strip())
+    except ValueError:
+        return None
 
 
 @router.post("/{master_id}/deactivate")

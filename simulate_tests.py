@@ -9663,6 +9663,248 @@ def scenario_point_bots() -> None:
                 os.environ["CRM_POINT_BOTS"] = prev
 
 
+def scenario_simple_flow() -> None:
+    """Простой режим точки (23.10, этап 2 переноса Гибрида): кнопки старого
+    бота на карточке, суммы в группе, треть штатному, «📦 Наш», копии мастеру,
+    этикетка, точка без смены, журнал Telegram — через настоящий диспетчер."""
+    print("scenario: простой режим точки — кнопки и зарплата как в старом боте Гибрида")
+    import asyncio
+    import datetime as dt
+
+    from aiogram import Bot
+    from aiogram.fsm.storage.base import StorageKey
+    from aiogram.types import CallbackQuery, Chat, File, Message, PhotoSize, Update, User
+
+    from bot import quick_actions as qa
+    from bot import repair_actions as ra
+    from core import agent_actions, masters, notify, simple_flow, store_settings, tg_journal
+    from core.stores import get_store
+
+    GROUP, PERSONAL, LABEL = -1005570001, -1005570009, 557000777
+    OWNER_TG, MGR_TG, ALEX_TG, OLEG_TG, STRANGER_TG = 557001, 557002, 557003, 557004, 557005
+    with tempfile.TemporaryDirectory() as tmp, _separate_base(tmp, "simple.sqlite3", ("Гибрид",)) as db_path:
+        with get_conn(db_path) as conn:
+            conn.execute("UPDATE locations SET staff_group_chat_id = ? WHERE id = 1", (GROUP,))
+            store_settings.set_point_mode(conn, True, False, str(LABEL), location_id=1)
+            owner = auth.create_staff(conn, "sf-owner", "pass", "Павел", "owner")
+            auth.link_staff_telegram(conn, "sf-owner", OWNER_TG)
+            mgr = auth.create_staff(conn, "sf-mgr", "pass", "Віталій", "manager", location_id=1)
+            auth.link_staff_telegram(conn, "sf-mgr", MGR_TG)
+            alex = auth.create_master(conn, "Алексей", ALEX_TG, "percent", 100 / 3, location_id=1)
+            oleg = auth.create_master(conn, "Олег Som", OLEG_TG, None, None, location_id=1, master_kind="outsource")
+            auth.set_master_chats(conn, alex, 77, PERSONAL)
+            client = clients.get_or_create_by_phone(conn, "Анна", "0671112233", source="offline")
+            by_alex = repairs.create_repair(conn, client, "", None, "Redmi 9C", None, "экран", "offline", alex, 2200, mgr, location_id=1)
+            by_oleg = repairs.create_repair(conn, client, "", None, "Poco X3", None, "плата", "offline", oleg, 3000, mgr, location_id=1)
+        store = get_store("1")
+        check("Кабинет магазина keeps the точка's mode: simple, no shift, a label chat",
+              store.simple_flow and not store.shift_required and store.label_chat_id == LABEL)
+
+        # ---- карточка: кнопки старого бота
+        with get_conn(db_path) as conn:
+            _text, kb = repairs.card(conn, by_alex)
+        buttons = [b["callback_data"] for row in kb["inline_keyboard"] for b in row]
+        check("a new repair's card has «❌ Возврат / ✅ Готов» (and «Открыть в CRM»), not «Взять в работу»",
+              buttons == [f"gb_return:{by_alex}", f"gb_done:{by_alex}", f"open_crm:repair:{by_alex}"])
+
+        sent: list[dict] = []
+
+        class _FakeBot(Bot):
+            async def __call__(self, method, request_timeout=None):
+                name = type(method).__name__
+                if name in ("SendMessage", "SendPhoto", "EditMessageText"):
+                    markup = getattr(method, "reply_markup", None)
+                    sent.append({"kind": name, "chat": getattr(method, "chat_id", None),
+                                 "text": getattr(method, "text", None) or getattr(method, "caption", None) or "",
+                                 "force": type(markup).__name__ == "ForceReply"})
+                    return Message(message_id=9000 + len(sent), date=dt.datetime.now(), chat=Chat(id=method.chat_id, type="supergroup"), text="x")
+                if name == "AnswerCallbackQuery":
+                    sent.append({"kind": "answer", "text": method.text or "", "alert": bool(method.show_alert)})
+                if name == "GetFile":
+                    return File(file_id="p", file_unique_id="pu", file_path="photos/x.jpg")
+                return True
+
+            async def download_file(self, file_path, destination=None, **kw):
+                import io
+                return io.BytesIO(b"\xff\xd8\xff fake")
+
+        bot = _FakeBot(token=os.environ["CRM_BOT_TOKEN"])
+        dp = _the_dispatcher()
+        counter = [80000]
+        orig_sync = ra._sync_after_change
+        ra._sync_after_change = lambda *_a: None
+        import bot.simple_card as sc
+        orig_sc_sync = sc._sync_after_change
+        sc._sync_after_change = lambda *_a: None
+
+        async def tap(user_id, data, chat_id=GROUP, chat_type="supergroup"):
+            counter[0] += 1
+            sent.clear()
+            await dp.feed_update(bot, Update(update_id=counter[0], callback_query=CallbackQuery(
+                id=str(counter[0]), from_user=User(id=user_id, is_bot=False, first_name="T"), chat_instance="ci", data=data,
+                message=Message(message_id=4400, date=dt.datetime.now(), chat=Chat(id=chat_id, type=chat_type), text="card"))))
+
+        async def say(user_id, text=None, chat_id=GROUP, chat_type="supergroup", photo=False):
+            counter[0] += 1
+            sent.clear()
+            extra = {"photo": [PhotoSize(file_id="p", file_unique_id="pu", width=40, height=40)]} if photo else {"text": text}
+            await dp.feed_update(bot, Update(update_id=counter[0], message=Message(
+                message_id=counter[0], date=dt.datetime.now(), chat=Chat(id=chat_id, type=chat_type),
+                from_user=User(id=user_id, is_bot=False, first_name="T", username="tester"), **extra)))
+
+        def repair(order_id):
+            with get_conn(db_path) as conn:
+                return repairs.get_repair(conn, order_id)
+
+        def accrued(order_id):
+            with get_conn(db_path) as conn:
+                return masters.accrued_for(conn, "repair_order", order_id)
+
+        async def run():
+            # ✅ Готов — выдан, треть штатному
+            await tap(STRANGER_TG, f"gb_done:{by_alex}")
+            check("«✅ Готов» (anyone in the точка's group) makes it «Выдан» and accrues Алексей his third: 2200/3 = 733",
+                  repair(by_alex)["status"] == "issued" and accrued(by_alex) == 733
+                  and any("Готов✅" in m["text"] and "Алексей" in m["text"] for m in sent))
+            with get_conn(db_path) as conn:
+                _t, kb = repairs.card(conn, by_alex)
+            texts = [b["text"] for row in kb["inline_keyboard"] for b in row]
+            check("after the choice the card has «🔄 Изменить выбор», «💰 Выдача: 2200 / 🧾 Закупка: 0», «💸 Выплата: 733»",
+                  texts[:4] == ["🔄 Изменить выбор", "💰 Выдача: 2200", "🧾 Закупка: 0", "💸 Выплата: 733"])
+            await tap(STRANGER_TG, f"gb_done:{by_alex}")
+            check("pressed again — nothing changes, it says to use «Изменить выбор»",
+                  any(m["kind"] == "answer" and "Изменить выбор" in m["text"] for m in sent) and accrued(by_alex) == 733)
+
+            # 💸 у штатного — заблокировано; 🧾 закупка — пересчёт
+            await tap(MGR_TG, f"gb_pay:{by_alex}")
+            check("«💸 Выплата» of a staff master on a percent is refused, as in the old bot",
+                  any(m["kind"] == "answer" and m["alert"] and "не редактируется" in m["text"] for m in sent))
+            await tap(MGR_TG, f"gb_parts:{by_alex}")
+            check("«🧾 Закупка» asks for the sum with a force-reply to the one who pressed", any(m["force"] and "Закупка сейчас: 0" in m["text"] for m in sent))
+            await say(MGR_TG, "много")
+            check("not a number — asked again", any("Введите число" in m["text"] for m in sent))
+            await say(MGR_TG, "700")
+            check("the sum is written and the accrual follows: (2200 − 700)/3 = 500",
+                  repair(by_alex)["manual_parts_cost"] == 700 and accrued(by_alex) == 500
+                  and any("Закупка 700" in m["text"] for m in sent))
+
+            # 🔄 Изменить выбор → ❌ Возврат → ✅ Готов: no 124808 any more
+            await tap(MGR_TG, f"gb_change:{by_alex}")
+            check("«🔄 Изменить выбор» takes it back to «новый» and the accrual off", repair(by_alex)["status"] == "new" and accrued(by_alex) == 0)
+            await tap(MGR_TG, f"gb_return:{by_alex}")
+            with get_conn(db_path) as conn:
+                numbers = simple_flow.card_numbers(conn, by_alex)
+            check("«❌ Возврат»: отказ, nothing accrued, the card shows zeros", repair(by_alex)["status"] == "cancelled" and accrued(by_alex) == 0
+                  and numbers == {"price": 0, "parts": 0, "pay": 0})
+            await tap(MGR_TG, f"gb_change:{by_alex}")
+            await tap(MGR_TG, f"gb_done:{by_alex}")
+            check("«Возврат» → «Изменить выбор» → «Готов»: the third is back (the bug of order 124808 can't happen)",
+                  repair(by_alex)["status"] == "issued" and accrued(by_alex) == 500)
+
+            # аутсорс: выплата руками
+            await tap(MGR_TG, f"gb_done:{by_oleg}")
+            check("an outsourcer has nothing until his pay is typed in", accrued(by_oleg) == 0)
+            await tap(MGR_TG, f"gb_pay:{by_oleg}")
+            await say(MGR_TG, "1 200")
+            check("«💸 Выплата» typed for an outsourcer is what he's owed", accrued(by_oleg) == 1200 and repair(by_oleg)["manual_master_pay"] == 1200)
+            with get_conn(db_path) as conn:
+                check("…and it's in what we owe him", masters.owed(conn, oleg) == 1200 and masters.owed(conn, alex) == 500)
+
+            # 📦 Наш — в личке
+            await say(MGR_TG, qa.BTN_OUR_REPAIR, chat_id=MGR_TG, chat_type="private")
+            check("«🛠 Наш ремонт» at a simple-mode точка starts «📦 Наш» (photo first), no shift asked",
+                  any("Пришлите фото устройства" in m["text"] for m in sent))
+            await say(MGR_TG, chat_id=MGR_TG, chat_type="private", photo=True)
+            await say(MGR_TG, "iPhone 11", chat_id=MGR_TG, chat_type="private")
+            await say(MGR_TG, "замена АКБ", chat_id=MGR_TG, chat_type="private")
+            check("then the master to pick", any("Выберите мастера" in m["text"] for m in sent))
+            posted = []
+            orig_notify = repairs.notify_and_save
+            repairs.notify_and_save = lambda store, order_id, *a: posted.append(order_id)
+            try:
+                await tap(MGR_TG, f"own_pick:{alex}", chat_id=MGR_TG, chat_type="private")
+            finally:
+                repairs.notify_and_save = orig_notify
+            own = posted[0] if posted else None
+            own_row = repair(own) if own else None
+            check("«📦 Наш» is a repair of the точка's own device: client «Наш (Гибрид)», no price, own_order",
+                  own_row is not None and own_row["own_order"] == 1 and own_row["client_name"] == "Наш (Гибрид)"
+                  and own_row["price_estimate"] is None and own_row["master_id"] == alex and own_row["model"] == "iPhone 11")
+            await tap(MGR_TG, f"gb_done:{own}")
+            check("on «наш» заказ even a percent master gets nothing by rate…", accrued(own) == 0)
+            await tap(MGR_TG, f"gb_pay:{own}")
+            await say(MGR_TG, "300")
+            check("…his pay is typed in by hand", accrued(own) == 300)
+
+        try:
+            asyncio.run(run())
+        finally:
+            ra._sync_after_change = orig_sync
+            sc._sync_after_change = orig_sc_sync
+
+        # ---- копии мастеру и этикетка
+        calls = []
+        orig_post = httpx.post
+
+        class _Ok:
+            status_code = 200
+
+            def json(self):
+                return {"result": {"message_id": 5000 + len(calls)}}
+
+        def fake_post(url, **kw):
+            calls.append((url.rsplit("/", 1)[-1], (kw.get("data") or kw.get("json") or {})))
+            return _Ok()
+
+        httpx.post = fake_post
+        orig_token = notify._BOT_TOKEN
+        notify._BOT_TOKEN = "123456:test"
+        try:
+            with get_conn(db_path) as conn:
+                fresh = repairs.create_repair(conn, client, "", None, "Galaxy A05", None, "разъём", "offline", alex, 900, mgr, location_id=1)
+                conn.execute("UPDATE repair_orders SET device_password = '1234' WHERE id = ?", (fresh,))
+                text, kb = repairs.card(conn, fresh)
+            repairs.notify_and_save(store, fresh, text, kb, (b"\xff\xd8\xff", "x.jpg"))
+        finally:
+            httpx.post, notify._BOT_TOKEN = orig_post, orig_token
+        chats = [str(payload.get("chat_id")) for _m, payload in calls]
+        topic_copy = next((p for m, p in calls if str(p.get("chat_id")) == str(GROUP) and str(p.get("message_thread_id")) == "77"), None)
+        personal_copy = next((p for m, p in calls if str(p.get("chat_id")) == str(PERSONAL)), None)
+        label = next((p for m, p in calls if str(p.get("chat_id")) == str(LABEL)), None)
+        check("the card goes to the точка's group, a copy to the master's topic with a link to it",
+              chats[0] == str(GROUP) and topic_copy is not None and "t.me/c/5570001/" in str(topic_copy.get("reply_markup")))
+        check("…a copy to his own group — without the client's name and phone, with the password",
+              personal_copy is not None and "Анна" not in personal_copy.get("caption", "") and "0671112233" not in personal_copy.get("caption", "")
+              and "1234" in personal_copy.get("caption", "") and "Galaxy A05" in personal_copy.get("caption", ""))
+        check("…and the label goes to the точка's label chat", label is not None and "Этикетка" in label.get("caption", ""))
+        with get_conn(db_path) as conn:
+            png = simple_flow.label_png(repairs.get_repair(conn, fresh), "https://t.me/c/1/2")
+        check("the label is a 40×25 mm (320×200) picture", png[:8] == b"\x89PNG\r\n\x1a\n" and png[16:24] == (320).to_bytes(4, "big") + (200).to_bytes(4, "big"))
+
+        # ---- точка без смены
+        with get_conn(db_path) as conn:
+            ctx = {"location_id": 1, "staff": auth.get_staff_by_id(conn, mgr)}
+            agent_actions._need_shift(conn, ctx)
+        check("a точка without shifts lets money and repairs through without one (bot and assistant)", qa._shift_is_open(store, {"id": mgr}))
+
+        # ---- журнал Telegram
+        with get_conn(db_path) as conn:
+            journal = {r["user_id"]: r for r in tg_journal.list_for_bot(conn, [123456])}
+        check("the journal saw who pressed buttons and wrote in the group and the DM",
+              journal.get(STRANGER_TG) is not None and journal[STRANGER_TG]["callbacks"] >= 1
+              and journal[MGR_TG]["group_messages"] >= 1 and journal[MGR_TG]["private_messages"] >= 1 and journal[MGR_TG]["staff_id"] == mgr)
+        with get_conn(db_path) as conn:
+            new_id = tg_journal.make_staff(conn, STRANGER_TG, "Никита Шевченко", "manager", 1)
+            row = auth.get_staff_by_id(conn, new_id)
+            try:
+                tg_journal.make_staff(conn, STRANGER_TG, "ещё раз", "manager", 1)
+                twice = False
+            except ValueError:
+                twice = True
+        check("«Сделать сотрудником» links the person to the точка by his Telegram — once",
+              row["telegram_id"] == STRANGER_TG and row["role"] == "manager" and row["location_id"] == 1 and twice)
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         db_path = os.path.join(tmp, "test.sqlite3")
@@ -9732,6 +9974,7 @@ def main() -> None:
     scenario_repairs_button()
     scenario_gibrit_sync()
     scenario_point_bots()
+    scenario_simple_flow()
     if os.path.exists(_WEBAPP_TEST_DB):
         os.remove(_WEBAPP_TEST_DB)
 

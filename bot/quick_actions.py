@@ -328,6 +328,8 @@ def _resolve_staff_for_dm(telegram_id: int) -> tuple[StoreConfig, object] | None
 # up (клиент, сводка) doesn't need a shift. ---
 
 def _shift_is_open(store: StoreConfig, staff) -> bool:
+    if not getattr(store, "shift_required", True):
+        return True  # точка без смены (Кабинет магазина)
     with get_conn(store.db_path) as conn:
         return core_shifts.current_shift(conn, staff["id"], store.location_id) is not None
 
@@ -919,6 +921,12 @@ async def our_repair_start(message: Message, state: FSMContext) -> None:
     if not resolved:
         return
     store, staff = resolved
+    if getattr(store, "simple_flow", False):
+        # «📦 Наш» as in Гибрид's old bot (core.simple_flow)
+        from bot import simple_card
+
+        await simple_card.own_start(message, state, store)
+        return
     await _reset(message, state)
     await _consume(state, message)
     with get_conn(store.db_path) as conn:

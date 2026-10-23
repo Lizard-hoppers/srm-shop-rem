@@ -29,10 +29,13 @@ from bot.part_add_flow import router as part_add_router
 from bot.repair_attachments import router as repair_attachments_router
 from bot.repairs_button import router as repairs_button_router
 from bot.sale_flow import router as sale_flow_router
+from bot.simple_card import router as simple_card_router
 from bot.supplier_chat import router as supplier_chat_router
 from bot.transfer_flow import router as transfer_flow_router
 from core import assistant as core_assistant
 from core import bots as core_bots
+from core import tg_journal
+from core.storage import get_conn
 from core.storage import init_db
 from core.stores import load_stores, store_for_chat_id
 
@@ -51,6 +54,25 @@ def _chat_of(update):
     return None
 
 
+def _journal(bot_id: int, update) -> None:
+    """Журнал Telegram (core.tg_journal): who wrote or pressed what.
+    Never lets a hiccup here cost the update itself."""
+    if update.message is not None and update.message.from_user and not update.message.from_user.is_bot:
+        user, chat = update.message.from_user, update.message.chat
+        kind = "private" if chat.type == "private" else "group"
+    elif update.callback_query is not None:
+        user = update.callback_query.from_user
+        chat = update.callback_query.message.chat if update.callback_query.message else None
+        kind = "callback"
+    else:
+        return
+    try:
+        with get_conn(load_stores()[0].db_path) as conn:
+            tg_journal.record(conn, bot_id, user, chat, kind)
+    except Exception:
+        logging.getLogger(__name__).warning("journal not written", exc_info=True)
+
+
 class BotScopeMiddleware(BaseMiddleware):
     """Свой бот у точки (core.bots, 23.10). The bot an update came through
     is the точка: it is kept in CURRENT_BOT_ID while the update is handled
@@ -65,6 +87,7 @@ class BotScopeMiddleware(BaseMiddleware):
             store = store_for_chat_id(chat.id)
             if store is not None and core_bots.bot_id(core_bots.token_for_location(store.location_id)) != bot.id:
                 return None
+        await asyncio.to_thread(_journal, bot.id, event)
         mark = core_bots.CURRENT_BOT_ID.set(bot.id)
         try:
             return await handler(event, data)
@@ -94,6 +117,10 @@ def build_dispatcher() -> Dispatcher:
     # link or not — see bot/channel_orders.py.
     dp.include_router(channel_orders_router)
     dp.include_router(router)
+    # Простой режим (core.simple_flow): the sum typed after «💰 Выдача» is a
+    # reply to the bot, not to a card — ahead of the note handler, which
+    # would swallow it.
+    dp.include_router(simple_card_router)
     # «Бот, …» — a question to the bot itself (bot/assistant_chat.py): ahead
     # of the note handler, so it is answered even when sent as a reply.
     # «🔧 Ремонты», the button docked in the groups (bot/repairs_button.py).

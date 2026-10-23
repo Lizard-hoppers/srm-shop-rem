@@ -179,6 +179,15 @@ def update_master(
     _storage.ensure_master_warehouse(conn, staff_id, name.strip())
 
 
+def set_master_chats(conn: sqlite3.Connection, staff_id: int, topic_id: int | None, personal_chat_id: int | None) -> None:
+    """Where copies of his repair cards go (core.simple_flow): his topic in
+    the точка's group, his own group."""
+    conn.execute(
+        "UPDATE staff SET topic_id = ?, personal_chat_id = ? WHERE id = ? AND role = 'master'",
+        (topic_id, personal_chat_id, staff_id),
+    )
+
+
 def set_master_active(conn: sqlite3.Connection, staff_id: int, active: bool) -> None:
     """«Удалить» a master is always a deactivation, never a row delete —
     repair_orders.master_id and stock_movements.staff_id reference this row,

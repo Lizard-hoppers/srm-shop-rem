@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import html
+import logging
 import os
 import sqlite3
 import uuid
 
+from core import simple_flow as _simple_flow
 from core import cash as _cash
 from core import clients as _clients
 from core import device_catalog as _device_catalog
@@ -353,6 +355,9 @@ def finance(conn: sqlite3.Connection, order_id: int) -> dict:
     if repair["manual_master_pay"] is not None:
         share = round(repair["manual_master_pay"], 2)
         share = int(share) if share == int(share) else share
+    elif repair["own_order"]:
+        # «📦 Наш»: the master's pay is typed in by hand, never by his rate.
+        share = 0
     return {
         "price": price, "parts_cost": parts_cost, "base": base, "master_share": share,
         "firm_profit": base - share,
@@ -477,6 +482,11 @@ def notify_and_save(
     if sent:
         with _get_conn(store.db_path) as conn:
             save_order_messages(conn, order_id, sent)
+    if sent and getattr(store, "simple_flow", False):
+        try:
+            _simple_flow.after_card_posted(store, order_id, sent, photo)
+        except Exception:  # a copy or a label never undoes the repair
+            logging.getLogger(__name__).warning("copies of repair %s not posted", order_id, exc_info=True)
 
 
 def claim_repair(conn: sqlite3.Connection, order_id: int, staff_id: int) -> bool:
@@ -859,6 +869,11 @@ def card(conn: sqlite3.Connection, order_id: int) -> tuple[str, dict]:
     while notes and len(text) > CARD_TEXT_LIMIT and shown > 0:
         shown -= 1
         text = render_card_text(repair, parts, notes, shown)
+    if _simple_flow.is_simple(conn, repair["location_id"]):
+        numbers = None if repair["status"] in _simple_flow.OPEN_STATUSES else _simple_flow.card_numbers(conn, order_id)
+        rows = _simple_flow.keyboard_rows(order_id, repair["status"], numbers)
+        rows.append([{"text": "🔗 Открыть в CRM", "callback_data": f"open_crm:repair:{order_id}"}])
+        return text, {"inline_keyboard": rows}
     return text, render_keyboard(order_id, repair["status"])
 
 
