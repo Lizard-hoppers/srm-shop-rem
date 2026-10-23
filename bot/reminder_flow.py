@@ -198,10 +198,11 @@ def _mark_blocking(db_path: str, reminder_id: int, sent: bool) -> None:
         (core_reminders.mark_sent if sent else core_reminders.mark_failed)(conn, reminder_id)
 
 
-async def deliver_due(bot) -> int:
+async def deliver_due(bot, bot_for=None) -> int:
     """Post every reminder whose time has come. Called on a short timer
     (bot/bot.py). A reminder Telegram won't take stays pending for the
-    next tick. Returns how many went out."""
+    next tick. Returns how many went out. bot_for(chat_id) — the bot of
+    that chat when точки have bots of their own (core.bots); `bot` otherwise."""
     stores = load_stores()
     if not stores:
         return 0
@@ -211,7 +212,7 @@ async def deliver_due(bot) -> int:
         text = f"⏰ <b>Напоминание</b>\n{html.escape(row['text'])}{item['about']}\n<i>поставил(а) {html.escape(row['author'])}</i>"
         markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔁 Напомнить через час", callback_data=f"rem_snooze:{row['id']}")]])
         try:
-            await bot.send_message(
+            await (bot_for(row["chat_id"]) if bot_for else bot).send_message(
                 int(row["chat_id"]), text, reply_markup=markup,
                 # A reply lands in its card's topic by itself; otherwise the topic the request came from.
                 message_thread_id=None if item["reply_to"] else item["thread_id"],

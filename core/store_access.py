@@ -13,6 +13,7 @@ from __future__ import annotations
 import sqlite3
 
 from core import auth
+from core import bots
 from core.storage import get_conn
 from core.store_prefs import get_last_store
 from core.stores import StoreConfig, load_stores, registry_db_path
@@ -35,7 +36,22 @@ def accessible_stores(telegram_id: int) -> list[tuple[StoreConfig, sqlite3.Row]]
         staff = auth.get_staff_by_telegram_id(conn, telegram_id)
     if not staff:
         return []
-    return [(store, staff) for store in stores_for_staff(staff)]
+    # Through a точка's own bot — that точка only; through the default bot —
+    # the точки that have no bot of their own (core.bots, 23.10).
+    stores = bots.stores_for_bot(stores_for_staff(staff), bots.CURRENT_BOT_ID.get())
+    return [(store, staff) for store in stores]
+
+
+def home_bot_username(telegram_id: int) -> str | None:
+    """Staff who wrote to a bot that doesn't serve their точка: the
+    @username of the one that does — so /start says where to go instead of
+    taking them for a walk-in client. None if they aren't staff at all."""
+    with get_conn(registry_db_path()) as conn:
+        staff = auth.get_staff_by_telegram_id(conn, telegram_id)
+    if not staff:
+        return None
+    home = stores_for_staff(staff)
+    return bots.username(bots.token_for_location(home[0].location_id)) if home else None
 
 
 def pick_default_store(telegram_id: int, accessible: list[tuple[StoreConfig, sqlite3.Row]]) -> StoreConfig:

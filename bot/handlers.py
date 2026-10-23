@@ -61,6 +61,11 @@ async def start(message: Message) -> None:
     # client branch below) stays on the default store, unchanged —
     # согласовано с Павлом 23.08, see OPERATIONS.md "Мультимагазинность".
     is_staff = bool(store_access.accessible_stores(message.from_user.id))
+    if not is_staff:
+        home = store_access.home_bot_username(message.from_user.id)
+        if home:
+            await message.answer(f"Ваша точка работает через @{home} — откройте его.")
+            return
     client = None
     if not is_staff:
         with get_conn() as conn:

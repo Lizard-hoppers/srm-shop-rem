@@ -30,6 +30,8 @@ import os
 
 import httpx
 
+from core import bots as _bots
+
 logger = logging.getLogger(__name__)
 
 _BOT_TOKEN = os.environ.get("CRM_BOT_TOKEN")
@@ -42,6 +44,12 @@ _MASTERS_GROUP_CHAT_ID = os.environ.get("CRM_MASTERS_GROUP_CHAT_ID")
 # descriptions are free text with no length limit on the form, so this is
 # a safety net, not the expected case.
 _MAX_CAPTION_LEN = 1024
+
+
+def _token(chat_id) -> str | None:
+    """The bot that posts into this chat: a точка with a bot of its own
+    speaks through it (core.bots), everyone else through the default one."""
+    return _bots.token_for_chat(chat_id) or _BOT_TOKEN
 
 
 def _as_caption(text: str) -> str:
@@ -60,7 +68,7 @@ def _send(
     message's id on success or None otherwise. Never raises — a
     failed/unconfigured notification must not break the request that
     triggered it (e.g. accepting a repair)."""
-    if not chat_id or not _BOT_TOKEN:
+    if not chat_id or not _token(chat_id):
         return None
     payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
     if message_thread_id:
@@ -69,7 +77,7 @@ def _send(
         payload["reply_markup"] = reply_markup
     try:
         resp = httpx.post(
-            f"https://api.telegram.org/bot{_BOT_TOKEN}/sendMessage",
+            f"https://api.telegram.org/bot{_token(chat_id)}/sendMessage",
             json=payload,
             timeout=5,
         )
@@ -98,7 +106,7 @@ def _send_photo(
     `chat_id`, optionally as the one message carrying both the photo and
     the card text/keyboard (caption), rather than two separate messages.
     Never raises, same best-effort contract as _send()."""
-    if not chat_id or not _BOT_TOKEN:
+    if not chat_id or not _token(chat_id):
         return None
     data = {"chat_id": chat_id}
     if message_thread_id:
@@ -112,7 +120,7 @@ def _send_photo(
         data["reply_markup"] = json.dumps(reply_markup)
     try:
         resp = httpx.post(
-            f"https://api.telegram.org/bot{_BOT_TOKEN}/sendPhoto",
+            f"https://api.telegram.org/bot{_token(chat_id)}/sendPhoto",
             data=data,
             files={"photo": (filename, photo_bytes, "image/jpeg")},
             timeout=15,
@@ -130,7 +138,7 @@ def edit_message(chat_id: str | int, message_id: int, text: str, reply_markup: d
     """Edit a previously sent message in place — used to reflect a status
     change (claimed / done) without spamming a new message per update.
     Never raises; returns whether the edit went through."""
-    if not chat_id or not message_id or not _BOT_TOKEN:
+    if not chat_id or not message_id or not _token(chat_id):
         return False
     payload = {
         "chat_id": chat_id,
@@ -141,7 +149,7 @@ def edit_message(chat_id: str | int, message_id: int, text: str, reply_markup: d
     }
     try:
         resp = httpx.post(
-            f"https://api.telegram.org/bot{_BOT_TOKEN}/editMessageText",
+            f"https://api.telegram.org/bot{_token(chat_id)}/editMessageText",
             json=payload,
             timeout=5,
         )
@@ -161,7 +169,7 @@ def edit_message_caption(
     with a caption (editMessageText 400s on those — Telegram requires
     editMessageCaption instead). Never raises; returns whether it went
     through."""
-    if not chat_id or not message_id or not _BOT_TOKEN:
+    if not chat_id or not message_id or not _token(chat_id):
         return False
     payload = {
         "chat_id": chat_id,
@@ -172,7 +180,7 @@ def edit_message_caption(
     }
     try:
         resp = httpx.post(
-            f"https://api.telegram.org/bot{_BOT_TOKEN}/editMessageCaption",
+            f"https://api.telegram.org/bot{_token(chat_id)}/editMessageCaption",
             json=payload,
             timeout=5,
         )
@@ -211,7 +219,7 @@ def send_album(
     photo's caption (sendMediaGroup) — a покупка's six photos + its card.
     An album can't carry buttons. Returns the first message's id, None on
     any failure; never raises, same contract as _send()."""
-    if not chat_id or not _BOT_TOKEN or not photos:
+    if not chat_id or not _token(chat_id) or not photos:
         return None
     media, files = [], {}
     for index, (photo_bytes, filename) in enumerate(photos[:10]):
@@ -226,7 +234,7 @@ def send_album(
         data["message_thread_id"] = message_thread_id
     try:
         resp = httpx.post(
-            f"https://api.telegram.org/bot{_BOT_TOKEN}/sendMediaGroup", data=data, files=files, timeout=30,
+            f"https://api.telegram.org/bot{_token(chat_id)}/sendMediaGroup", data=data, files=files, timeout=30,
         )
         if resp.status_code != 200:
             logger.warning("album notify failed: %s %s", resp.status_code, resp.text)
@@ -242,11 +250,11 @@ def delete_message(chat_id: str | int, message_id: int) -> bool:
     can only delete a message for ~48h after sending, so a False here is
     an expected outcome for an old post, not an error — callers fall back
     to editing the message instead (core.channel_posts)."""
-    if not chat_id or not message_id or not _BOT_TOKEN:
+    if not chat_id or not message_id or not _token(chat_id):
         return False
     try:
         resp = httpx.post(
-            f"https://api.telegram.org/bot{_BOT_TOKEN}/deleteMessage",
+            f"https://api.telegram.org/bot{_token(chat_id)}/deleteMessage",
             json={"chat_id": chat_id, "message_id": message_id},
             timeout=5,
         )

@@ -21,6 +21,7 @@ import os
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import RedirectResponse
 
+from core import bots as core_bots
 from core.session_token import make_token
 from core.store_access import accessible_stores, pick_default_store
 from core.store_prefs import set_last_store
@@ -39,14 +40,25 @@ def miniapp_page(request: Request):
 
 @router.post("/auto")
 def miniapp_auto(request: Request, initData: str = Form(...)):
-    user = validate_init_data(initData, BOT_TOKEN) if BOT_TOKEN else None
+    # Opened from any of the CRM's bots — the one whose signature fits is
+    # the bot it came from, and its точка is where the app opens (core.bots).
+    user, via = None, None
+    for token in dict.fromkeys(t for t in [BOT_TOKEN, *core_bots.all_tokens()] if t):
+        user = validate_init_data(initData, token)
+        if user:
+            via = core_bots.bot_id(token)
+            break
     if not user:
         return render(
             request, "miniapp.html", staff=None,
             error="Не удалось подтвердить данные Telegram, откройте приложение заново.",
         )
 
-    accessible = accessible_stores(user["id"])
+    mark = core_bots.CURRENT_BOT_ID.set(via)
+    try:
+        accessible = accessible_stores(user["id"])
+    finally:
+        core_bots.CURRENT_BOT_ID.reset(mark)
     if not accessible:
         return render(
             request, "miniapp.html", staff=None,

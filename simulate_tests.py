@@ -9513,6 +9513,156 @@ def scenario_gibrit_sync() -> None:
         check("a missing bot base is reported, not a crash", missing)
 
 
+def scenario_point_bots() -> None:
+    """Свой бот у точки (23.10, этап 1 переноса Гибрида): the bot is the
+    точка — in DMs, in groups, for cards and for the Mini App login."""
+    print("scenario: свой бот у точки — бот определяет точку")
+    import asyncio
+    import datetime as dt
+
+    from aiogram import Bot
+    from aiogram.types import Chat, Message, Update, User
+
+    from core import bots, notify, store_access
+
+    DEFAULT = os.environ["CRM_BOT_TOKEN"]
+    POINT = "777000:point-bot-token-not-real"
+    OWNER_TG, MGR1_TG, MGR2_TG = 556001, 556002, 556003
+    GROUP1, GROUP2 = -1005560001, -1005560002
+    prev = os.environ.get("CRM_POINT_BOTS")
+    with tempfile.TemporaryDirectory() as tmp, _separate_base(tmp, "point-bots.sqlite3", ("007", "Гибрид")) as db_path:
+        with get_conn(db_path) as conn:
+            conn.execute("UPDATE locations SET staff_group_chat_id = ? WHERE id = 1", (GROUP1,))
+            conn.execute("UPDATE locations SET staff_group_chat_id = ? WHERE id = 2", (GROUP2,))
+            auth.create_staff(conn, "pb-owner", "pass", "Владелец", "owner")
+            auth.link_staff_telegram(conn, "pb-owner", OWNER_TG)
+            auth.create_staff(conn, "pb-m1", "pass", "Макс", "manager", location_id=1)
+            auth.link_staff_telegram(conn, "pb-m1", MGR1_TG)
+            auth.create_staff(conn, "pb-m2", "pass", "Віталій", "manager", location_id=2)
+            auth.link_staff_telegram(conn, "pb-m2", MGR2_TG)
+
+        def ids(telegram_id, bot):
+            mark = bots.CURRENT_BOT_ID.set(bot)
+            try:
+                return [s.location_id for s, _st in store_access.accessible_stores(telegram_id)]
+            finally:
+                bots.CURRENT_BOT_ID.reset(mark)
+
+        # ---- без своих ботов — как раньше
+        os.environ.pop("CRM_POINT_BOTS", None)
+        check("with no точка bots configured the default bot serves every точка, as before",
+              ids(OWNER_TG, bots.bot_id(DEFAULT)) == [1, 2] and ids(MGR2_TG, bots.bot_id(DEFAULT)) == [2]
+              and bots.all_tokens() == [DEFAULT] and bots.token_for_chat(GROUP2) is None)
+
+        os.environ["CRM_POINT_BOTS"] = f"2={POINT}, 9=garbage"
+        try:
+            check("CRM_POINT_BOTS is read as точка → token; junk is ignored",
+                  bots.point_tokens() == {2: POINT} and bots.all_tokens() == [DEFAULT, POINT]
+                  and bots.token_for_location(2) == POINT and bots.token_for_location(1) == DEFAULT)
+            check("through the точка's bot — that точка only, even for the owner",
+                  ids(OWNER_TG, 777000) == [2] and ids(MGR2_TG, 777000) == [2] and ids(MGR1_TG, 777000) == [])
+            check("through the default bot — the точки without a bot of their own",
+                  ids(OWNER_TG, bots.bot_id(DEFAULT)) == [1] and ids(MGR1_TG, bots.bot_id(DEFAULT)) == [1] and ids(MGR2_TG, bots.bot_id(DEFAULT)) == [])
+            check("outside any bot (the Mini App switcher) — every точка the person may work in",
+                  ids(OWNER_TG, None) == [1, 2])
+            check("a chat speaks through its точка's bot: group, a manager's DM; the owner's DM — the default",
+                  bots.token_for_chat(GROUP2) == POINT and bots.token_for_chat(GROUP1) is None
+                  and bots.token_for_chat(MGR2_TG) == POINT and bots.token_for_chat(OWNER_TG) is None and bots.token_for_chat(MGR1_TG) is None)
+
+            # ---- карточки: токеном своей точки
+            posted = []
+            orig_post, orig_token = httpx.post, notify._BOT_TOKEN
+            notify._BOT_TOKEN = DEFAULT
+
+            class _Ok:
+                status_code = 200
+
+                def json(self):
+                    return {"result": {"message_id": 1}}
+
+            httpx.post = lambda url, **kw: (posted.append(url), _Ok())[1]
+            try:
+                notify._send(GROUP2, "Гибрид")
+                notify._send(GROUP1, "007")
+                notify.edit_message(GROUP2, 5, "правка")
+            finally:
+                httpx.post, notify._BOT_TOKEN = orig_post, orig_token
+            check("cards and edits go out through the bot of the chat's точка",
+                  posted[0].startswith(f"https://api.telegram.org/bot{POINT}/") and posted[1].startswith(f"https://api.telegram.org/bot{DEFAULT}/")
+                  and posted[2].startswith(f"https://api.telegram.org/bot{POINT}/editMessageText"))
+
+            # ---- через настоящий диспетчер
+            sent: list[tuple[int, str]] = []
+
+            class _FakeBot(Bot):
+                async def __call__(self, method, request_timeout=None):
+                    if type(method).__name__ == "SendMessage":
+                        sent.append((self.id, method.text))
+                        return Message(message_id=1, date=dt.datetime.now(), chat=Chat(id=method.chat_id, type="private"), text="x")
+                    return True
+
+            default_bot, point_bot = _FakeBot(token=DEFAULT), _FakeBot(token=POINT)
+            dp = _the_dispatcher()
+            counter = [70000]
+
+            async def say(bot, chat_id, chat_type, user_id, text):
+                counter[0] += 1
+                sent.clear()
+                await dp.feed_update(bot, Update(update_id=counter[0], message=Message(
+                    message_id=counter[0], date=dt.datetime.now(), chat=Chat(id=chat_id, type=chat_type),
+                    from_user=User(id=user_id, is_bot=False, first_name="T"), text=text)))
+
+            orig_username = bots.username
+            bots.username = lambda token: {DEFAULT: "OO7servis_bot", POINT: "Gibrit_Repair_Bot"}.get(token)
+            try:
+                async def run():
+                    await say(default_bot, GROUP2, "supergroup", OWNER_TG, "/chatid")
+                    check("in Гибрид's group the default bot keeps quiet", sent == [])
+                    await say(point_bot, GROUP2, "supergroup", OWNER_TG, "/chatid")
+                    check("…and Гибрид's own bot answers there", len(sent) == 1 and sent[0][0] == 777000 and "Гибрид" in sent[0][1])
+                    await say(point_bot, GROUP1, "supergroup", OWNER_TG, "/chatid")
+                    check("Гибрид's bot keeps quiet in 007's group", sent == [])
+                    await say(default_bot, MGR2_TG, "private", MGR2_TG, "/start")
+                    check("Гибрид's manager writing to 007's bot is sent to his own bot, not taken for a client",
+                          len(sent) == 1 and "@Gibrit_Repair_Bot" in sent[0][1])
+                    await say(point_bot, MGR2_TG, "private", MGR2_TG, "/start")
+                    check("…in his own bot he gets the staff keyboard", any("Быстрые действия" in text for _b, text in sent))
+                    check("the точка is not left set after the update", bots.CURRENT_BOT_ID.get() is None)
+
+                asyncio.run(run())
+            finally:
+                bots.username = orig_username
+
+            # ---- Mini App: открыт из бота Гибрида — открывается Гибрид
+            import webapp.main
+            from webapp.routers import miniapp as miniapp_router
+
+            prev_prefs = os.environ.get("CRM_STORE_PREFS_PATH")
+            os.environ["CRM_STORE_PREFS_PATH"] = os.path.join(tmp, "pb-prefs.sqlite3")
+            try:
+                with TestClient(webapp.main.app) as client:
+                    via_point = client.post("/miniapp/auto", data={"initData": _build_init_data(POINT, {"id": OWNER_TG, "first_name": "В"}, int(time.time()))},
+                                            follow_redirects=False)
+                    via_default = client.post("/miniapp/auto", data={"initData": _build_init_data(miniapp_router.BOT_TOKEN, {"id": OWNER_TG, "first_name": "В"}, int(time.time()))},
+                                              follow_redirects=False)
+                    forged = client.post("/miniapp/auto", data={"initData": _build_init_data("555:not-ours", {"id": OWNER_TG, "first_name": "В"}, int(time.time()))},
+                                         follow_redirects=False)
+                check("the Mini App opened from Гибрид's bot lands on Гибрид; from 007's — on 007; another bot's signature is refused",
+                      via_point.status_code == 303 and read_token(via_point.headers["location"].split("t=", 1)[1])["store_id"] == "2"
+                      and via_default.status_code == 303 and read_token(via_default.headers["location"].split("t=", 1)[1])["store_id"] == "1"
+                      and forged.status_code == 200 and "Не удалось подтвердить" in forged.text)
+            finally:
+                if prev_prefs is None:
+                    os.environ.pop("CRM_STORE_PREFS_PATH", None)
+                else:
+                    os.environ["CRM_STORE_PREFS_PATH"] = prev_prefs
+        finally:
+            if prev is None:
+                os.environ.pop("CRM_POINT_BOTS", None)
+            else:
+                os.environ["CRM_POINT_BOTS"] = prev
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         db_path = os.path.join(tmp, "test.sqlite3")
@@ -9581,6 +9731,7 @@ def main() -> None:
     scenario_supplier_chat()
     scenario_repairs_button()
     scenario_gibrit_sync()
+    scenario_point_bots()
     if os.path.exists(_WEBAPP_TEST_DB):
         os.remove(_WEBAPP_TEST_DB)
 

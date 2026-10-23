@@ -1,7 +1,7 @@
 import asyncio
 import logging
 
-from aiogram import Bot, Dispatcher
+from aiogram import BaseMiddleware, Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -32,13 +32,44 @@ from bot.sale_flow import router as sale_flow_router
 from bot.supplier_chat import router as supplier_chat_router
 from bot.transfer_flow import router as transfer_flow_router
 from core import assistant as core_assistant
+from core import bots as core_bots
 from core.storage import init_db
-from core.stores import load_stores
+from core.stores import load_stores, store_for_chat_id
 
 logging.basicConfig(level=logging.INFO)
 # httpx logs every request URL at INFO — and a Bot API URL contains the
 # bot token (core.notify posts through httpx). Keep it out of journald.
 logging.getLogger("httpx").setLevel(logging.WARNING)
+
+
+def _chat_of(update):
+    for event in (update.message, update.edited_message, update.my_chat_member, update.chat_member):
+        if event is not None:
+            return event.chat
+    if update.callback_query is not None and update.callback_query.message is not None:
+        return update.callback_query.message.chat
+    return None
+
+
+class BotScopeMiddleware(BaseMiddleware):
+    """Свой бот у точки (core.bots, 23.10). The bot an update came through
+    is the точка: it is kept in CURRENT_BOT_ID while the update is handled
+    (core.store_access narrows the точки by it). In a group that belongs to
+    a точка only that точка's bot acts — with both bots in one group nothing
+    is answered twice."""
+
+    async def __call__(self, handler, event, data):
+        bot = data["bot"]
+        chat = _chat_of(event)
+        if chat is not None and chat.type in ("group", "supergroup"):
+            store = store_for_chat_id(chat.id)
+            if store is not None and core_bots.bot_id(core_bots.token_for_location(store.location_id)) != bot.id:
+                return None
+        mark = core_bots.CURRENT_BOT_ID.set(bot.id)
+        try:
+            return await handler(event, data)
+        finally:
+            core_bots.CURRENT_BOT_ID.reset(mark)
 
 
 def build_dispatcher() -> Dispatcher:
@@ -85,6 +116,7 @@ def build_dispatcher() -> Dispatcher:
     # Button taps arrive with or without an emoji variation selector —
     # normalised before any filter looks (bot.quick_actions).
     dp.message.outer_middleware(ButtonTextMiddleware())
+    dp.update.outer_middleware(BotScopeMiddleware())
     return dp
 
 
@@ -92,12 +124,18 @@ _ASSISTANT_TICK_SECONDS = 600
 _REMINDER_TICK_SECONDS = 30
 
 
-async def _reminder_loop(bot: Bot) -> None:
+async def _reminder_loop(bots: list[Bot]) -> None:
     """Напоминания (bot/reminder_flow.py): whatever has come due is
-    posted — checked twice a minute, so «в 10:20» means 10:20."""
+    posted — checked twice a minute, so «в 10:20» means 10:20. Each through
+    the bot of its chat."""
+    by_token = {b.token: b for b in bots}
+
+    def bot_for(chat_id):
+        return by_token.get(core_bots.token_for_chat(chat_id)) or bots[0]
+
     while True:
         try:
-            await reminder_flow.deliver_due(bot)
+            await reminder_flow.deliver_due(bots[0], bot_for)
         except Exception:  # one bad reminder must not stop the rest, or the bot
             logging.getLogger(__name__).exception("reminder delivery failed")
         await asyncio.sleep(_REMINDER_TICK_SECONDS)
@@ -116,8 +154,26 @@ async def main() -> None:
     # Schema ready before the first update arrives — matters if this process
     # starts before the web one ever has. One base for every точка (06.10).
     init_db(load_stores()[0].db_path)
-    bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    # The default bot (CRM_BOT_TOKEN) and the точки's own (core.bots) —
+    # one dispatcher polls them all.
+    bots = [Bot(token=token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+            for token in (core_bots.all_tokens() or [BOT_TOKEN])]
     dp = build_dispatcher()
+    for bot in bots:
+        await _set_up(bot)
+    # Помощник (core.assistant): the daily «Проблемы» digest, for точки
+    # that switched it on. The reference is kept so the task isn't
+    # garbage-collected mid-flight.
+    assistant_task = asyncio.create_task(_assistant_loop())
+    reminder_task = asyncio.create_task(_reminder_loop(bots))
+    try:
+        await dp.start_polling(*bots)
+    finally:
+        assistant_task.cancel()
+        reminder_task.cancel()
+
+
+async def _set_up(bot: Bot) -> None:
     await bot.delete_webhook(drop_pending_updates=True)
     await bot.set_chat_menu_button(
         menu_button=MenuButtonWebApp(text="CRM", web_app=WebAppInfo(url=MINIAPP_URL))
@@ -136,16 +192,6 @@ async def main() -> None:
         [BotCommand(command="chatid", description="Узнать chat_id этой группы")],
         scope=BotCommandScopeAllGroupChats(),
     )
-    # Помощник (core.assistant): the daily «Проблемы» digest, for точки
-    # that switched it on. The reference is kept so the task isn't
-    # garbage-collected mid-flight.
-    assistant_task = asyncio.create_task(_assistant_loop())
-    reminder_task = asyncio.create_task(_reminder_loop(bot))
-    try:
-        await dp.start_polling(bot)
-    finally:
-        assistant_task.cancel()
-        reminder_task.cancel()
 
 
 if __name__ == "__main__":
