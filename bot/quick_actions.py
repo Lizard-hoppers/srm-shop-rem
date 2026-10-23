@@ -92,6 +92,9 @@ BTN_REPAIR = "🔧 Принять ремонт"
 # must keep starting the intake, not fall into silence (06.10).
 BTN_REPAIR_LEGACY = "🔧 Ремонт"
 BTN_OUR_REPAIR = "🛠 Наш ремонт"
+# Кнопки клавиатуры старого бота Гибрида — остались у людей в чатах после
+# переключения на CRM (core.gibrit_cutover): тот же бот, то же действие.
+OLD_BOT_REPAIR, OLD_BOT_OWN = "📝 Создать заказ на ремонт", "📦 Наш"
 BTN_SALE = "🛍 Продажа"
 BTN_CLIENT = "👤 Клиент"
 BTN_BUYBACK = "🛒 Покупка"
@@ -800,7 +803,7 @@ async def _nudge(message: Message, state: FSMContext, hint: str) -> None:
 
 # --- entry points — always available, even mid-flow (restarts fresh) ---
 
-@router.message(F.text.in_({BTN_REPAIR, BTN_REPAIR_LEGACY}), F.chat.type == "private")
+@router.message(F.text.in_({BTN_REPAIR, BTN_REPAIR_LEGACY, OLD_BOT_REPAIR}), F.chat.type == "private")
 async def repair_start(message: Message, state: FSMContext) -> None:
     resolved = _resolve_staff_for_dm(message.from_user.id)
     if not resolved:
@@ -810,7 +813,7 @@ async def repair_start(message: Message, state: FSMContext) -> None:
         await message.answer("Недостаточно прав для приёма ремонта.")
         return
 
-    if message.text == BTN_REPAIR_LEGACY:
+    if message.text in (BTN_REPAIR_LEGACY, OLD_BOT_REPAIR):
         # An old keyboard is still on this person's screen — replace it.
         await message.answer("Кнопки меню обновились — вот актуальные.", reply_markup=QUICK_ACTIONS_KEYBOARD)
     if not await _shift_gate(message, state, store, staff):
@@ -910,7 +913,7 @@ async def purchase_start(message: Message, state: FSMContext) -> None:
     await message.answer("📦 Пришлите фото накладной — распознаю позиции и предложу оприходовать.")
 
 
-@router.message(F.text == BTN_OUR_REPAIR, F.chat.type == "private")
+@router.message(F.text.in_({BTN_OUR_REPAIR, OLD_BOT_OWN}), F.chat.type == "private")
 async def our_repair_start(message: Message, state: FSMContext) -> None:
     """«Наш ремонт» / производство: a phone the business owns goes to a
     master with our parts and comes back worth more (core.production).

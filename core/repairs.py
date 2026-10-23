@@ -374,7 +374,9 @@ def settle(conn: sqlite3.Connection, order_id: int) -> None:
     _masters.cancel_accruals(conn, "repair_order", order_id)
     # A repair kept by an outside system is settled with the master there —
     # here it only counts in the numbers, it does not become «мы должны».
-    if repair["master_id"] and not repair["ext_source"]:
+    # One brought over from it when the точка moved into the CRM (open at
+    # that moment — core.gibrit_cutover) is ours from then on.
+    if repair["master_id"] and (repair["ext_source"] or "") in ("", "gibrit_moved"):
         _masters.accrue(
             conn, repair["master_id"], "repair", "repair_order", order_id, numbers["master_share"],
             comment=f"{_documents.label('repair', order_id)}: {numbers['base']} × ставка",

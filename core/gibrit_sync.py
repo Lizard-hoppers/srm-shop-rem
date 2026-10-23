@@ -344,6 +344,11 @@ def sync(conn: sqlite3.Connection, orders: list) -> dict:
     """Привести ремонты точки в соответствие с заказами бота. Идемпотентно:
     заказ, который с прошлого прохода не менялся, не трогается."""
     location_id = _location_id(conn)
+    # Переключили на CRM (core.gibrit_cutover) — старый бот больше не источник:
+    # ни дублей, ни перезаписи того, что уже ведётся здесь.
+    moved = conn.execute("SELECT simple_flow FROM locations WHERE id = ?", (location_id,)).fetchone()
+    if moved and moved["simple_flow"]:
+        raise SyncError(f"«{LOCATION_NAME}» переведён на CRM — синхронизация со старым ботом выключена.")
     have = {
         row["ext_id"]: row for row in conn.execute(
             "SELECT id, ext_id, ext_sig, status, device_id FROM repair_orders WHERE ext_source = ?", (SOURCE,)

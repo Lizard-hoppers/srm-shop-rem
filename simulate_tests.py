@@ -10089,6 +10089,155 @@ def scenario_gsheet_mirror() -> None:
         check("…and goes out on the next pass", sheet.rows[2][7] == "новый" and sheet.rows[2][0] == "")
 
 
+def scenario_gibrit_cutover() -> None:
+    """Переключение Гибрида на CRM (23.10, этап 5): настройки точки и мастеров
+    из .env старого бота, открытые заказы — в обычные ремонты (начисление по
+    ставке), история — без долга, старые карточки и кнопки работают, старая
+    синхронизация больше не запускается, журнал переносится."""
+    print("scenario: переключение Гибрида со старого бота на CRM")
+    import asyncio
+    import datetime as dt
+    import json as _json
+    import sqlite3 as _sqlite3
+
+    from aiogram import Bot
+    from aiogram.types import CallbackQuery, Chat, Message, Update, User
+
+    from bot import quick_actions as qa
+    from core import gibrit_cutover, gibrit_sync, gsheet_mirror, masters, simple_flow
+
+    RMT, OLEG_GROUP = -1002221898856, -4975083261
+    env = {
+        "BOT_TOKEN": "7395777282:test-not-real", "REPORT_CHAT_ID": str(RMT), "GOOGLE_SHEET_ID": "SHEETKEY",
+        "EXECUTOR_THREADS_ID": _json.dumps({"Алексей": 86626, "Олег Som": 86617, "Нет Такого": 1}),
+        "MASTER_GROUPS": _json.dumps({"Олег Som": OLEG_GROUP}),
+    }
+    with tempfile.TemporaryDirectory() as tmp, _separate_base(tmp, "cutover.sqlite3", ("007", gibrit_sync.LOCATION_NAME)) as db_path:
+        users_db = os.path.join(tmp, "old_bot.sqlite3")
+        old = _sqlite3.connect(users_db)
+        old.execute("CREATE TABLE users (user_id INTEGER PRIMARY KEY, username TEXT, full_name TEXT, private_messages INTEGER, "
+                    "group_messages INTEGER, callbacks INTEGER, last_chat TEXT, first_seen TEXT, last_seen TEXT)")
+        old.execute("INSERT INTO users VALUES (467140937, 'Nomerovskiy01', 'Віталій', 975, 388, 172, 'РМТ', '2026-10-11 15:00:00', '2026-10-23 10:00:00')")
+        old.commit()
+        old.close()
+        with get_conn(db_path) as conn:
+            owner = auth.create_staff(conn, "co-owner", "pass", "Павел", "owner")
+            mgr = auth.create_staff(conn, "co-mgr", "pass", "Віталій", "manager", location_id=2)
+            auth.link_staff_telegram(conn, "co-mgr", 467140937)
+            alex = auth.create_master(conn, "Алексей", None, "percent", masters.THIRD, location_id=2)
+            oleg = auth.create_master(conn, "Олег Som", None, None, None, location_id=2, master_kind="outsource")
+            anna = clients.get_or_create_by_phone(conn, "Анна", "0671113322", source="offline")
+            ours = clients.create_client(conn, name=gibrit_cutover.OUR_CLIENT_NAME, notes="x")
+
+            def ext(client, master, price, status, card, pay):
+                order = repairs.create_repair(conn, client, "", None, "Redmi", None, "экран", "offline", master, price, owner, location_id=2)
+                conn.execute("UPDATE repair_orders SET ext_source = 'gibrit', ext_id = ?, status = ?, manual_master_pay = ? WHERE id = ?",
+                             (str(card), status, pay, order))
+                return order
+
+            open_alex = ext(anna, alex, 2200, "new", 124808, 733.33)
+            open_oleg = ext(anna, oleg, 3000, "new", 124810, 0)
+            open_own = ext(ours, alex, None, "new", 124812, 0)
+            history = ext(anna, alex, 900, "issued", 120001, 300)
+            result = gibrit_cutover.apply(conn, env, 2, 7395777282, users_db)
+            point = conn.execute("SELECT * FROM locations WHERE id = 2").fetchone()
+            check("the точка: «РМТ» as its group, simple mode, no shift, the same Google sheet",
+                  point["staff_group_chat_id"] == RMT and point["simple_flow"] == 1 and point["shift_required"] == 0 and point["gsheet_id"] == "SHEETKEY")
+            check("masters get their topic in «РМТ» and own group from the old bot's settings (unknown names skipped)",
+                  auth.get_master(conn, alex)["topic_id"] == 86626 and auth.get_master(conn, oleg)["topic_id"] == 86617
+                  and auth.get_master(conn, oleg)["personal_chat_id"] == OLEG_GROUP and set(result["masters"]) == {"Алексей", "Олег Som"})
+            rows = {r["id"]: r for r in conn.execute("SELECT * FROM repair_orders")}
+            check("open orders become CRM's own; a staff master's pay is counted again, not the written-in figure",
+                  rows[open_alex]["ext_source"] == "gibrit_moved" and rows[open_alex]["manual_master_pay"] is None
+                  and rows[open_oleg]["manual_master_pay"] is None and rows[history]["ext_source"] == "gibrit" and rows[history]["manual_master_pay"] == 300)
+            check("the old bot's «наш» orders are «📦 Наш»", rows[open_own]["own_order"] == 1 and rows[open_alex]["own_order"] == 0)
+            queued = {r["repair_id"] for r in conn.execute("SELECT repair_id FROM gsheet_queue")}
+            check("only open orders are queued to be rewritten in the sheet — history rows stay as the old bot left them",
+                  history not in queued and {open_alex, open_oleg, open_own} <= queued)
+            check("every old card in «РМТ» is tied to its repair (the same bot edits it)",
+                  result["cards_linked"] == 4 and repairs.get_order_messages(conn, open_alex) == [(str(RMT), 124808, 1)])
+            check("the old bot's user log is in the Telegram journal", conn.execute(
+                "SELECT callbacks FROM tg_users WHERE bot_id = 7395777282 AND user_id = 467140937").fetchone()["callbacks"] == 172)
+            again = gibrit_cutover.apply(conn, env, 2, 7395777282, users_db)
+            check("running it twice changes nothing", again["cards_linked"] == 0 and len(repairs.get_order_messages(conn, open_alex)) == 1)
+            try:
+                gibrit_sync.sync(conn, [])
+                stopped = False
+            except gibrit_sync.SyncError:
+                stopped = True
+            check("after the switch the old bot's sync refuses to run", stopped)
+            check("the sheet still finds moved orders by their old card number",
+                  gsheet_mirror.row_key(repairs.get_repair(conn, open_alex)) == "124808")
+
+            simple_flow.move(conn, history, "change", owner, "t")
+            simple_flow.move(conn, history, "done", owner, "t")
+            check("history stays history: re-done, it accrues nothing (the old bot settled it)", masters.accrued_for(conn, "repair_order", history) == 0)
+
+        # ---- старые кнопки через настоящий диспетчер
+        sent: list[dict] = []
+
+        class _FakeBot(Bot):
+            async def __call__(self, method, request_timeout=None):
+                name = type(method).__name__
+                if name in ("SendMessage", "EditMessageText"):
+                    markup = getattr(method, "reply_markup", None)
+                    sent.append({"text": method.text, "force": type(markup).__name__ == "ForceReply"})
+                    return Message(message_id=7000 + len(sent), date=dt.datetime.now(), chat=Chat(id=method.chat_id, type="supergroup"), text="x")
+                if name == "AnswerCallbackQuery":
+                    sent.append({"text": method.text or "", "alert": bool(method.show_alert)})
+                return True
+
+        bot = _FakeBot(token=os.environ["CRM_BOT_TOKEN"])
+        dp = _the_dispatcher()
+        counter = [90000]
+        import bot.simple_card as sc
+        orig_sync = sc._sync_after_change
+        sc._sync_after_change = lambda *_a: None
+
+        async def tap(data, card=124808):
+            counter[0] += 1
+            sent.clear()
+            await dp.feed_update(bot, Update(update_id=counter[0], callback_query=CallbackQuery(
+                id=str(counter[0]), from_user=User(id=467140937, is_bot=False, first_name="В"), chat_instance="ci", data=data,
+                message=Message(message_id=card, date=dt.datetime.now(), chat=Chat(id=RMT, type="supergroup"), text="old card"))))
+
+        async def say(text, chat_id=RMT, chat_type="supergroup"):
+            counter[0] += 1
+            sent.clear()
+            await dp.feed_update(bot, Update(update_id=counter[0], message=Message(
+                message_id=counter[0], date=dt.datetime.now(), chat=Chat(id=chat_id, type=chat_type),
+                from_user=User(id=467140937, is_bot=False, first_name="В"), text=text)))
+
+        def accrued(order):
+            with get_conn(db_path) as conn:
+                return masters.accrued_for(conn, "repair_order", order)
+
+        async def run():
+            await tap("executor_done:124808:Готов:Алексей")
+            check("«✅ Готов» on an old card does it in CRM: «Выдан», Алексей gets his third (733)", accrued(open_alex) == 733)
+            await tap("price_set:124808")
+            check("«💰 Выдача» on an old card asks the sum", any(m.get("force") for m in sent))
+            await say("2500")
+            check("…and the third follows the new price (833)", accrued(open_alex) == 833)
+            await tap("status_change:124808")
+            check("«🔄 Изменить выбор» on an old card takes the accrual off", accrued(open_alex) == 0)
+            await tap("executor_done:124810:Возврат:Олег Som", card=124810)
+            with get_conn(db_path) as conn:
+                check("«❌ Возврат» on an old card", repairs.get_repair(conn, open_oleg)["status"] == "cancelled")
+            await tap("card_delete:124808")
+            check("buttons the CRM has no use for say so", any(m.get("alert") and "больше не работает" in m["text"] for m in sent))
+            await tap("executor_done:999:Готов:Кто-то", card=999)
+            check("a card the CRM doesn't know says so", any("не найден" in m["text"] for m in sent))
+            await say(qa.OLD_BOT_REPAIR, chat_id=467140937, chat_type="private")
+            check("«📝 Создать заказ на ремонт» left on someone's keyboard starts the intake",
+                  any("Пришлите фото устройства" in (m.get("text") or "") for m in sent))
+
+        try:
+            asyncio.run(run())
+        finally:
+            sc._sync_after_change = orig_sync
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         db_path = os.path.join(tmp, "test.sqlite3")
@@ -10161,6 +10310,7 @@ def main() -> None:
     scenario_simple_flow()
     scenario_master_pay_gibrid()
     scenario_gsheet_mirror()
+    scenario_gibrit_cutover()
     if os.path.exists(_WEBAPP_TEST_DB):
         os.remove(_WEBAPP_TEST_DB)
 

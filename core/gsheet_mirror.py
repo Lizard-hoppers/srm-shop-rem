@@ -40,7 +40,7 @@ BATCH = 200
 
 
 def row_key(repair) -> str:
-    if repair["ext_source"] == "gibrit" and repair["ext_id"]:
+    if (repair["ext_source"] or "").startswith("gibrit") and repair["ext_id"]:
         return str(repair["ext_id"])
     return str(repair["id"])
 

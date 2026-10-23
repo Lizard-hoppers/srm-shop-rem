@@ -29,6 +29,7 @@ from bot.part_add_flow import router as part_add_router
 from bot.repair_attachments import router as repair_attachments_router
 from bot.repairs_button import router as repairs_button_router
 from bot.sale_flow import router as sale_flow_router
+from bot.legacy_gibrit import router as legacy_gibrit_router
 from bot.simple_card import router as simple_card_router
 from bot.supplier_chat import router as supplier_chat_router
 from bot.transfer_flow import router as transfer_flow_router
@@ -122,6 +123,8 @@ def build_dispatcher() -> Dispatcher:
     # reply to the bot, not to a card — ahead of the note handler, which
     # would swallow it.
     dp.include_router(simple_card_router)
+    # Кнопки карточек старого бота Гибрида (тот же бот) — те же действия в CRM.
+    dp.include_router(legacy_gibrit_router)
     # «Бот, …» — a question to the bot itself (bot/assistant_chat.py): ahead
     # of the note handler, so it is answered even when sent as a reply.
     # «🔧 Ремонты», the button docked in the groups (bot/repairs_button.py).
