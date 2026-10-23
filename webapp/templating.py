@@ -31,6 +31,15 @@ def _money(value) -> str:
 
 templates.env.filters["money"] = _money
 
+
+def _rate(master) -> str:
+    from core.masters import rate_text
+
+    return rate_text(master["pay_type"], master["pay_value"])
+
+
+templates.env.filters["rate"] = _rate
+
 # Telegram's WebView caches static/* by ETag and can keep serving a stale
 # copy after a deploy; tying every static asset URL to this process's start
 # time forces a fresh fetch after every deploy+restart, whatever changed.

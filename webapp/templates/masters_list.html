@@ -12,7 +12,7 @@
       <h3 style="margin:0;">{{ m.name }}</h3>
       <p class="meta" style="margin:2px 0 0;">
         <span class="pill {{ 'pill-ready' if m.active else 'pill-cancelled' }}">{{ t('master_status_active') if m.active else t('master_status_inactive') }}</span>
-        {% if m.pay_type %} · {{ t('pay_type_' ~ m.pay_type) }}: {{ m.pay_value }}{% if m.pay_type == 'percent' %}%{% endif %}{% endif %}
+        {% if m.pay_type %} · {{ t('pay_type_' ~ m.pay_type) }}: {{ m | rate }}{% endif %}
       </p>
     </div>
     <div class="chevron">{{ icons.icon('chevron', 18) }}</div>
@@ -63,7 +63,7 @@
       <option value="fixed">{{ t('pay_type_fixed') }}</option>
     </select>
   </label>
-  <label>{{ t('pay_value_label') }}<input type="number" name="pay_value"></label>
+  <label>{{ t('pay_value_label') }}<input type="text" inputmode="decimal" name="pay_value" placeholder="{{ t('pay_value_placeholder') }}"></label>
   <button type="submit">{{ t('add_btn') }}</button>
 </form>
 {% endblock %}

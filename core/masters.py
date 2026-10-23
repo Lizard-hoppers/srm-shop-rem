@@ -18,6 +18,34 @@ from core.accounts import money
 from core.timefmt import KYIV, kyiv_date_range_utc, kyiv_today
 
 
+# «Ровно треть» (штатные Гибрида, 23.10): a percent rate of 100/3, kept as
+# is — (выдача − закупка) × 33.33…% rounds to exactly what ÷3 gave.
+THIRD = 100 / 3
+
+
+def parse_rate(value) -> float | None:
+    """A rate as typed on the master's form: «33», «33,5», «1/3», «треть»."""
+    text = str(value or "").strip().lower().replace(" ", "").replace(",", ".").rstrip("%")
+    if text in ("1/3", "треть", "⅓"):
+        return THIRD
+    try:
+        number = float(text)
+    except ValueError:
+        return None
+    return number if number >= 0 else None
+
+
+def rate_text(pay_type: str | None, pay_value) -> str:
+    """«⅓ (33,3%)», «40%», «150 грн» — how a rate reads on screen."""
+    if not pay_type or pay_value is None:
+        return "—"
+    if pay_type == "percent":
+        if abs(float(pay_value) - THIRD) < 1e-6:
+            return "⅓ (33,3%)"
+        return f"{money(pay_value)}%"
+    return f"{money(pay_value)} грн"
+
+
 def _day_bounds_utc() -> tuple[str, str]:
     today = kyiv_today()
     return kyiv_date_range_utc(today, today)
@@ -242,6 +270,68 @@ def pay_out(
         ref_id=payout_id, title=title, amount=total, key=key,
     )
     return payout_id
+
+
+def pay_out_without_cash(
+    conn: sqlite3.Connection, staff_id: int, amount, *, paid_by: int, location_id: int | None = None,
+    comment: str | None = None,
+) -> int:
+    """A payout that is not run through the касса — for a точка whose
+    касса isn't kept in the CRM yet (Гибрид, 23.10). What we owe him goes
+    down; no account moves."""
+    from core import locations as _locations
+
+    master = conn.execute("SELECT * FROM staff WHERE id = ? AND role = 'master'", (staff_id,)).fetchone()
+    if not master:
+        raise PayoutError("Мастер не найден.")
+    amount = money(amount or 0)
+    if amount <= 0:
+        raise PayoutError("Укажите сумму выплаты.")
+    note = " ".join(str(comment or "").split())
+    return conn.execute(
+        "INSERT INTO master_payouts (staff_id, amount, location_id, paid_by, comment) VALUES (?, ?, ?, ?, ?)",
+        (staff_id, amount, _locations.resolve(conn, location_id), paid_by, "без кассы" + (f" — {note}" if note else "")),
+    ).lastrowid
+
+
+def add_opening_balance(conn: sqlite3.Connection, staff_id: int, amount, *, by: int, comment: str | None = None) -> None:
+    """«Стартовый остаток» on the day a точка moves into the CRM: what we
+    already owed him (positive) or paid him ahead (negative) — the history
+    before it is not counted again."""
+    amount = money(amount or 0)
+    note = " ".join(str(comment or "").split()) or "стартовый остаток"
+    if amount > 0:
+        accrue(conn, staff_id, "opening", "opening", staff_id, amount, comment=note)
+    elif amount < 0:
+        pay_out_without_cash(conn, staff_id, -amount, paid_by=by, comment=note)
+
+
+def repair_lines(conn: sqlite3.Connection, master_id: int, utc_start: str | None = None, utc_end: str | None = None) -> list[dict]:
+    """Each repair the master handed over in the period, with the same
+    money as his accrual (core.repairs.finance): выдача, закупка, прибыль,
+    его выплата — the «Сводка» of Гибрид's old bot."""
+    from core import documents as _documents
+    from core import repairs as _repairs
+
+    where, params = "master_id = ? AND status = 'issued'", [master_id]
+    if utc_start is not None:
+        where += " AND issued_at >= ? AND issued_at < ?"
+        params += [utc_start, utc_end]
+    lines = []
+    for row in conn.execute(f"SELECT id FROM repair_orders WHERE {where} ORDER BY issued_at, id", params).fetchall():
+        repair = _repairs.get_repair(conn, row["id"])
+        numbers = _repairs.finance(conn, row["id"])
+        lines.append({
+            "id": row["id"], "label": _documents.label("repair", row["id"]),
+            "title": " ".join(filter(None, [repair["brand"], repair["model"], repair["defect_description"]])) or repair["device_type"],
+            "client": repair["client_name"], "issued_at": repair["issued_at"], "own": bool(repair["own_order"]),
+            "price": numbers["price"], "parts": numbers["parts_cost"], "profit": numbers["base"], "pay": numbers["master_share"],
+        })
+    return lines
+
+
+def lines_total(lines: list[dict]) -> dict:
+    return {key: money(sum(line[key] for line in lines)) for key in ("price", "parts", "profit", "pay")} | {"count": len(lines)}
 
 
 def cancel_payout(conn: sqlite3.Connection, payout_id: int) -> None:

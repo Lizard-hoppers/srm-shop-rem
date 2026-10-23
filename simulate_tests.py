@@ -9905,6 +9905,82 @@ def scenario_simple_flow() -> None:
               row["telegram_id"] == STRANGER_TG and row["role"] == "manager" and row["location_id"] == 1 and twice)
 
 
+def scenario_master_pay_gibrid() -> None:
+    """Зарплата мастеров Гибрида в CRM (23.10, этап 3): ставка «ровно треть»,
+    сводка по ремонтам за период = начисления, стартовый остаток, выплата
+    без кассы, страница мастера."""
+    print("scenario: зарплата мастеров Гибрида — треть, сводка, стартовый остаток, выплата без кассы")
+    from core import masters, simple_flow, store_settings
+    from webapp.routers import masters as masters_router
+
+    check("«1/3», «треть», «33,5», «40%» are read as rates; junk is not",
+          masters.parse_rate("1/3") == masters.THIRD and masters.parse_rate("треть") == masters.THIRD
+          and masters.parse_rate("33,5") == 33.5 and masters.parse_rate("40%") == 40 and masters.parse_rate("много") is None)
+    check("the form keeps a third as a third, a whole percent as a whole number",
+          masters_router._clean_pay("percent", "1/3") == ("percent", masters.THIRD) and masters_router._clean_pay("percent", "40") == ("percent", 40)
+          and masters_router._clean_pay("", "40") == (None, None))
+    check("a rate reads «⅓ (33,3%)», «40%», «150 грн»",
+          masters.rate_text("percent", masters.THIRD) == "⅓ (33,3%)" and masters.rate_text("percent", 40) == "40%" and masters.rate_text("fixed", 150) == "150 грн")
+
+    with tempfile.TemporaryDirectory() as tmp, _separate_base(tmp, "master-pay.sqlite3", ("Гибрид",)) as db_path:
+        with get_conn(db_path) as conn:
+            store_settings.set_point_mode(conn, True, False, None, location_id=1)
+            owner = auth.create_staff(conn, "mp-owner", "pass", "Павел", "owner")
+            alex = auth.create_master(conn, "Алексей", None, "percent", masters.THIRD, location_id=1)
+            oleg = auth.create_master(conn, "Олег Som", None, None, None, location_id=1, master_kind="outsource")
+            client = clients.get_or_create_by_phone(conn, "Анна", "0671119988", source="offline")
+            ids = []
+            for price, parts in ((2200, 0), (2500, 1200), (400, 0), (1000, 1000)):
+                order = repairs.create_repair(conn, client, "", None, "Redmi", None, "экран", "offline", alex, price, owner, location_id=1)
+                if parts:
+                    simple_flow.set_amount(conn, order, "parts", parts, owner)
+                simple_flow.move(conn, order, "done", owner, "тест")
+                ids.append(order)
+            outs = repairs.create_repair(conn, client, "", None, "Poco", None, "плата", "offline", oleg, 3000, owner, location_id=1)
+            simple_flow.move(conn, outs, "done", owner, "тест")
+            simple_flow.set_amount(conn, outs, "pay", 1200, owner)
+            lines = masters.repair_lines(conn, alex)
+            total = masters.lines_total(lines)
+            check("Алексей's thirds per repair: 733, 433, 133, 0 — exactly what ÷3 gave in the old bot",
+                  [line["pay"] for line in lines] == [733, 433, 133, 0])
+            check("the «Сводка» adds up and equals what he was accrued",
+                  total == {"price": 6100, "parts": 2200, "profit": 3900, "pay": 1299, "count": 4}
+                  and masters.accrued_total(conn, alex) == 1299)
+            check("an outsourcer's «Сводка» shows the pay typed in", [line["pay"] for line in masters.repair_lines(conn, oleg)] == [1200])
+
+            masters.add_opening_balance(conn, alex, 5000, by=owner, comment="долг на 23.10")
+            masters.add_opening_balance(conn, oleg, -300, by=owner)
+            check("a starting balance: +5000 we owed Алексей, −300 Олег was paid ahead",
+                  masters.owed(conn, alex) == 6299 and masters.owed(conn, oleg) == 900)
+            masters.pay_out_without_cash(conn, alex, 6000, paid_by=owner, location_id=1, comment="за октябрь")
+            check("a payout without the касса lowers the debt and moves no account",
+                  masters.owed(conn, alex) == 299
+                  and conn.execute("SELECT COUNT(*) AS n FROM cash_transactions WHERE category = 'master_payout'").fetchone()["n"] == 0
+                  and masters.list_payouts(conn, alex)[0]["comment"] == "без кассы — за октябрь")
+            try:
+                masters.pay_out_without_cash(conn, alex, 0, paid_by=owner)
+                check("a zero payout is refused", False)
+            except masters.PayoutError:
+                check("a zero payout is refused", True)
+
+        import webapp.main
+
+        token = make_token(owner, "1")
+        with TestClient(webapp.main.app) as client_http:
+            page = client_http.get(f"/masters/{alex}?t={token}")
+            edited = client_http.post(f"/masters/{oleg}/edit?t={token}", data={
+                "name": "Олег Som", "telegram_id": "", "pay_type": "percent", "pay_value": "1/3", "location_id": "1",
+                "master_kind": "outsource", "skills": "", "topic_id": "12", "personal_chat_id": "-1001234"}, follow_redirects=False)
+            opening = client_http.post(f"/masters/{oleg}/opening?t={token}", data={"amount": "abc"})
+        check("the master's page shows his rate as a third and the «Сводка» with the total",
+              page.status_code == 200 and "⅓ (33,3%)" in page.text and "Сводка по ремонтам" in page.text and "1299" in page.text)
+        with get_conn(db_path) as conn:
+            row = auth.get_master(conn, oleg)
+        check("the master form takes «1/3» and his topic / own group",
+              edited.status_code == 303 and abs(row["pay_value"] - masters.THIRD) < 1e-9 and row["topic_id"] == 12 and row["personal_chat_id"] == -1001234)
+        check("a starting balance that isn't a number is asked again", opening.status_code == 200 and "Введите сумму числом" in opening.text)
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         db_path = os.path.join(tmp, "test.sqlite3")
@@ -9975,6 +10051,7 @@ def main() -> None:
     scenario_gibrit_sync()
     scenario_point_bots()
     scenario_simple_flow()
+    scenario_master_pay_gibrid()
     if os.path.exists(_WEBAPP_TEST_DB):
         os.remove(_WEBAPP_TEST_DB)
 

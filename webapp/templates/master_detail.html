@@ -10,7 +10,7 @@
   <h3 style="margin:0;">{{ master.name }}</h3>
   <p class="meta" style="margin:4px 0 0;">
     <span class="pill {{ 'pill-ready' if master.active else 'pill-cancelled' }}">{{ t('master_status_active') if master.active else t('master_status_inactive') }}</span>
-    {% if master.pay_type %} · {{ t('pay_type_' ~ master.pay_type) }}: {{ master.pay_value }}{% if master.pay_type == 'percent' %}%{% endif %}
+    {% if master.pay_type %} · {{ t('pay_type_' ~ master.pay_type) }}: {{ master | rate }}
     {% else %} · {{ t('no_rate_hint') }}
     {% endif %}
   </p>
@@ -65,6 +65,21 @@
     <label>{{ t('comment_label') }}<input type="text" name="comment"></label>
     <button type="submit">{{ t('master_payout_btn') }}</button>
   </form>
+  <form method="post" action="{{ link('/masters/' ~ master.id ~ '/payout-nocash') }}" class="edit-form" style="margin-top: 12px;">
+    <p class="meta">{{ t('master_payout_nocash_hint') }}</p>
+    <label>{{ t('sales_col_amount') }}<input type="text" inputmode="decimal" name="amount"></label>
+    <label>{{ t('comment_label') }}<input type="text" name="comment"></label>
+    <button type="submit" class="secondary">{{ t('master_payout_nocash_btn') }}</button>
+  </form>
+</details>
+<details style="margin-bottom: 12px;">
+  <summary><b>{{ t('master_opening_title') }}</b></summary>
+  <form method="post" action="{{ link('/masters/' ~ master.id ~ '/opening') }}" class="edit-form">
+    <p class="meta">{{ t('master_opening_hint') }}</p>
+    <label>{{ t('sales_col_amount') }}<input type="text" inputmode="decimal" name="amount" placeholder="+5000 / −1200"></label>
+    <label>{{ t('comment_label') }}<input type="text" name="comment"></label>
+    <button type="submit" class="secondary">{{ t('master_opening_btn') }}</button>
+  </form>
 </details>
 {% if payouts %}
 <div class="table-scroll">
@@ -90,6 +105,32 @@
 </table>
 </div>
 {% endif %}
+
+<h2>{{ t('master_report_title') }}</h2>
+<form method="get" action="{{ link('/masters/' ~ master.id) }}" class="edit-form" style="margin-bottom: 12px;">
+  <input type="hidden" name="t" value="{{ token }}">
+  <label>{{ t('from_short_label') }}<input type="date" name="date_from" value="{{ report_from }}"></label>
+  <label>{{ t('to_short_label') }}<input type="date" name="date_to" value="{{ report_to }}"></label>
+  <button type="submit" class="secondary">{{ t('show_btn') }}</button>
+</form>
+<div class="table-scroll">
+<table class="table">
+  <thead><tr><th>{{ t('master_report_col_repair') }}</th><th>{{ t('master_report_col_client') }}</th><th>{{ t('master_report_col_price') }}</th><th>{{ t('master_report_col_parts') }}</th><th>{{ t('master_report_col_profit') }}</th><th>{{ t('master_report_col_pay') }}</th></tr></thead>
+  <tbody>
+    {% for l in report_lines %}
+    <tr onclick="location.href='{{ link('/repairs/' ~ l.id) }}'" class="clickable">
+      <td><b>{{ l.label }}</b>{% if l.own %} · 📦{% endif %}<div class="meta">{{ l.title }} · {{ l.issued_at | kyiv }}</div></td>
+      <td>{{ l.client }}</td><td>{{ l.price | money }}</td><td>{{ l.parts | money }}</td><td>{{ l.profit | money }}</td><td><b>{{ l.pay | money }}</b></td>
+    </tr>
+    {% else %}
+    <tr><td colspan="6">{{ t('master_report_empty') }}</td></tr>
+    {% endfor %}
+    {% if report_lines %}
+    <tr><td><b>{{ t('master_report_total') }}</b> · {{ report_total.count }}</td><td></td><td><b>{{ report_total.price | money }}</b></td><td><b>{{ report_total.parts | money }}</b></td><td><b>{{ report_total.profit | money }}</b></td><td><b>{{ report_total.pay | money }}</b></td></tr>
+    {% endif %}
+  </tbody>
+</table>
+</div>
 
 <h2>{{ t('master_data_title') }}</h2>
 <form method="post" action="{{ link('/masters/' ~ master.id ~ '/edit') }}" class="edit-form">
@@ -118,7 +159,7 @@
       <option value="fixed" {% if master.pay_type == 'fixed' %}selected{% endif %}>{{ t('pay_type_fixed') }}</option>
     </select>
   </label>
-  <label>{{ t('pay_value_label') }}<input type="number" name="pay_value" value="{{ master.pay_value if master.pay_value is not none else '' }}"></label>
+  <label>{{ t('pay_value_label') }}<input type="text" inputmode="decimal" name="pay_value" value="{{ ('1/3' if (master | rate).startswith('⅓') else master.pay_value) if master.pay_value is not none else '' }}" placeholder="{{ t('pay_value_placeholder') }}"></label>
   <button type="submit">{{ t('save_btn') }}</button>
 </form>
 

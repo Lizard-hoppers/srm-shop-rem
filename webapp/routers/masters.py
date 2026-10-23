@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from core.timefmt import kyiv_date_range_utc, kyiv_today
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import RedirectResponse
 
@@ -19,16 +20,17 @@ router = APIRouter(prefix="/masters")
 _MASTERS_ROLES = ("owner", "admin")
 
 
-def _clean_pay(pay_type: str, pay_value: str) -> tuple[str | None, int | None]:
+def _clean_pay(pay_type: str, pay_value: str) -> tuple[str | None, float | None]:
     """A rate only means something paired with a value — an empty/unknown
     pay_type or a blank value leaves the master with no rate configured
-    (payout computes to 0) rather than half-saving one side of it."""
+    (payout computes to 0) rather than half-saving one side of it. «1/3» /
+    «треть» is exactly a third (core.masters.parse_rate)."""
     if pay_type not in core_auth.PAY_TYPES:
         return None, None
-    value = optional_int(pay_value)
+    value = core_masters.parse_rate(pay_value)
     if value is None:
         return None, None
-    return pay_type, value
+    return pay_type, (int(value) if value == int(value) else value)
 
 
 def _list_context(conn) -> dict:
@@ -87,9 +89,26 @@ def detail_view(request: Request, master_id: int, staff=Depends(require_role(*_M
     )
 
 
+def _report_context(conn, request: Request, master_id: int) -> dict:
+    """«Сводка за период»: each repair he handed over, as in Гибрид's old
+    bot. This month by default."""
+    today = kyiv_today()
+    date_from = request.query_params.get("date_from") or today[:8] + "01"
+    date_to = request.query_params.get("date_to") or today
+    try:
+        start, end = kyiv_date_range_utc(date_from, date_to)
+    except ValueError:
+        date_from, date_to = today[:8] + "01", today
+        start, end = kyiv_date_range_utc(date_from, date_to)
+    lines = core_masters.repair_lines(conn, master_id, start, end)
+    return {"report_lines": lines, "report_total": core_masters.lines_total(lines),
+            "report_from": date_from, "report_to": date_to}
+
+
 def _money_context(conn, request: Request, master_id: int) -> dict:
-    """«Начислено − выплачено = мы должны» and the two lists behind it."""
-    return {
+    """«Начислено − выплачено = мы должны» and the two lists behind it —
+    plus the period's «Сводка»."""
+    return _report_context(conn, request, master_id) | {
         "accrued": core_masters.accrued_total(conn, master_id),
         "paid": core_masters.paid_total(conn, master_id),
         "owed": core_masters.owed(conn, master_id),
@@ -121,6 +140,47 @@ async def payout_view(request: Request, master_id: int, staff=Depends(require_ro
                 summary=core_masters.master_summary(conn, master), locations=core_locations.list_locations(conn),
                 master_kinds=core_auth.MASTER_KINDS, error=str(exc), **_money_context(conn, request, master_id),
             )
+    return RedirectResponse(link(request, f"/masters/{master_id}"), status_code=303)
+
+
+async def _back_with_error(request: Request, staff, master_id: int, error: str):
+    with get_conn() as conn:
+        master = core_auth.get_master(conn, master_id)
+        if not master:
+            return RedirectResponse(link(request, "/masters"), status_code=303)
+        return render(
+            request, "master_detail.html", staff=staff, master=master,
+            summary=core_masters.master_summary(conn, master), locations=core_locations.list_locations(conn),
+            master_kinds=core_auth.MASTER_KINDS, error=error, **_money_context(conn, request, master_id),
+        )
+
+
+@router.post("/{master_id}/payout-nocash")
+async def payout_nocash_view(request: Request, master_id: int, staff=Depends(require_role(*_MASTERS_ROLES))):
+    """«Выплата без кассы» — for a точка whose касса isn't kept here yet."""
+    form = await request.form()
+    try:
+        with get_conn() as conn:
+            core_masters.pay_out_without_cash(
+                conn, master_id, core_accounts.parse_amount(form.get("amount")) or 0, paid_by=staff["id"],
+                location_id=loc(request), comment=form.get("comment"),
+            )
+    except core_masters.PayoutError as exc:
+        return await _back_with_error(request, staff, master_id, str(exc))
+    return RedirectResponse(link(request, f"/masters/{master_id}"), status_code=303)
+
+
+@router.post("/{master_id}/opening")
+async def opening_view(request: Request, master_id: int, staff=Depends(require_role(*_MASTERS_ROLES))):
+    """«Стартовый остаток»: + мы должны, − переплатили."""
+    form = await request.form()
+    raw = str(form.get("amount") or "").strip().replace(" ", "").replace(",", ".")
+    try:
+        amount = float(raw)
+    except ValueError:
+        return await _back_with_error(request, staff, master_id, "Введите сумму числом: плюс — мы должны, минус — переплатили.")
+    with get_conn() as conn:
+        core_masters.add_opening_balance(conn, master_id, amount, by=staff["id"], comment=form.get("comment"))
     return RedirectResponse(link(request, f"/masters/{master_id}"), status_code=303)
 
 
