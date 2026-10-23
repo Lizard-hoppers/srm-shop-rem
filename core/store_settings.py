@@ -89,6 +89,18 @@ def set_point_mode(
     )
 
 
+def set_gsheet(conn: sqlite3.Connection, sheet: str | None, location_id: int | None = None) -> None:
+    """The точка's Google-таблица (core.gsheet_mirror): its key, or the
+    whole link — the key is taken out of it. Blank switches the copy off."""
+    value = str(sheet or "").strip()
+    if "/d/" in value:
+        value = value.split("/d/", 1)[1].split("/", 1)[0]
+    conn.execute(
+        "UPDATE locations SET gsheet_id = ?, updated_at = datetime('now') WHERE id = ?",
+        (value or None, _locations.resolve(conn, location_id)),
+    )
+
+
 def set_buyback_topic(conn: sqlite3.Connection, topic_id: str | int | None, location_id: int | None = None) -> None:
     """The forum topic of the точка's staff group that покупки are posted
     to (the number from a t.me/c/<group>/<topic> link). Blank or anything

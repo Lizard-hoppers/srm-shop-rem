@@ -21,6 +21,8 @@
   <p class="meta">{{ t('store_settings_shift_required_hint') }}</p>
   <label>{{ t('store_settings_label_chat') }}<input type="text" inputmode="numeric" name="label_chat_id" value="{{ settings.label_chat_id or '' }}"></label>
   <p class="meta">{{ t('store_settings_label_chat_hint') }}</p>
+  <label>{{ t('store_settings_gsheet') }}<input type="text" name="gsheet_id" value="{{ settings.gsheet_id or '' }}"></label>
+  <p class="meta">{{ t('store_settings_gsheet_hint') }}</p>
   <button type="submit">{{ t('store_settings_save') }}</button>
 </form>
 {% endblock %}

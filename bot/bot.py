@@ -34,6 +34,7 @@ from bot.supplier_chat import router as supplier_chat_router
 from bot.transfer_flow import router as transfer_flow_router
 from core import assistant as core_assistant
 from core import bots as core_bots
+from core import gsheet_mirror
 from core import tg_journal
 from core.storage import get_conn
 from core.storage import init_db
@@ -168,6 +169,20 @@ async def _reminder_loop(bots: list[Bot]) -> None:
         await asyncio.sleep(_REMINDER_TICK_SECONDS)
 
 
+_GSHEET_TICK_SECONDS = 20
+
+
+async def _gsheet_loop() -> None:
+    """Копия ремонтов в Google-таблицу (core.gsheet_mirror) — in the
+    background, so nobody waits for Google."""
+    while True:
+        try:
+            await asyncio.to_thread(gsheet_mirror.run_once)
+        except Exception:
+            logging.getLogger(__name__).exception("google sheet copy failed")
+        await asyncio.sleep(_GSHEET_TICK_SECONDS)
+
+
 async def _assistant_loop() -> None:
     while True:
         try:
@@ -193,11 +208,13 @@ async def main() -> None:
     # garbage-collected mid-flight.
     assistant_task = asyncio.create_task(_assistant_loop())
     reminder_task = asyncio.create_task(_reminder_loop(bots))
+    gsheet_task = asyncio.create_task(_gsheet_loop())
     try:
         await dp.start_polling(*bots)
     finally:
         assistant_task.cancel()
         reminder_task.cancel()
+        gsheet_task.cancel()
 
 
 async def _set_up(bot: Bot) -> None:

@@ -197,6 +197,14 @@ CREATE TABLE IF NOT EXISTS reminders (
 );
 CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(status, due_at);
 
+-- Очередь копии в Google-таблицу (23.10, core.gsheet_mirror): ремонт,
+-- который надо переписать в лист; ставят триггеры ниже (init_db).
+CREATE TABLE IF NOT EXISTS gsheet_queue (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    repair_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- Журнал Telegram (23.10, core.tg_journal): кто пишет каждому боту CRM.
 CREATE TABLE IF NOT EXISTS tg_users (
     bot_id INTEGER NOT NULL,
@@ -1134,6 +1142,16 @@ def init_db(db_path: str = DB_PATH) -> None:
         _ensure_column(conn, "staff", "personal_chat_id", "personal_chat_id INTEGER")
         # «📦 Наш» — ремонт устройства самой точки (выплата мастеру вручную).
         _ensure_column(conn, "repair_orders", "own_order", "own_order INTEGER NOT NULL DEFAULT 0")
+        # Копия в Google-таблицу (core.gsheet_mirror): ключ таблицы точки;
+        # любое изменение ремонта такой точки встаёт в очередь — триггером,
+        # чтобы не потерять ни один путь записи.
+        _ensure_column(conn, "locations", "gsheet_id", "gsheet_id TEXT")
+        for event in ("INSERT", "UPDATE"):
+            conn.execute(
+                f"""CREATE TRIGGER IF NOT EXISTS gsheet_repair_{event.lower()} AFTER {event} ON repair_orders
+                    WHEN (SELECT COALESCE(gsheet_id, '') FROM locations WHERE id = NEW.location_id) != ''
+                    BEGIN INSERT INTO gsheet_queue (repair_id) VALUES (NEW.id); END"""
+            )
         # Заход 5: a master is штатный or аутсорс and has skills on record;
         # a client repair remembers that its master said «без запчасти».
         _ensure_column(conn, "staff", "master_kind", "master_kind TEXT NOT NULL DEFAULT 'staff'")

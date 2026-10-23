@@ -9,3 +9,4 @@ qrcode==7.4.2
 pillow==10.2.0
 python-barcode==0.16.1
 pyzbar==0.1.9  # needs system libzbar0 (apt-get install libzbar0)
+gspread==6.2.1  # копия ремонтов в Google-таблицу (core.gsheet_mirror)

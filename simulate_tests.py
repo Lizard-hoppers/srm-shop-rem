@@ -9981,6 +9981,114 @@ def scenario_master_pay_gibrid() -> None:
         check("a starting balance that isn't a number is asked again", opening.status_code == 200 and "Введите сумму числом" in opening.text)
 
 
+def scenario_gsheet_mirror() -> None:
+    """Копия ремонтов в Google-таблицу (23.10, этап 4 переноса Гибрида):
+    очередь триггером, строка в раскладке старого бота, существующая строка
+    по card_id, формула трети в K, нули у «Возврата», сбой Google не теряет
+    копию."""
+    print("scenario: копия ремонтов в Google-таблицу — как в старом боте Гибрида")
+    from core import gsheet_mirror, masters, simple_flow, store_settings
+
+    class _Sheet:
+        def __init__(self, rows):
+            self.rows = [list(r) for r in rows]
+            self.row_count = 50
+            self.writes = []
+            self.reads = 0
+
+        def get(self, rng):
+            self.reads += 1
+            return [r[:9] for r in self.rows]
+
+        def cell(self, ref):
+            col, row = ref[0], int(ref[1:])
+            r = self.rows[row - 1] if row <= len(self.rows) else []
+            idx = "ABCDEFGHIJKLMNO".index(col)
+            return r[idx] if idx < len(r) else ""
+
+        def batch_update(self, data, value_input_option):
+            for item in data:
+                col, row = item["range"][0], int(item["range"][1:])
+                while len(self.rows) < row:
+                    self.rows.append([""] * 15)
+                r = self.rows[row - 1]
+                while len(r) < 15:
+                    r.append("")
+                r["ABCDEFGHIJKLMNO".index(col)] = item["values"][0][0]
+                self.writes.append((item["range"], item["values"][0][0], value_input_option))
+
+        def add_rows(self, n):
+            self.row_count += n
+
+    header = [" Дата", "Имя клиента", "Номер телефона", "Название заказа", "Цена для клиента", "Цена запчасти", "card_id", "status",
+              "Поставщик", "Чистая прибыль", "Выплата мастеру", "Мастер", "Тип Мастера", "Комментарий", "card id_brend"]
+    old_row = ["22.10.2026", "Бродяги", "Бродяги", "Zte Frp", "400", "0", "124808", "Готов", "Розетка", "=J", "=K", "Алексей", "Штат 33%", "", ""]
+    blank = ["", "", "", "", "", "", "", "", "", '=IF(M4="Аутсорс"; E4-F4-K4; E4-F4)', '=IF(M4="Штат 33%"; J4/3; FALSE)', "", "", "", ""]
+    sheet = _Sheet([header, old_row, ["", "", "", "", "", "", "", "", ""], blank])
+
+    with tempfile.TemporaryDirectory() as tmp, _separate_base(tmp, "gsheet.sqlite3", ("Гибрид", "007")) as db_path:
+        with get_conn(db_path) as conn:
+            store_settings.set_point_mode(conn, True, False, None, location_id=1)
+            owner = auth.create_staff(conn, "gs-owner", "pass", "Павел", "owner")
+            alex = auth.create_master(conn, "Алексей", None, "percent", masters.THIRD, location_id=1)
+            oleg = auth.create_master(conn, "Олег Som", None, None, None, location_id=1, master_kind="outsource")
+            client = clients.get_or_create_by_phone(conn, "Анна", "0671115544", source="offline")
+            before = repairs.create_repair(conn, client, "", None, "Redmi", None, "экран", "offline", alex, 900, owner, location_id=1)
+            check("no sheet set — nothing is queued (the old bot still owns the sheet until the switch)",
+                  conn.execute("SELECT COUNT(*) AS n FROM gsheet_queue").fetchone()["n"] == 0)
+            store_settings.set_gsheet(conn, "https://docs.google.com/spreadsheets/d/KEY123/edit#gid=0", location_id=1)
+            check("the key is taken out of a pasted link", conn.execute("SELECT gsheet_id FROM locations WHERE id = 1").fetchone()["gsheet_id"] == "KEY123")
+            new = repairs.create_repair(conn, client, "", None, "Redmi 9C", None, "экран", "offline", alex, 2200, owner, location_id=1)
+            conn.execute("UPDATE repair_orders SET intake_comment = 'На обед' WHERE id = ?", (new,))
+            out = repairs.create_repair(conn, client, "", None, "Poco X3", None, "плата", "offline", oleg, 3000, owner, location_id=1)
+            simple_flow.move(conn, out, "done", owner, "тест")
+            simple_flow.set_amount(conn, out, "pay", 1200, owner)
+            other = repairs.create_repair(conn, client, "", None, "iPhone", None, "АКБ", "offline", None, 1500, owner, location_id=2)
+            legacy = repairs.create_repair(conn, client, "", None, "Zte", None, "Frp", "offline", alex, 400, owner, location_id=1)
+            conn.execute("UPDATE repair_orders SET ext_source = 'gibrit', ext_id = '124808' WHERE id = ?", (legacy,))
+            queued = {r["repair_id"] for r in conn.execute("SELECT repair_id FROM gsheet_queue")}
+        check("every change of a repair of that точка is queued by the base itself; another точка's is not",
+              {new, out, legacy} <= queued and other not in queued and before not in queued)
+
+        opened = []
+        copied = gsheet_mirror.run_once(db_path, open_worksheet=lambda key: (opened.append(key), sheet)[1])
+        check("one pass copies them in one read of the sheet", copied == 3 and opened == ["KEY123"] and sheet.reads == 1)
+        with get_conn(db_path) as conn:
+            check("…and empties the queue", conn.execute("SELECT COUNT(*) AS n FROM gsheet_queue").fetchone()["n"] == 0)
+        row_new = next(i + 1 for i, r in enumerate(sheet.rows) if len(r) > 6 and r[6] == str(new))
+        row_out = next(i + 1 for i, r in enumerate(sheet.rows) if len(r) > 6 and r[6] == str(out))
+        check("a new repair takes the first empty row, in the old bot's layout",
+              row_new == 3 and sheet.rows[2][:8] == ["", "Анна", "+380671115544", "Redmi 9C экран", 2200, "", str(new), "новый"]
+              and sheet.rows[2][11:14] == ["Алексей", "Штат 33%", "На обед"])
+        check("a staff master's pay stays the sheet's own third-formula, written as entered",
+              ("K3", '=IF(M3="Штат 33%"; J3/3; FALSE)', "USER_ENTERED") in sheet.writes)
+        check("the J formula and «Поставщик» are left alone",
+              not any(w[0].startswith("J") for w in sheet.writes) and sheet.rows[1][8] == "Розетка")
+        check("«Готов» puts the day and the status; an outsourcer's pay is the sum typed in",
+              sheet.rows[row_out - 1][7] == "Готов" and len(sheet.rows[row_out - 1][0]) == 10 and sheet.rows[row_out - 1][10] == 1200
+              and sheet.rows[row_out - 1][12] == "Аутсорс")
+        check("a repair that came from the old bot updates its own existing row (found by its old card_id)",
+              sheet.rows[1][6] == "124808" and sheet.rows[1][7] == "новый" and len([r for r in sheet.rows if len(r) > 6 and r[6] == "124808"]) == 1)
+
+        with get_conn(db_path) as conn:
+            simple_flow.move(conn, new, "return", owner, "тест")
+        gsheet_mirror.run_once(db_path, open_worksheet=lambda key: sheet)
+        check("«Возврат» shows zeros, as the old bot did", sheet.rows[2][7] == "Возврат" and sheet.rows[2][4] == 0 and sheet.rows[2][5] == 0 and sheet.rows[2][10] == 0)
+
+        with get_conn(db_path) as conn:
+            simple_flow.move(conn, new, "change", owner, "тест")
+
+        def _down(key):
+            raise RuntimeError("Google не отвечает")
+
+        gsheet_mirror.run_once(db_path, open_worksheet=_down)
+        with get_conn(db_path) as conn:
+            kept = conn.execute("SELECT COUNT(*) AS n FROM gsheet_queue").fetchone()["n"]
+        check("Google down — nothing is lost, the copy waits in the queue", kept >= 1)
+        gsheet_mirror.run_once(db_path, open_worksheet=lambda key: sheet)
+        check("…and goes out on the next pass", sheet.rows[2][7] == "новый" and sheet.rows[2][0] == "")
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         db_path = os.path.join(tmp, "test.sqlite3")
@@ -10052,6 +10160,7 @@ def main() -> None:
     scenario_point_bots()
     scenario_simple_flow()
     scenario_master_pay_gibrid()
+    scenario_gsheet_mirror()
     if os.path.exists(_WEBAPP_TEST_DB):
         os.remove(_WEBAPP_TEST_DB)
 

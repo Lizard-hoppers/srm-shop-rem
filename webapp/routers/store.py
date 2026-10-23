@@ -39,6 +39,7 @@ def store_settings_save(
     simple_flow: str = Form(""),
     shift_required: str = Form(""),
     label_chat_id: str = Form(""),
+    gsheet_id: str = Form(""),
     staff=Depends(require_role("owner", "admin")),
 ):
     if not name.strip():
@@ -56,6 +57,7 @@ def store_settings_save(
         core_store_settings.set_point_mode(
             conn, simple_flow == "1", shift_required == "1", label_chat_id, location_id=loc(request),
         )
+        core_store_settings.set_gsheet(conn, gsheet_id, location_id=loc(request))
         settings = core_store_settings.get_settings(conn, loc(request))
     return render(request, "store_settings.html", staff=staff, settings=settings, success="Изменения сохранены.")
 
