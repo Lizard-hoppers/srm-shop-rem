@@ -928,6 +928,29 @@ def scenario_repair_card_notify(db_path: str) -> None:
     check("notify_staff_group's explicit staff_group_chat_id also overrides the module constant",
           len(store_a_calls) == 1 and store_a_calls[0]["chat_id"] == "-100storeA")
 
+    # A точка with only its own group (Гибрид: no topic, no masters group)
+    # must not borrow the env groups of the first точка — 24.10 its cards
+    # went to 007's masters group and 007's topic broke the post into «РМТ».
+    from core import repairs as _repairs_mod
+    from core.stores import StoreConfig as _SC
+    real_card = notify.notify_repair_card
+    notify._BOT_TOKEN = "test-token"
+    notify._STAFF_GROUP_CHAT_ID, notify._REPAIR_TOPIC_ID, notify._MASTERS_GROUP_CHAT_ID = "-999wrong", "5", "-999wrong-masters"
+    try:
+        httpx.post = _fake_post_store_a
+        store_a_calls.clear()
+        notify.notify_repair_card = lambda *a, **kw: (real_card(*a, **kw), [])[1]
+        _repairs_mod.notify_and_save(_SC(id="2", name="Гибрид", db_path=":memory:", staff_group_chat_id=-100222),
+                                     1, "карточка Гибрида", None, None)
+    finally:
+        notify.notify_repair_card = real_card
+        httpx.post = orig_post
+        notify._BOT_TOKEN, notify._STAFF_GROUP_CHAT_ID, notify._REPAIR_TOPIC_ID, notify._MASTERS_GROUP_CHAT_ID = orig_env
+    check("точка with its own group: the card goes only to that group",
+          [str(c["chat_id"]) for c in store_a_calls] == ["-100222"])
+    check("…into its General feed, not into another точка's topic number",
+          all("message_thread_id" not in c for c in store_a_calls))
+
 
 def scenario_repair_actions(db_path: str) -> None:
     print("scenario: claim / complete / cancel a repair (button actions)")

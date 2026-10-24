@@ -476,10 +476,17 @@ def notify_and_save(
     BackgroundTask this used to be inlined into (webapp.routers.repairs)
     — safe to call from a bot handler the same way, right after
     create_repair_intake."""
+    # A точка with its own group never borrows the env-configured groups of
+    # another one (24.10: Гибрид's cards went to 007's masters group, and
+    # 007's topic number made the post into «РМТ» fail). Unset topic -> the
+    # group's General feed, unset masters group -> none: "" is falsy but not
+    # None, so notify_repair_card doesn't fall back to the env constants.
+    own = store.staff_group_chat_id is not None
     sent = _notify.notify_repair_card(
         card_text, reply_markup=keyboard, photo=photo,
-        staff_group_chat_id=store.staff_group_chat_id, repair_topic_id=store.repair_topic_id,
-        masters_group_chat_id=store.masters_group_chat_id,
+        staff_group_chat_id=store.staff_group_chat_id,
+        repair_topic_id=(store.repair_topic_id or "") if own else store.repair_topic_id,
+        masters_group_chat_id=(store.masters_group_chat_id or "") if own else store.masters_group_chat_id,
     )
     if sent:
         with _get_conn(store.db_path) as conn:
