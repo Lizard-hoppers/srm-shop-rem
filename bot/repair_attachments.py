@@ -46,6 +46,7 @@ from core import accounts as core_accounts
 from core import ai_notes
 from core import auth as core_auth
 from core import cash as core_cash
+from core import clients as core_clients
 from core import documents as core_documents
 from core import photos as core_photos
 from core import repair_edit
@@ -280,8 +281,103 @@ async def _save_note(message: Message, store, order_id: int, kind: str, original
     _sync_after_change(order_id, store.db_path)
     # A price named in the same breath as «выдан» is what was paid, not a
     # change to argue about — only an open repair is asked about its price.
-    hints = [moved, None if read["status"] in ("issued", "cancelled") else _price_hint(order_id, current, price, read["price"])]
+    edit = _edit_hint(order_id, repair, original, message.message_id) if not only_status else None
+    hints = [moved, edit or (None if read["status"] in ("issued", "cancelled") else _price_hint(order_id, current, price, read["price"]))]
     return read["summary"] or original, [hint for hint in hints if hint]
+
+
+# 25.10 (Павел): ответ на карточку, который только называет её поле —
+# «0501234567», «пароль 1234», «модель iPhone 13», — без «бот» и без
+# «смени»: заметка записывается как обычно, а бот спрашивает, внести ли
+# это в карточку. Неисправность и комментарий так не предлагаются — мастера
+# пишут «проблема в шлейфе» как заметку, а не как правку.
+_PHONE_ONLY = re.compile(r"^\s*[+\d][\d\s()\-]{8,18}\s*$")
+_OFFERED = ("phone", "name", "model", "password", "master")
+
+
+def suggested_edit(repair, text: str | None) -> tuple[str, str] | None:
+    said = repair_edit.parse(text)
+    if said is None and _PHONE_ONLY.match(text or "") and core_clients.normalize_phone(text):
+        said = ("phone", text.strip())
+    if not said or said[0] not in _OFFERED:
+        return None
+    field, value = said
+    if field in ("phone", "name") and repair["own_order"]:
+        return None
+    if field == "phone" and core_clients.normalize_phone(value) == repair["client_phone"]:
+        return None
+    return said
+
+
+def _edit_hint(order_id: int, repair, text: str, message_id: int) -> tuple[str, InlineKeyboardMarkup] | None:
+    said = suggested_edit(repair, text)
+    if not said:
+        return None
+    field, value = said
+    shown = core_clients.normalize_phone(value) if field == "phone" else value
+    label = core_documents.label("repair", order_id)
+    return (f"🤖 {label}: внести в карточку — {repair_edit.FIELD_LABELS[field]} <b>{html.escape(shown)}</b>?",
+            InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="✅ Да, внести", callback_data=f"redit:{order_id}:{message_id}"),
+                InlineKeyboardButton(text="Нет", callback_data=f"redit_no:{order_id}"),
+            ]]))
+
+
+def _undo_data(field: str, order_id: int, done: dict, old_master) -> str:
+    return f"aundo:master:{order_id}:{old_master or 0}" if field == "master" else f"aundo:edit:{order_id}:{done['id']}"
+
+
+@router.callback_query(F.data.startswith("redit:"))
+async def edit_confirm(callback: CallbackQuery) -> None:
+    """«Да, внести»: what the reply said goes on the card; the note it made
+    comes off (it is the card now). Only CRM staff may press."""
+    store = store_for_chat_id(callback.message.chat.id)
+    if not store:
+        await callback.answer("Эта группа не привязана ни к одному магазину.", show_alert=True)
+        return
+    _prefix, raw_order, raw_message = callback.data.split(":")
+    order_id, chat_id = int(raw_order), str(callback.message.chat.id)
+    with get_conn(store.db_path) as conn:
+        staff = core_auth.get_staff_by_telegram_id(conn, callback.from_user.id)
+        repair = core_repairs.get_repair(conn, order_id)
+        note = conn.execute(
+            "SELECT original_text FROM repair_notes WHERE order_id = ? AND chat_id = ? AND message_id = ? ORDER BY id LIMIT 1",
+            (order_id, chat_id, int(raw_message)),
+        ).fetchone()
+    if not staff:
+        await callback.answer("Внести в карточку может сотрудник, подключённый к CRM.", show_alert=True)
+        return
+    said = suggested_edit(repair, note["original_text"]) if repair and note else None
+    if not said:
+        await callback.answer("Уже не актуально.")
+        await callback.message.edit_reply_markup(reply_markup=None)
+        return
+    field, value = said
+    try:
+        with get_conn(store.db_path) as conn:
+            done = repair_edit.apply(conn, order_id, field, value, staff["id"])
+            core_notes.remove_by_message(conn, chat_id, int(raw_message))
+    except repair_edit.EditError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    if field == "master":
+        after_master_change(store, order_id)
+    else:
+        _sync_after_change(order_id, store.db_path)
+    await callback.message.edit_text(done["text"], reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="↩️ Вернуть", callback_data=_undo_data(field, order_id, done, repair["master_id"])),
+    ]]))
+    await callback.answer("Внесено")
+
+
+@router.callback_query(F.data.startswith("redit_no:"))
+async def edit_decline(callback: CallbackQuery) -> None:
+    """«Нет»: the question goes away, the note stays a note."""
+    try:
+        await callback.message.delete()
+    except TelegramAPIError:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.answer("Не вношу")
 
 
 @router.callback_query(F.data.startswith("rprice:"))
@@ -444,10 +540,9 @@ async def _edit_field(message: Message, store, order_id: int, staff, field: str,
         return
     if field == "master":
         after_master_change(store, order_id)
-        undo = f"aundo:master:{order_id}:{old_master or 0}"
     else:
         _sync_after_change(order_id, store.db_path)
-        undo = f"aundo:edit:{order_id}:{done['id']}"
+    undo = _undo_data(field, order_id, done, old_master)
     await message.reply(done["text"], reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="↩️ Вернуть", callback_data=undo),
     ]]))

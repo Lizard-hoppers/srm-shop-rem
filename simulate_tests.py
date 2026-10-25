@@ -9970,6 +9970,7 @@ def scenario_card_edit_by_words() -> None:
 
     from bot import repair_attachments as rat
     from core import agent_actions, notify, repair_edit, simple_flow, store_settings
+    from core import repair_notes as notes
     from core.stores import get_store
 
     P = repair_edit.parse
@@ -10113,6 +10114,58 @@ def scenario_card_edit_by_words() -> None:
                 line = agent_actions.undo(conn, ("edit", str(order), edit_id), staff)
                 name = repairs.get_repair(conn, order)["client_name"]
             check("«Вернуть» under the name edit puts the old name back", name == "Анна" and "как было" in line)
+
+            # ---- без «бот»: ответ, который только называет поле, — вопрос «внести?»
+            with get_conn(db_path) as conn:
+                row = repairs.get_repair(conn, order)
+            check("a bare phone number, «пароль 1234», «модель …» in reply to a card are offered for the card",
+                  rat.suggested_edit(row, "050 777 66 55") == ("phone", "050 777 66 55")
+                  and rat.suggested_edit(row, "пароль 1234") == ("password", "1234")
+                  and rat.suggested_edit(row, "модель iPhone 14") == ("model", "iPhone 14"))
+            check("…but not ordinary notes, a defect said in passing, or the number the card already has",
+                  rat.suggested_edit(row, "заказал шлейф, будет завтра") is None
+                  and rat.suggested_edit(row, "проблема в шлейфе") is None
+                  and rat.suggested_edit(row, "0671112233") is None and rat.suggested_edit(row, "1500") is None)
+            hint = rat._edit_hint(order, row, "050 777 66 55", 4242)
+            check("the question names the field and the value, with «Да» and «Нет»",
+                  hint is not None and "номер <b>+380507776655</b>" in hint[0]
+                  and [b.callback_data for b in hint[1].inline_keyboard[0]] == [f"redit:{order}:4242", f"redit_no:{order}"])
+
+            class _QMsg:
+                chat = SimpleNamespace(id=GROUP, type="supergroup")
+
+                def __init__(self):
+                    self.edited = None
+
+                async def edit_text(self, text, reply_markup=None):
+                    self.edited = (text, reply_markup)
+
+                async def edit_reply_markup(self, reply_markup=None):
+                    self.edited = ("", reply_markup)
+
+            class _Tap:
+                def __init__(self, data, user_id):
+                    self.data, self.message, self.answers = data, _QMsg(), []
+                    self.from_user = SimpleNamespace(id=user_id)
+
+                async def answer(self, text=None, show_alert=False):
+                    self.answers.append((text, show_alert))
+
+            with get_conn(db_path) as conn:
+                auth.link_staff_telegram(conn, "ed-mgr", 558001)
+                notes.add_note(conn, order, "text", "050 777 66 55", "050 777 66 55", chat_id=str(GROUP), message_id=4242)
+            stranger = _Tap(f"redit:{order}:4242", 999001)
+            asyncio.run(rat.edit_confirm(stranger))
+            with get_conn(db_path) as conn:
+                untouched = repairs.get_repair(conn, order)["client_phone"] == "+380671112233"
+            check("«Да» from someone not in the CRM changes nothing", untouched and stranger.answers[0][1])
+            yes = _Tap(f"redit:{order}:4242", 558001)
+            asyncio.run(rat.edit_confirm(yes))
+            with get_conn(db_path) as conn:
+                phone = repairs.get_repair(conn, order)["client_phone"]
+                hidden = conn.execute("SELECT hidden FROM repair_notes WHERE message_id = 4242").fetchone()["hidden"]
+            check("«Да, внести»: the number is on the card, the note it made is off it, «Вернуть» in place of the question",
+                  phone == "+380507776655" and hidden and yes.message.edited and "aundo:edit:" in str(yes.message.edited[1]))
         finally:
             rat._sync_after_change, rat.after_master_change = orig_sync, orig_move
 
