@@ -46,6 +46,7 @@ DOC_TYPES: dict[str, tuple[str, str]] = {
     "cash_in": ("ПКО", "Приём денег"),
     "supplier_invoice": ("СЧ", "Счёт поставщика"),
     "supplier_payment": ("ОП", "Оплата поставщику"),
+    "service": ("УС", "Услуга"),
 }
 
 # Types whose number IS the id of the row they wrap (repair №44 has always
@@ -53,7 +54,7 @@ DOC_TYPES: dict[str, tuple[str, str]] = {
 # РК-44, not a second, different number). The rest count up on their own.
 _NUMBER_FROM_REF = {
     "repair", "sale", "buyback", "receipt", "supplier_return", "exchange", "money_transfer", "shift", "production",
-    "client_order", "supplier_invoice", "supplier_payment",
+    "client_order", "supplier_invoice", "supplier_payment", "service",
 }
 
 # Where «открыть документ» leads, by type. {id} is ref_id.
@@ -64,6 +65,7 @@ _SOURCE_PATHS = {
     "receipt": "/purchases/{id}",
     "production": "/production/{id}",
     "client_order": "/orders/{id}",
+    "service": "/services",
 }
 
 

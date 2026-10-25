@@ -205,6 +205,32 @@ CREATE TABLE IF NOT EXISTS gsheet_queue (
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Услуги (25.10, core.services): справочник точки — бот предлагает их
+-- кнопками быстрого выбора — и проданные услуги (документ «УС»).
+CREATE TABLE IF NOT EXISTS services (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    location_id INTEGER NOT NULL REFERENCES locations(id),
+    name TEXT NOT NULL,
+    price REAL,
+    uses INTEGER NOT NULL DEFAULT 0,
+    last_used_at TEXT,
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_services_location ON services(location_id);
+CREATE TABLE IF NOT EXISTS service_sales (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    location_id INTEGER NOT NULL REFERENCES locations(id),
+    service_id INTEGER REFERENCES services(id),
+    name TEXT NOT NULL,
+    amount REAL NOT NULL,
+    account_id INTEGER REFERENCES money_accounts(id),
+    staff_id INTEGER,
+    comment TEXT,
+    status TEXT NOT NULL DEFAULT 'posted',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- Правки карточки ремонта словами (25.10, core.repair_edit): что было и
 -- что стало — по этой записи работает «↩️ Вернуть».
 CREATE TABLE IF NOT EXISTS repair_edits (

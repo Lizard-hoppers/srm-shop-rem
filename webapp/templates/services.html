@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+{% block title %}{{ t('services_title') }}{% endblock %}
+{% block content %}
+{% set sales_tab = 'services' %}{% include "_sales_tabs.html" %}
+
+<h2>{{ t('services_new') }}</h2>
+<form method="post" action="{{ link('/services') }}" class="edit-form" id="serviceForm">
+  <input type="hidden" name="idem" value="{{ idem }}">
+  <datalist id="serviceList">{% for s in catalog %}<option value="{{ s.name }}"></option>{% endfor %}</datalist>
+  <label>{{ t('services_name') }}
+    <input type="text" name="name" id="serviceName" list="serviceList" required autocomplete="off">
+  </label>
+  <label>{{ t('services_amount') }}
+    <input type="text" name="amount" id="serviceAmount" inputmode="decimal" required>
+  </label>
+  <label>{{ t('services_account') }}
+    <select name="account_id">{% for a in accounts %}<option value="{{ a.id }}">{{ a.name }}</option>{% endfor %}</select>
+  </label>
+  <button type="submit">{{ t('services_sell') }}</button>
+</form>
+<script>
+  // A remembered service brings its last price, unless a sum is already typed.
+  (function () {
+    var prices = {};
+    {% for s in catalog %}{% if s.price %}prices[{{ s.name | lower | tojson }}] = {{ s.price | tojson }};{% endif %}{% endfor %}
+    var name = document.getElementById('serviceName'), amount = document.getElementById('serviceAmount');
+    name.addEventListener('change', function () {
+      var price = prices[name.value.trim().toLowerCase()];
+      if (price && !amount.value) amount.value = price;
+    });
+  })();
+</script>
+
+<h2>{{ t('services_recent') }}</h2>
+<div class="table-scroll">
+<table class="table">
+  <thead><tr><th>{{ t('services_col_doc') }}</th><th>{{ t('services_col_service') }}</th><th>{{ t('services_amount') }}</th><th>{{ t('services_account') }}</th><th>{{ t('services_col_staff') }}</th><th>{{ t('col_date') }}</th></tr></thead>
+  <tbody>
+    {% for s in sales %}
+    <tr>
+      <td>{{ labels[s.id] }}{% if s.status == 'cancelled' %} <span class="pill pill-cancelled">{{ t('doc_cancelled') }}</span>{% endif %}</td>
+      <td>{{ s.name }}</td>
+      <td>{{ s.amount | money }}</td>
+      <td>{{ s.account_name or '—' }}</td>
+      <td>{{ s.staff_name or '—' }}</td>
+      <td>{{ s.created_at | kyiv }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="6">{{ t('services_empty') }}</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+
+<h2>{{ t('services_catalog') }}</h2>
+<p class="meta">{{ t('services_catalog_hint') }}</p>
+<div class="table-scroll">
+<table class="table">
+  <thead><tr><th>{{ t('services_col_service') }}</th><th>{{ t('services_price') }}</th><th>{{ t('services_uses') }}</th>{% if can_edit %}<th></th>{% endif %}</tr></thead>
+  <tbody>
+    {% for s in catalog %}
+    <tr>
+      {% if can_edit %}
+      <td colspan="2">
+        <form method="post" action="{{ link('/services/' ~ s.id ~ '/edit') }}" class="edit-form" style="margin:0; display:flex; gap:6px; flex-wrap:wrap;">
+          <input type="text" name="name" value="{{ s.name }}" style="flex:2; min-width:140px;">
+          <input type="text" name="price" value="{{ s.price if s.price is not none else '' }}" inputmode="decimal" style="flex:1; min-width:70px;">
+          <button type="submit" class="secondary">{{ t('services_save') }}</button>
+        </form>
+      </td>
+      <td>{{ s.uses }}</td>
+      <td>
+        <form method="post" action="{{ link('/services/' ~ s.id ~ '/hide') }}" style="margin:0;">
+          <button type="submit" class="secondary">{{ t('services_hide') }}</button>
+        </form>
+      </td>
+      {% else %}
+      <td>{{ s.name }}</td><td>{{ s.price | money if s.price is not none else '—' }}</td><td>{{ s.uses }}</td>
+      {% endif %}
+    </tr>
+    {% else %}
+    <tr><td colspan="{{ 4 if can_edit else 3 }}">{{ t('services_catalog_empty') }}</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}

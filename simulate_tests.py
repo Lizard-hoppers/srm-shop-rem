@@ -10223,6 +10223,134 @@ def scenario_repair_roadmap() -> None:
                   "🗺 🏪 Гибрид" in text and "📦 Выдан:" not in text)
 
 
+def scenario_services() -> None:
+    """Продажа услуг (25.10): справочник с быстрым выбором, документ «УС»,
+    деньги на счёт, прибыль, отмена; страница «Услуги»; «🧾 Услуга» в боте
+    вместо «👤 Клиент» — через настоящий диспетчер."""
+    print("scenario: продажа услуг — бот, Mini App, справочник")
+    import asyncio
+    import datetime as dt
+
+    from aiogram import Bot
+    from aiogram.types import CallbackQuery, Chat, Message, Update, User
+
+    from bot import quick_actions as qa
+    from core import accounts, doc_cancel, documents, overview, services, store_settings
+
+    TG = 561001
+    with tempfile.TemporaryDirectory() as tmp, _separate_base(tmp, "services.sqlite3", ("Гибрид",)) as db_path:
+        with get_conn(db_path) as conn:
+            store_settings.set_point_mode(conn, True, False, "", location_id=1)
+            boss = auth.create_staff(conn, "sv-owner", "pass", "Павел", "owner")
+            auth.link_staff_telegram(conn, "sv-owner", TG)
+            accounts.ensure_for_location(conn, 1)
+            uah = [a for a in accounts.list_accounts(conn, 1) if a["currency"] == "UAH"]
+            cash = accounts.default_account(conn, 1, "cash")
+            before = accounts.balance(conn, cash["id"])
+            first = services.sell(conn, 1, "  Наклейка   плёнки ", 300, cash["id"], boss)
+            services.sell(conn, 1, "наклейка плёнки", 350, cash["id"], boss)
+            services.sell(conn, 1, "Чистка динамика", 200, cash["id"], boss)
+            quick = services.quick_list(conn, 1)
+            doc = documents.get_for(conn, "service", first)
+            check("a service sale is a document «УС», the money is on the account",
+                  doc is not None and documents.doc_label(doc).startswith("УС-") and doc["amount"] == 300
+                  and accounts.balance(conn, cash["id"]) == before + 850)
+            check("the same service typed differently is one entry; the frequent first, with its last price",
+                  [s["name"] for s in quick] == ["Наклейка плёнки", "Чистка динамика"] and quick[0]["uses"] == 2 and quick[0]["price"] == 350)
+            start, end = "2000-01-01 00:00:00", "2100-01-01 00:00:00"
+            numbers = overview.profit(conn, start, end, 1)
+            check("all of a service is profit: in «Прибыль» as услуги", numbers["services_count"] == 3 and numbers["services_revenue"] == 850
+                  and numbers["net"] == 850)
+            doc_cancel.cancel_document(conn, doc["id"], boss, "ошибка")
+            check("cancelling the document takes the money back off the account",
+                  accounts.balance(conn, cash["id"]) == before + 550 and services.get_sale(conn, first)["status"] == "cancelled"
+                  and overview.profit(conn, start, end, 1)["services_revenue"] == 550)
+            try:
+                services.sell(conn, 1, "", 100, cash["id"], boss)
+                refused = False
+            except services.ServiceError:
+                refused = True
+            check("no name — refused", refused)
+
+        # ---- Mini App
+        token = make_token(boss, "1")
+        import webapp.main  # noqa: F401
+
+        with TestClient(webapp.main.app) as client:
+            page = client.get(f"/services?t={token}")
+            check("the «Услуги» page: the form, the catalog with the remembered services, the sales",
+                  page.status_code == 200 and "Продать услугу" in page.text and "Чистка динамика" in page.text and "УС-" in page.text)
+            resp = client.post(f"/services?t={token}", data={"name": "Замена стекла камеры", "amount": "450", "account_id": str(cash["id"]), "idem": "svc-1"})
+            again = client.post(f"/services?t={token}", data={"name": "Замена стекла камеры", "amount": "450", "account_id": str(cash["id"]), "idem": "svc-1"})
+            with get_conn(db_path) as conn:
+                made = conn.execute("SELECT COUNT(*) AS n FROM service_sales WHERE name = 'Замена стекла камеры'").fetchone()["n"]
+            check("selling from the page makes one sale, a double submit doesn't make two", resp.status_code == 200 and "проведена" in resp.text and made == 1 and again.status_code in (200, 303))
+            with get_conn(db_path) as conn:
+                sid = services.find(conn, 1, "Чистка динамика")["id"]
+            client.post(f"/services/{sid}/edit?t={token}", data={"name": "Чистка сетки динамика", "price": "250"})
+            with get_conn(db_path) as conn:
+                edited = services.get(conn, sid)
+            check("the catalog: a service renamed and its price set", edited["name"] == "Чистка сетки динамика" and edited["price"] == 250)
+
+        # ---- бот
+        check("«🧾 Услуга» is on the keyboard in place of «👤 Клиент»",
+              any(b.text == qa.BTN_SERVICE for row in qa.QUICK_ACTIONS_KEYBOARD.keyboard for b in row)
+              and not any(b.text == qa.BTN_CLIENT for row in qa.QUICK_ACTIONS_KEYBOARD.keyboard for b in row))
+        sent: list[dict] = []
+
+        class _FakeBot(Bot):
+            async def __call__(self, method, request_timeout=None):
+                name = type(method).__name__
+                if name in ("SendMessage", "EditMessageText"):
+                    markup = getattr(method, "reply_markup", None)
+                    sent.append({"text": getattr(method, "text", "") or "",
+                                 "buttons": [b.callback_data for row in (markup.inline_keyboard if markup and hasattr(markup, "inline_keyboard") else []) for b in row]})
+                    return Message(message_id=9100 + len(sent), date=dt.datetime.now(), chat=Chat(id=TG, type="private"), text="x")
+                return True
+
+        bot = _FakeBot(token=os.environ["CRM_BOT_TOKEN"])
+        dp = _the_dispatcher()
+        counter = [91000]
+
+        async def say(text):
+            counter[0] += 1
+            await dp.feed_update(bot, Update(update_id=counter[0], message=Message(
+                message_id=counter[0], date=dt.datetime.now(), chat=Chat(id=TG, type="private"),
+                from_user=User(id=TG, is_bot=False, first_name="П"), text=text)))
+
+        async def tap(data):
+            counter[0] += 1
+            await dp.feed_update(bot, Update(update_id=counter[0], callback_query=CallbackQuery(
+                id=str(counter[0]), from_user=User(id=TG, is_bot=False, first_name="П"), chat_instance="ci", data=data,
+                message=Message(message_id=sent[-1:] and 9100 + len(sent) or 1, date=dt.datetime.now(), chat=Chat(id=TG, type="private"), text="x"))))
+
+        async def run():
+            await say(qa.BTN_SERVICE)
+            check("«🧾 Услуга»: step 1 offers the remembered services as buttons, the frequent first",
+                  "Что за услуга" in sent[-1]["text"] and sent[-1]["buttons"][:1] == [f"svc_pick:{quick[0]['id']}"])
+            await tap(f"svc_pick:{quick[0]['id']}")
+            check("a picked service: the amount step offers its last price, with «Назад»",
+                  "Сумма" in sent[-1]["text"] and "Наклейка плёнки" in sent[-1]["text"] and "svc_amount_last" in sent[-1]["buttons"] and "svc_back" in sent[-1]["buttons"])
+            await tap("svc_back")
+            check("«⬅️ Назад» brings the services back", "Что за услуга" in sent[-1]["text"])
+            await say("Прошивка")
+            await say("abc")
+            check("a sum that isn't a number is asked again", sent[-1]["text"].startswith("⚠️"))
+            await say("700")
+            if "svc_pay:" in " ".join(sent[-1]["buttons"]):
+                await tap(next(b for b in sent[-1]["buttons"] if b.startswith("svc_pay:")))
+            check("then «Проверьте и проведите» with what was entered",
+                  "Проверьте и проведите" in sent[-1]["text"] and "Прошивка" in sent[-1]["text"] and "700" in sent[-1]["text"])
+            await tap("svc_confirm")
+
+        asyncio.run(run())
+        with get_conn(db_path) as conn:
+            row = conn.execute("SELECT * FROM service_sales WHERE name = 'Прошивка'").fetchone()
+            remembered = services.find(conn, 1, "прошивка")
+        check("«✅ Провести»: the service is sold, the new one remembered for the buttons",
+              row is not None and row["amount"] == 700 and remembered is not None and any("Проведено" in m["text"] for m in sent))
+
+
 def scenario_master_pay_gibrid() -> None:
     """Зарплата мастеров Гибрида в CRM (23.10, этап 3): ставка «ровно треть»,
     сводка по ремонтам за период = начисления, стартовый остаток, выплата
@@ -10628,6 +10756,7 @@ def main() -> None:
     scenario_simple_flow()
     scenario_card_edit_by_words()
     scenario_repair_roadmap()
+    scenario_services()
     scenario_master_pay_gibrid()
     scenario_gsheet_mirror()
     scenario_gibrit_cutover()

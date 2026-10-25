@@ -27,6 +27,7 @@ from core import documents as _documents
 from core import inventory as _inventory
 from core import masters as _masters
 from core import orders as _orders
+from core import services as _services
 from core import settlements as _settlements
 from core import supplier_accounts as _suppliers
 from core import stock_transfers as _stock_transfers
@@ -35,6 +36,7 @@ from core.documents import DocumentError
 CANCELLABLE_TYPES = (
     "sale", "cash_out", "cash_adjust", "exchange", "money_transfer",
     "receipt", "stock_in", "writeoff", "transfer", "buyback", "cash_in", "client_order", "production", "supplier_invoice", "supplier_payment",
+    "service",
 )
 
 
@@ -198,6 +200,7 @@ _REVERSERS = {
     "exchange": _cancel_exchange, "money_transfer": _cancel_transfer,
     "cash_in": _cancel_cash, "client_order": _cancel_client_order, "production": _cancel_production,
     "supplier_invoice": _cancel_supplier_invoice, "supplier_payment": _cancel_supplier_invoice,
+    "service": lambda conn, doc, staff_id: _services.cancel(conn, doc["ref_id"]),
 }
 
 

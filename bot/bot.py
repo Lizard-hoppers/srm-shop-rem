@@ -29,6 +29,7 @@ from bot.part_add_flow import router as part_add_router
 from bot.repair_attachments import router as repair_attachments_router
 from bot.repairs_button import router as repairs_button_router
 from bot.sale_flow import router as sale_flow_router
+from bot.service_flow import router as service_flow_router
 from bot.legacy_gibrit import router as legacy_gibrit_router
 from bot.simple_card import router as simple_card_router
 from bot.supplier_chat import router as supplier_chat_router
@@ -138,6 +139,7 @@ def build_dispatcher() -> Dispatcher:
     dp.include_router(part_add_router)
     dp.include_router(buyback_flow_router)
     dp.include_router(sale_flow_router)
+    dp.include_router(service_flow_router)
     dp.include_router(quick_actions_router)
     dp.include_router(repair_actions_router)
     dp.include_router(repair_attachments_router)

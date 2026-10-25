@@ -108,6 +108,7 @@
       <td>
         {% if tx.ref_type == 'sales_order' %}{{ t('sale_ref_label') }}{{ tx.ref_id }}
         {% elif tx.ref_type == 'repair_order' %}{{ t('repair_ref_label') }}{{ tx.ref_id }}
+        {% elif tx.ref_type == 'service' %}{{ tx.comment or t('services_title') }}
         {% elif tx.category == 'adjustment' %}{{ t('adjustment_ref_label') }}
         {% elif tx.category == 'exchange' %}{{ t('doc_type_exchange') }}
         {% elif tx.category == 'transfer' %}{{ t('doc_type_money_transfer') }}

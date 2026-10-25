@@ -441,7 +441,7 @@ def profit(conn, ctx, args) -> dict:
     numbers = _overview.profit(conn, start, end, _scope(ctx, args))
     return {"period": _period_text(date_from, date_to), **{k: numbers[k] for k in (
         "sales_count", "sales_revenue", "sales_profit", "repairs_count", "repairs_revenue", "repairs_profit",
-        "expenses_total", "writeoffs", "net")}}
+        "services_count", "services_revenue", "expenses_total", "writeoffs", "net")}}
 
 
 def debts(conn, ctx, args) -> dict:

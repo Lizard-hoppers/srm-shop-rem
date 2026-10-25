@@ -1,5 +1,6 @@
 {# Продажи · Заказы (товар отложен на 24 часа). Set sales_tab before including. #}
 <div class="section-btns">
   <a href="{{ link('/sales') }}"><button type="button" class="secondary" {% if sales_tab == 'sales' %}style="border-color: var(--accent); color: var(--accent-2);"{% endif %}>{{ t('nav_sales') }}</button></a>
+  <a href="{{ link('/services') }}"><button type="button" class="secondary" {% if sales_tab == 'services' %}style="border-color: var(--accent); color: var(--accent-2);"{% endif %}>{{ t('services_title') }}</button></a>
   <a href="{{ link('/orders') }}"><button type="button" class="secondary" {% if sales_tab == 'orders' %}style="border-color: var(--accent); color: var(--accent-2);"{% endif %}>{{ t('orders_title') }}</button></a>
 </div>

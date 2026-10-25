@@ -46,6 +46,11 @@ def profit(conn: sqlite3.Connection, utc_start: str, utc_end: str, location_id: 
             WHERE doc_type = 'sale' AND status = 'posted' AND created_at >= ? AND created_at < ?{clause}""",
         [utc_start, utc_end, *params],
     ).fetchone()
+    services = conn.execute(
+        f"""SELECT COUNT(*) AS n, COALESCE(SUM(amount), 0) AS revenue FROM documents
+            WHERE doc_type = 'service' AND status = 'posted' AND created_at >= ? AND created_at < ?{clause}""",
+        [utc_start, utc_end, *params],
+    ).fetchone()
     # A repair earns when it is выдан, not when it was taken in.
     clause, params = _loc("repair_orders.location_id", location_id)
     repairs = conn.execute(
@@ -96,10 +101,12 @@ def profit(conn: sqlite3.Connection, utc_start: str, utc_end: str, location_id: 
         "sales_unknown_cost": sales["unknown"],
         "repairs_count": repairs["n"], "repairs_revenue": money(repairs["revenue"]),
         "repairs_profit": money(repairs_profit),
-        "gross": money(sales["profit"] + repairs_profit),
+        # An услуга has no cost and no master's share — all of it is profit.
+        "services_count": services["n"], "services_revenue": money(services["revenue"]),
+        "gross": money(sales["profit"] + repairs_profit + services["revenue"]),
         "expenses": {key: expenses.get(key, 0) for key in OPERATING_CATEGORIES}, "expenses_total": expenses_total,
         "writeoffs": money(writeoffs),
-        "net": money(sales["profit"] + repairs_profit - expenses_total - writeoffs),
+        "net": money(sales["profit"] + repairs_profit + services["revenue"] - expenses_total - writeoffs),
     }
 
 

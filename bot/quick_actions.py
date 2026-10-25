@@ -97,6 +97,9 @@ BTN_OUR_REPAIR = "🛠 Наш ремонт"
 OLD_BOT_REPAIR, OLD_BOT_OWN = "📝 Создать заказ на ремонт", "📦 Наш"
 BTN_SALE = "🛍 Продажа"
 BTN_CLIENT = "👤 Клиент"
+# 25.10 (Павел): «🧾 Услуга» на клавиатуре вместо «👤 Клиент» (им редко
+# пользуются; старая кнопка у кого осталась — работает). bot/service_flow.py.
+BTN_SERVICE = "🧾 Услуга"
 BTN_BUYBACK = "🛒 Покупка"
 BTN_PURCHASE = "📦 Приход"
 BTN_SUMMARY = "📊 Сводка"
@@ -107,7 +110,7 @@ BTN_CANCEL = "❌ Отмена"
 # here so its text is normalised like the rest.
 BTN_REPAIRS_LIST = "🔧 Ремонты"
 _ENTRY_BUTTONS = {
-    BTN_SALE, BTN_REPAIR, BTN_REPAIR_LEGACY, BTN_OUR_REPAIR, BTN_CLIENT, BTN_BUYBACK, BTN_PURCHASE, BTN_SUMMARY, BTN_CASH, BTN_TRANSFER, BTN_CANCEL,
+    BTN_SALE, BTN_REPAIR, BTN_REPAIR_LEGACY, BTN_OUR_REPAIR, BTN_CLIENT, BTN_SERVICE, BTN_BUYBACK, BTN_PURCHASE, BTN_SUMMARY, BTN_CASH, BTN_TRANSFER, BTN_CANCEL,
     BTN_REPAIRS_LIST,
 }
 
@@ -161,7 +164,7 @@ QUICK_ACTIONS_KEYBOARD = ReplyKeyboardMarkup(
         [KeyboardButton(text=BTN_REPAIR), KeyboardButton(text=BTN_OUR_REPAIR)],
         [KeyboardButton(text=BTN_SALE, style="success"), KeyboardButton(text=BTN_BUYBACK, style="success")],
         [KeyboardButton(text=BTN_PURCHASE), KeyboardButton(text=BTN_TRANSFER)],
-        [KeyboardButton(text=BTN_CLIENT, style="primary"), KeyboardButton(text=BTN_CASH)],
+        [KeyboardButton(text=BTN_SERVICE, style="primary"), KeyboardButton(text=BTN_CASH)],
         [KeyboardButton(text=BTN_SUMMARY), KeyboardButton(text=BTN_CANCEL, style="danger")],
     ],
     resize_keyboard=True,
@@ -188,6 +191,14 @@ class RepairIntake(StatesGroup):
     password = State()
     comment = State()
     master = State()
+    confirm = State()
+
+
+class ServiceSale(StatesGroup):
+    """«🧾 Услуга» — handlers in bot/service_flow.py."""
+    name = State()
+    amount = State()
+    pay = State()
     confirm = State()
 
 
@@ -515,6 +526,19 @@ def _steps_repair(_data: dict) -> list[str]:
     return ["photo", "phone", "name", "model", "defect", "price", "password", "comment", "master"]
 
 
+def _steps_service(data: dict) -> list[str]:
+    return ["name", "amount"] + (["pay"] if data.get("pay_needed") else [])
+
+
+def _summary_service(data: dict) -> list[str]:
+    lines = []
+    if data.get("name"):
+        lines.append(f"Услуга: {html.escape(data['name'])}")
+    if data.get("amount"):
+        lines.append(f"Сумма: {money(data['amount'])} грн")
+    return lines
+
+
 def _steps_contact(_data: dict) -> list[str]:
     return ["name", "phone"]
 
@@ -661,6 +685,7 @@ _FLOWS = {
     "PhoneBuy": ("🛒 Покупка телефона", _steps_phone_buy, _summary_phone_buy),
     "SaleFlow": ("🛍 Продажа", _steps_sale, _summary_sale),
     "QuickContact": ("👤 Новый клиент", _steps_contact, _summary_contact),
+    "ServiceSale": ("🧾 Услуга", _steps_service, _summary_service),
     "CashExpense": ("💵 Расход", _steps_cash_expense, _summary_cash_expense),
     "CashAdjustment": ("💵 Касса", _steps_cash_adjustment, _summary_cash_adjustment),
     "CashExchange": ("💱 Обмен", _steps_cash_exchange, _summary_cash_exchange),
@@ -2198,7 +2223,7 @@ async def contact_confirm(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer("Готово")
 
 
-@router.callback_query(F.data.in_({"quick_repair_cancel", "quick_contact_cancel", "buy_cancel", "cash_cancel", "tr_cancel", "sl_cancel"}))
+@router.callback_query(F.data.in_({"quick_repair_cancel", "quick_contact_cancel", "buy_cancel", "cash_cancel", "tr_cancel", "sl_cancel", "svc_cancel"}))
 async def quick_cancel_callback(callback: CallbackQuery, state: FSMContext) -> None:
     """Inline ❌ Отмена on the confirm card — same full cleanup as
     cancel_flow, minus the entry-tap-of-cancel (a button tap doesn't

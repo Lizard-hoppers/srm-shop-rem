@@ -42,6 +42,7 @@ from core import repair_edit as _repair_edit
 from core import repair_notes as _notes
 from core import repairs as _repairs
 from core import sales as _sales
+from core import services as _services
 from core import settlements as _settlements
 from core import shifts as _shifts
 from core.accounts import money
@@ -428,6 +429,18 @@ def sell(conn, ctx, a) -> dict:
     ) | {"sold_product_id": product["id"]}
 
 
+def sell_service(conn, ctx, a) -> dict:
+    _need_shift(conn, ctx)
+    amount, account = _amount(a.get("amount")), _account(conn, ctx, a.get("account"))
+    try:
+        sale_id = _services.sell(conn, ctx["location_id"], a.get("service"), amount, account["id"], ctx["staff"]["id"])
+    except _services.ServiceError as exc:
+        raise Refused(str(exc)) from exc
+    name = _services.get_sale(conn, sale_id)["name"]
+    return _doc_receipt(ctx, _documents.get_for(conn, "service", sale_id),
+                        f"услуга: {html.escape(name)} — {amount} грн · {html.escape(account['name'])}")
+
+
 def client_money(conn, ctx, a) -> dict:
     _need_shift(conn, ctx)
     direction = "out" if a.get("direction") == "out" else "in"
@@ -588,6 +601,9 @@ ACTIONS: dict[str, tuple] = {
     "sell": (sell, _EVERYONE, "Продать товар со склада точки. account — куда оплата, или «в долг» (тогда нужен клиент).",
         {"product": _PRODUCT, "qty": {"type": "integer"}, "price": {"type": "number", "description": "цена за штуку; не названа — из карточки товара"},
          **_CLIENT, "account": {"type": "string", "description": "«наличные», «карта»… или «в долг»"}}, ["product"]),
+    "sell_service": (sell_service, _EVERYONE, "Продать услугу (не товар со склада): что за услуга и сумма; account — куда оплата.",
+        {"service": {"type": "string", "description": "что за услуга, как сказали: «наклейка плёнки»"}, "amount": _N, "account": _ACCOUNT},
+        ["service", "amount"]),
     "client_money": (client_money, _CASH, "Принять деньги от клиента (in — он гасит долг / вносит аванс) или выдать ему (out — возврат аванса; только владелец/админ).",
         {"direction": {"type": "string", "enum": ["in", "out"]}, **_CLIENT, "amount": _N, "account": _ACCOUNT, "comment": _S}, ["direction", "amount"]),
     "master_payout": (master_payout, _BOSS, "Выплатить мастеру деньги из кассы.", {"master": _S, "amount": _N, "account": _ACCOUNT, "comment": _S}, ["master", "amount"]),
