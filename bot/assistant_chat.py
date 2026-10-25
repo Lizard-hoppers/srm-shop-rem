@@ -50,7 +50,7 @@ from aiogram.types import (
 from bot import reminder_flow
 from bot.miniapp_links import crm_link
 from bot.quick_actions import _resolve_staff_for_dm
-from bot.repair_actions import _sync_after_change
+from bot.repair_actions import _sync_after_change, after_master_change
 from bot.repair_attachments import apply_status, card_command
 from core import agent_actions
 from core import agent_tools
@@ -90,6 +90,7 @@ _HELP = (
     "• «бот, запиши расход 500 на воду» · «бот, внеси в кассу 2000, размен»\n"
     "• «бот, прими ремонт: айфон 13, экран, 3000, клиент 0671234567»\n"
     "• «бот, поставь цену 3500 на 13 про мах» · «бот, назначь Эдика на РК-45»\n"
+    "• ответом на карточку: «бот, смени номер на 0501234567» · «бот, имя Коля» · «бот, модель iPhone 13»\n"
     "• «бот, продай кабель клиенту 0671234567» · «бот, отложи кабель для 067…»\n"
     "• «бот, выплати Эдику 1000» · «бот, отмени РКО-3, ошибся суммой»\n"
     "• ошибся — поправьте: «не так, …» — бот запомнит · «бот, запомни: …» · «бот, что ты запомнил» · «бот, забудь урок 3»"
@@ -174,7 +175,9 @@ async def _show_receipts(message: Message, store, receipts: list[dict]) -> None:
     changed repair's cards brought up to date, the sales channel."""
     for receipt in receipts:
         await message.answer(receipt["text"], reply_markup=_undo_markup(receipt["undo"]))
-        if receipt["sync_repair"]:
+        if receipt["sync_repair"] and receipt["undo"] and receipt["undo"][0] == "master":
+            after_master_change(store, receipt["sync_repair"])
+        elif receipt["sync_repair"]:
             _sync_after_change(receipt["sync_repair"], store.db_path)
         after = receipt["after"]
         if after and after[0] == "notify_repair":
@@ -205,7 +208,9 @@ async def undo_action(callback: CallbackQuery) -> None:
     except TelegramAPIError:
         pass
     await callback.answer("Возвращено")
-    if what[0] in ("repair_new", "price", "master"):
+    if what[0] == "master":
+        after_master_change(store, int(what[1]))
+    elif what[0] in ("repair_new", "price", "edit"):
         _sync_after_change(int(what[1]), store.db_path)
 
 

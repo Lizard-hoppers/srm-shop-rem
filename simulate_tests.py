@@ -1853,7 +1853,27 @@ def scenario_quick_intake_chat() -> None:
         await qa.repair_skip_comment(tap("repair_comment_skip"), state)
         check("step 9 — the last question — is the master, offered as buttons",
               "шаг 9 из 9" in screen()["text"] and "Выберите мастера" in screen()["text"]
-              and screen()["markup"].inline_keyboard[-1][0].callback_data == "rm_pick:0")
+              and screen()["markup"].inline_keyboard[-2][0].callback_data == "rm_pick:0"
+              and screen()["markup"].inline_keyboard[-1][0].callback_data == "rm_back")
+
+        # 25.10: «⬅️ Назад» — снова прошлый вопрос, введённое видно в сводке.
+        await qa.repair_back(tap("rm_back"), state)
+        check("«⬅️ Назад» on the master step brings back the comment question",
+              "шаг 8 из 9" in screen()["text"] and "Комментарий" in screen()["text"] and len(chat.bot_messages) == 1)
+        await qa.repair_back(tap("rm_back"), state)
+        check("…and again — the password question, the password typed before still in the recap",
+              "шаг 7 из 9" in screen()["text"] and "Пароль: 1234 &lt;x&gt;" in screen()["text"])
+        await qa.repair_got_password(say("4321"), state)
+        check("a new answer replaces the old one and the dialog goes on from there",
+              "шаг 8 из 9" in screen()["text"] and "Пароль: 4321" in screen()["text"])
+        await qa.repair_back(tap("rm_back"), state)
+        await qa.repair_got_password(say("1234 <x>"), state)
+        await qa.repair_skip_comment(tap("repair_comment_skip"), state)
+
+        await qa.repair_master_pick(tap("rm_pick:0"), state)
+        await qa.repair_back(tap("rm_back"), state)
+        check("«⬅️ Назад» on the «Проверьте данные» card: the master question in its place, one bot message",
+              "шаг 9 из 9" in screen()["text"] and "Выберите мастера" in screen()["text"] and len(chat.bot_messages) == 1)
 
         await qa.repair_master_pick(tap("rm_pick:0"), state)
         card = screen()
@@ -5920,6 +5940,10 @@ def scenario_repair_part_chat() -> None:
             await qa.repair_got_phone(say("067 111 00 99"), state)
             check("a returning client's name is not asked — the next question is the model",
                   "Модель устройства" in screen()["text"] and "Постоянный Клиент" in screen()["text"])
+            await qa.repair_back(tap("rm_back"), state)
+            check("«⬅️ Назад» from the model skips the name that was filled in by itself — back to the phone",
+                  "Телефон клиента:" in screen()["text"])
+            await qa.repair_got_phone(say("067 111 00 99"), state)
             await qa.repair_got_model(say("iPhone 13"), state)
             await qa.repair_got_defect(say("Замена дисплея"), state)
             await qa.repair_got_price(say("3000"), state)
@@ -5932,7 +5956,7 @@ def scenario_repair_part_chat() -> None:
             check("a returning client's name is not asked again — straight to the card with it filled in",
                   card["kind"] == "photo" and "Имя: Постоянный Клиент" in card["text"] and "Мастер: не назначен" in card["text"])
             check("the card offers «Создать ремонт», «Мастер» and «Отмена»",
-                  set(_buttons(card["markup"])) == {"quick_repair_confirm", "rm_menu", "quick_repair_cancel"})
+                  set(_buttons(card["markup"])) == {"quick_repair_confirm", "rm_back", "rm_menu", "quick_repair_cancel"})
             await qa.repair_master_menu(tap("rm_menu"), state)
             check("«Мастер» turns the buttons into the list of masters", f"rm_set:{master}" in _buttons(screen()["markup"]) and "rm_set:0" in _buttons(screen()["markup"]))
             await qa.repair_master_set(tap(f"rm_set:{master}"), state)
@@ -9928,6 +9952,163 @@ def scenario_simple_flow() -> None:
               row["telegram_id"] == STRANGER_TG and row["role"] == "manager" and row["location_id"] == 1 and twice)
 
 
+def scenario_card_edit_by_words() -> None:
+    """Правка карточки словами (25.10): «бот, смени номер на …», «имя …»,
+    «модель …», «пароль …», «мастер …» — с «Вернуть»; копии мастеру
+    записываются, правятся своим текстом и переезжают к новому мастеру."""
+    print("scenario: правка карточки словами и копии мастеру")
+    import asyncio
+    from types import SimpleNamespace
+
+    from bot import repair_attachments as rat
+    from core import agent_actions, notify, repair_edit, simple_flow, store_settings
+    from core.stores import get_store
+
+    P = repair_edit.parse
+    check("«смени номер на 050…» / «бот, имя Коля» / «пароль 1234» are edits",
+          P("смени номер на 0501234567") == ("phone", "0501234567") and P("имя Коля") == ("name", "Коля")
+          and P("пароль: 1234") == ("password", "1234") and P("поменяй модель на iPhone 13") == ("model", "iPhone 13")
+          and P("номер клиента 067 111 22 33") == ("phone", "067 111 22 33") and P("мастер Эдик") == ("master", "Эдик"))
+    check("a plain reply needs a verb — «пароль 1234» alone stays a note, «смени пароль 1234» is an edit",
+          P("пароль 1234", addressed=False) is None and P("смени пароль 1234", addressed=False) == ("password", "1234"))
+    check("a question is not an edit; «смени цену на 1500» is a price",
+          P("проблема в шлейфе?") is None and P("смени цену на 1500") == ("price", "1500") and P("как дела") is None)
+
+    GROUP, PERSONAL, PERSONAL2 = -1005580001, -1005580009, -1005580010
+    with tempfile.TemporaryDirectory() as tmp, _separate_base(tmp, "edit.sqlite3", ("Гибрид",)) as db_path:
+        with get_conn(db_path) as conn:
+            conn.execute("UPDATE locations SET staff_group_chat_id = ? WHERE id = 1", (GROUP,))
+            store_settings.set_point_mode(conn, True, False, "", location_id=1)
+            mgr = auth.create_staff(conn, "ed-mgr", "pass", "Віталій", "manager", location_id=1)
+            alex = auth.create_master(conn, "Алексей", 558003, "percent", 100 / 3, location_id=1)
+            edik = auth.create_master(conn, "Эдик Gybrid", 558004, "percent", 100 / 3, location_id=1)
+            auth.set_master_chats(conn, alex, 77, PERSONAL)
+            auth.set_master_chats(conn, edik, 78, PERSONAL2)
+            client = clients.get_or_create_by_phone(conn, "Анна", "0671112233", source="offline")
+            other = repairs.create_repair(conn, client, "", None, "Poco X3", None, "плата", "offline", alex, 3000, mgr, location_id=1)
+            order = repairs.create_repair(conn, client, "", None, "Redmi 9C", None, "экран", "offline", alex, 2200, mgr, location_id=1)
+            text, kb = repairs.card(conn, order)
+        store = get_store("1")
+
+        calls = []
+        orig_post = httpx.post
+
+        class _Ok:
+            status_code = 200
+
+            def json(self):
+                return {"ok": True, "result": {"message_id": 6000 + len(calls)}}
+
+        def fake_post(url, **kw):
+            calls.append((url.rsplit("/", 1)[-1], (kw.get("data") or kw.get("json") or {})))
+            return _Ok()
+
+        httpx.post = fake_post
+        orig_token = notify._BOT_TOKEN
+        notify._BOT_TOKEN = "123456:test"
+        try:
+            repairs.notify_and_save(store, order, text, kb, (b"\xff\xd8\xff", "x.jpg"))
+            with get_conn(db_path) as conn:
+                kinds = {r["kind"] for r in conn.execute("SELECT kind FROM repair_order_messages WHERE order_id = ?", (order,))}
+                live = repairs.get_order_messages(conn, order)
+            check("the master's copies are recorded with the card (topic and his own group)",
+                  kinds == {"topic", f"master_topic:{alex}", f"master_chat:{alex}"})
+            check("…but are not among the live cards that get the status buttons", len(live) == 1 and live[0][0] == str(GROUP))
+
+            with get_conn(db_path) as conn:
+                done = repair_edit.apply(conn, order, "phone", "050 999 88 77", mgr)
+                moved = repairs.get_repair(conn, order)
+                kept = repairs.get_repair(conn, other)
+            check("«смени номер»: the repair goes to the client with that number, his name kept, the old client untouched",
+                  moved["client_phone"] == "+380509998877" and moved["client_name"] == "Анна" and kept["client_phone"] == "+380671112233"
+                  and "+380671112233 → <b>+380509998877</b>" in done["text"])
+            with get_conn(db_path) as conn:
+                repair_edit.undo(conn, done["id"])
+                back = repairs.get_repair(conn, order)
+                try:
+                    repair_edit.undo(conn, done["id"])
+                    twice = False
+                except repair_edit.EditError:
+                    twice = True
+            check("«Вернуть» puts the old number back — once", back["client_phone"] == "+380671112233" and twice)
+
+            with get_conn(db_path) as conn:
+                repair_edit.apply(conn, order, "model", "iPhone 13", mgr)
+                repair_edit.apply(conn, order, "password", "4321", mgr)
+                repair_edit.apply(conn, order, "comment", "без зарядки", mgr)
+                repair_edit.apply(conn, order, "defect", "не заряжается", mgr)
+                row = repairs.get_repair(conn, order)
+                edits = simple_flow.copy_edits(conn, order)
+            check("model, password, comment and defect are changed on the repair",
+                  row["model"] == "iPhone 13" and row["device_password"] == "4321" and row["intake_comment"] == "без зарядки"
+                  and row["defect_description"] == "не заряжается")
+            personal = next(e for e in edits if e[0] == str(PERSONAL))
+            topic = next(e for e in edits if e[0] == str(GROUP))
+            check("the copies are refreshed with their own text: the master's group without the client, with a link",
+                  "4321" in personal[3] and "Анна" not in personal[3] and "Анна" in topic[3]
+                  and "t.me/c/5580001/" in str(personal[4]) and "gb_" not in str(topic[4]))
+
+            calls.clear()
+            with get_conn(db_path) as conn:
+                repair_edit.apply(conn, order, "master", "эдик", mgr)
+            simple_flow.move_copies(store, order)
+            with get_conn(db_path) as conn:
+                kinds = {r["kind"] for r in conn.execute("SELECT kind FROM repair_order_messages WHERE order_id = ?", (order,))}
+            deleted = [p for m, p in calls if m == "deleteMessage"]
+            check("«мастер Эдик»: the old master's copies are deleted, the new one gets his",
+                  len(deleted) == 2 and kinds == {"topic", f"master_topic:{edik}", f"master_chat:{edik}"}
+                  and any(str(p.get("chat_id")) == str(PERSONAL2) for m, p in calls))
+            with get_conn(db_path) as conn:
+                try:
+                    repair_edit.apply(conn, order, "master", "Нет такого", mgr)
+                    refused = False
+                except repair_edit.EditError as exc:
+                    refused = "Алексей" in str(exc)
+            check("an unknown master is refused with the list of this точка's masters", refused)
+        finally:
+            httpx.post, notify._BOT_TOKEN = orig_post, orig_token
+
+        # ---- ответом на карточку в группе
+        class _Reply:
+            def __init__(self, text):
+                self.text, self.replies = text, []
+                self.chat = SimpleNamespace(id=GROUP, type="supergroup")
+                self.reply_to_message = SimpleNamespace(message_id=1)
+
+            async def reply(self, text, reply_markup=None):
+                self.replies.append((text, reply_markup))
+
+        synced, moved_to = [], []
+        orig_sync, orig_move = rat._sync_after_change, rat.after_master_change
+        rat._sync_after_change = lambda order_id, db: synced.append(order_id)
+        rat.after_master_change = lambda st, order_id: moved_to.append(order_id)
+        try:
+            with get_conn(db_path) as conn:
+                staff = auth.get_staff_by_id(conn, mgr)
+            msg = _Reply("бот, имя Анна Петровна")
+            handled = asyncio.run(rat.card_command(msg, store, order, staff, "имя Анна Петровна"))
+            with get_conn(db_path) as conn:
+                name = repairs.get_repair(conn, order)["client_name"]
+            undo = msg.replies[0][1].inline_keyboard[0][0].callback_data if msg.replies and msg.replies[0][1] else ""
+            check("«бот, имя …» in reply to a card: changed at once, the cards refreshed, «Вернуть» under the answer",
+                  handled and name == "Анна Петровна" and synced == [order] and undo.startswith(f"aundo:edit:{order}:"))
+            note = _Reply("пароль 1111")
+            plain = asyncio.run(rat.card_command(note, store, order, staff, "пароль 1111", addressed=False))
+            check("a plain reply «пароль 1111» (no verb) is left to be a note", plain is False and not note.replies)
+            master = _Reply("смени мастера на Алексей")
+            asyncio.run(rat.card_command(master, store, order, staff, "смени мастера на Алексей", addressed=False))
+            undo = master.replies[0][1].inline_keyboard[0][0].callback_data if master.replies and master.replies[0][1] else ""
+            check("«смени мастера на …» moves the copies and its «Вернуть» brings the old master back",
+                  moved_to == [order] and undo == f"aundo:master:{order}:{edik}")
+            with get_conn(db_path) as conn:
+                edit_id = msg.replies[0][1].inline_keyboard[0][0].callback_data.rsplit(":", 1)[1]
+                line = agent_actions.undo(conn, ("edit", str(order), edit_id), staff)
+                name = repairs.get_repair(conn, order)["client_name"]
+            check("«Вернуть» under the name edit puts the old name back", name == "Анна" and "как было" in line)
+        finally:
+            rat._sync_after_change, rat.after_master_change = orig_sync, orig_move
+
+
 def scenario_master_pay_gibrid() -> None:
     """Зарплата мастеров Гибрида в CRM (23.10, этап 3): ставка «ровно треть»,
     сводка по ремонтам за период = начисления, стартовый остаток, выплата
@@ -10331,6 +10512,7 @@ def main() -> None:
     scenario_gibrit_sync()
     scenario_point_bots()
     scenario_simple_flow()
+    scenario_card_edit_by_words()
     scenario_master_pay_gibrid()
     scenario_gsheet_mirror()
     scenario_gibrit_cutover()

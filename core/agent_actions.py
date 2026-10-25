@@ -38,6 +38,7 @@ from core import documents as _documents
 from core import inventory as _inventory
 from core import masters as _masters
 from core import orders as _orders
+from core import repair_edit as _repair_edit
 from core import repair_notes as _notes
 from core import repairs as _repairs
 from core import sales as _sales
@@ -277,6 +278,16 @@ def assign_repair_master(conn, ctx, a) -> dict:
     label = _documents.label("repair", repair["id"])
     _receipt(ctx, f"✅ <b>{label}</b>: мастер — {html.escape(master['name'])}", undo=("master", repair["id"], repair["master_id"] or 0), sync_repair=repair["id"])
     return {"done": True, "document": label}
+
+
+def edit_repair(conn, ctx, a) -> dict:
+    repair = _repair(conn, ctx, a.get("repair"))
+    try:
+        done = _repair_edit.apply(conn, repair["id"], str(a.get("field") or ""), str(a.get("value") or ""), ctx["staff"]["id"])
+    except _repair_edit.EditError as exc:
+        raise Refused(f"{_documents.label('repair', repair['id'])}: {exc}") from exc
+    _receipt(ctx, done["text"], undo=("edit", repair["id"], done["id"]), sync_repair=repair["id"])
+    return {"done": True, "document": _documents.label("repair", repair["id"])}
 
 
 def repair_without_parts(conn, ctx, a) -> dict:
@@ -556,6 +567,11 @@ ACTIONS: dict[str, tuple] = {
          "defect": _S, "price": _N, "master": _S}, ["client_phone", "device"]),
     "set_repair_price": (set_repair_price, _INTAKE, "Поставить или изменить цену ремонта (полная цена для клиента).", {"repair": _REPAIR, "price": _N}, ["repair", "price"]),
     "assign_repair_master": (assign_repair_master, _INTAKE, "Назначить мастера на ремонт.", {"repair": _REPAIR, "master": _S}, ["repair", "master"]),
+    "edit_repair": (edit_repair, _INTAKE,
+        "Исправить в карточке ремонта номер телефона или имя клиента, модель, неисправность, пароль или комментарий "
+        "(цена — set_repair_price, мастер — assign_repair_master).",
+        {"repair": _REPAIR, "field": {"type": "string", "enum": ["phone", "name", "model", "defect", "password", "comment"]},
+         "value": {"type": "string", "description": "новое значение, как сказали"}}, ["repair", "field", "value"]),
     "repair_without_parts": (repair_without_parts, _INTAKE, "Отметить, что ремонт сделан без запчасти.", {"repair": _REPAIR}, ["repair"]),
     "add_repair_note": (add_repair_note, _EVERYONE, "Записать заметку в карточку ремонта.", {"repair": _REPAIR, "text": _S}, ["repair", "text"]),
     "clear_repair_notes": (clear_repair_notes, _EVERYONE, "Убрать блок заметок с карточки ремонта в чате (заметки остаются на странице ремонта в приложении).",
@@ -685,4 +701,9 @@ def undo(conn: sqlite3.Connection, what: tuple, staff) -> str:
     if kind == "master":
         _repairs.assign_master(conn, order_id, int(what[2]) or None)
         return f"↩️ <b>{label}</b>: мастер возвращён прежний."
+    if kind == "edit":
+        try:
+            return _repair_edit.undo(conn, int(what[2]))
+        except _repair_edit.EditError as exc:
+            raise Refused(str(exc)) from exc
     raise Refused("Это уже не вернуть.")

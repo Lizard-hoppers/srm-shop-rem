@@ -41,13 +41,14 @@ from aiogram import F, Router
 from aiogram.exceptions import TelegramAPIError
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, ReactionTypeEmoji
 
-from bot.repair_actions import _sync_after_change
+from bot.repair_actions import _sync_after_change, after_master_change
 from core import accounts as core_accounts
 from core import ai_notes
 from core import auth as core_auth
 from core import cash as core_cash
 from core import documents as core_documents
 from core import photos as core_photos
+from core import repair_edit
 from core import repair_notes as core_notes
 from core import repairs as core_repairs
 from core.storage import get_conn
@@ -360,7 +361,7 @@ def hide_notes_said(text: str | None) -> bool:
     return bool(_HIDE_NOTES.search(text or ""))
 
 
-async def card_command(message: Message, store, order_id: int, staff, text: str) -> bool:
+async def card_command(message: Message, store, order_id: int, staff, text: str, addressed: bool = True) -> bool:
     """A reply to a repair's card that is an instruction ABOUT the card:
     «сумма 3000» sets the repair's price right there (it is not filed as a
     note — the price on the card is the record), «убери заметки» takes
@@ -368,7 +369,10 @@ async def card_command(message: Message, store, order_id: int, staff, text: str)
     these and has been dealt with. «Верни заметки» puts the block back;
     «удали» in reply to one note's own message takes just that note off.
     Also reached from «бот, …» sent as a reply to a card
-    (bot/assistant_chat.py)."""
+    (bot/assistant_chat.py). «Смени номер на 050…», «имя Коля», «пароль
+    1234», «мастер Эдик» (core.repair_edit) fix the card's own fields —
+    said to the bot, or as a plain reply when it starts with a verb
+    («смени …»; addressed=False is a plain reply)."""
     label = core_documents.label("repair", order_id)
     replied = message.reply_to_message
     if replied and _REMOVE_THIS.match(text or ""):
@@ -395,7 +399,11 @@ async def card_command(message: Message, store, order_id: int, staff, text: str)
         _sync_after_change(order_id, store.db_path)
         await message.reply(f"🧹 {label}: заметки убраны с карточки ({hidden})." if hidden else f"{label}: заметок на карточке и так нет.")
         return True
-    price = price_said(text)
+    edit = repair_edit.parse(text, addressed=addressed)
+    if edit and edit[0] != "price":
+        await _edit_field(message, store, order_id, staff, *edit)
+        return True
+    price = int(re.sub(r"\D", "", edit[1])) if edit else price_said(text)
     if price is None:
         return False
     if not staff:
@@ -419,6 +427,30 @@ async def card_command(message: Message, store, order_id: int, staff, text: str)
     )]])
     await message.reply(f"✅ {label}: цена {'—' if old is None else old} → <b>{price} грн</b>", reply_markup=undo)
     return True
+
+
+async def _edit_field(message: Message, store, order_id: int, staff, field: str, value: str) -> None:
+    """One field of the card changed at once, «Вернуть» under the answer."""
+    label = core_documents.label("repair", order_id)
+    if not staff:
+        await message.reply(f"{label}: править карточку может сотрудник, подключённый к CRM.")
+        return
+    try:
+        with get_conn(store.db_path) as conn:
+            old_master = core_repairs.get_repair(conn, order_id)["master_id"]
+            done = repair_edit.apply(conn, order_id, field, value, staff["id"])
+    except repair_edit.EditError as exc:
+        await message.reply(f"{label}: {exc}")
+        return
+    if field == "master":
+        after_master_change(store, order_id)
+        undo = f"aundo:master:{order_id}:{old_master or 0}"
+    else:
+        _sync_after_change(order_id, store.db_path)
+        undo = f"aundo:edit:{order_id}:{done['id']}"
+    await message.reply(done["text"], reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="↩️ Вернуть", callback_data=undo),
+    ]]))
 
 
 @router.message(F.reply_to_message, F.chat.type != "private", F.text | F.voice | F.audio)
@@ -452,7 +484,7 @@ async def note_reply_to_repair(message: Message) -> None:
         kind, original = "text", message.text.strip()
         if not original:
             return
-        if await card_command(message, store, order_id, staff, original):
+        if await card_command(message, store, order_id, staff, original, addressed=False):
             return
     else:
         kind, media = "voice", message.voice or message.audio
@@ -468,9 +500,10 @@ async def note_reply_to_repair(message: Message) -> None:
             await message.reply(f"Не смог расшифровать голосовое — в {label} ничего не записано. Напишите текстом.")
             return
 
-    if kind == "voice" and (price_said(original) is not None or hide_notes_said(original) or show_notes_said(original)):
+    if kind == "voice" and (price_said(original) is not None or hide_notes_said(original) or show_notes_said(original)
+                            or repair_edit.parse(original, addressed=False)):
         await message.reply(f"🎤 {html.escape(original)}")
-        if await card_command(message, store, order_id, staff, original):
+        if await card_command(message, store, order_id, staff, original, addressed=False):
             return
     shown, hints = await _save_note(message, store, order_id, kind, original, staff)
     if kind == "voice":

@@ -18,6 +18,7 @@ from core import inventory as core_inventory
 from core import notify as core_notify
 from core import repair_notes as core_repair_notes
 from core import repairs as core_repairs
+from core import simple_flow as core_simple_flow
 from core import vision_ocr
 from core.inventory import InsufficientStockError
 from core.storage import get_conn
@@ -245,6 +246,7 @@ def _sync_cards(background_tasks: BackgroundTasks, conn, order_id: int) -> None:
     background_tasks.add_task(
         core_notify.sync_repair_cards, core_repairs.get_order_messages(conn, order_id), text, keyboard,
     )
+    background_tasks.add_task(core_simple_flow.send_copy_edits, core_simple_flow.copy_edits(conn, order_id))
 
 
 def _detail_context(conn, order_id: int, location_id: int | None = None) -> dict:

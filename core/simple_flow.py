@@ -233,18 +233,111 @@ def after_card_posted(store, order_id: int, sent: list, photo: tuple[bytes, str]
         master = conn.execute("SELECT * FROM staff WHERE id = ?", (repair["master_id"],)).fetchone() if repair["master_id"] else None
         full_text, _keyboard = _repairs.card(conn, order_id)
         label_chat = conn.execute("SELECT label_chat_id FROM locations WHERE id = ?", (repair["location_id"],)).fetchone()["label_chat_id"]
-    link_kb = {"inline_keyboard": [[{"text": "🔗 Показать карточку", "url": link}]]} if link else None
-    if master and master["topic_id"] and store.staff_group_chat_id:
-        _post(_notify, store.staff_group_chat_id, full_text, photo, link_kb, thread=master["topic_id"])
-    if master and master["personal_chat_id"]:
-        _post(_notify, master["personal_chat_id"], master_text(repair), photo, link_kb)
+    _post_copies(store, order_id, repair, master, full_text, link, photo)
     if label_chat and not repair["own_order"]:
         _notify._send_photo(label_chat, label_png(repair, link), f"label_{order_id}.png",
                             caption=f"🖨 Этикетка {_documents.label('repair', order_id)}")
 
 
-def _post(notify, chat_id, text, photo, keyboard, thread=None) -> None:
+def _post(notify, chat_id, text, photo, keyboard, thread=None) -> int | None:
     if photo:
-        notify._send_photo(chat_id, photo[0], photo[1], message_thread_id=thread, caption=text, reply_markup=keyboard)
-    else:
-        notify._send(chat_id, text, message_thread_id=thread, reply_markup=keyboard)
+        return notify._send_photo(chat_id, photo[0], photo[1], message_thread_id=thread, caption=text, reply_markup=keyboard)
+    return notify._send(chat_id, text, message_thread_id=thread, reply_markup=keyboard)
+
+
+# Копии мастеру в repair_order_messages: kind «master_topic:<id мастера>»
+# (его тема в группе точки) и «master_chat:<id>» (его личная группа). Их
+# правят вместе с главной карточкой (copy_edits), но своим текстом и с
+# кнопкой-ссылкой, а при смене мастера они переезжают (move_copies).
+COPY_KINDS_SQL = "(kind GLOB 'master_topic:*' OR kind GLOB 'master_chat:*')"
+
+
+def _link_kb(link: str | None) -> dict | None:
+    return {"inline_keyboard": [[{"text": "🔗 Показать карточку", "url": link}]]} if link else None
+
+
+def _post_copies(store, order_id: int, repair, master, full_text: str, link: str | None, photo) -> None:
+    from core import notify as _notify
+    from core import repairs as _repairs
+    from core.storage import get_conn
+
+    copies = []
+    if master and master["topic_id"] and store.staff_group_chat_id:
+        sent = _post(_notify, store.staff_group_chat_id, full_text, photo, _link_kb(link), thread=master["topic_id"])
+        if sent:
+            copies.append((str(store.staff_group_chat_id), sent, f"master_topic:{master['id']}", bool(photo)))
+    if master and master["personal_chat_id"]:
+        sent = _post(_notify, master["personal_chat_id"], master_text(repair), photo, _link_kb(link))
+        if sent:
+            copies.append((str(master["personal_chat_id"]), sent, f"master_chat:{master['id']}", bool(photo)))
+    if copies:
+        with get_conn(store.db_path) as conn:
+            _repairs.save_order_messages(conn, order_id, copies)
+
+
+def _main_link(conn: sqlite3.Connection, order_id: int) -> str | None:
+    row = conn.execute(
+        "SELECT chat_id, message_id FROM repair_order_messages WHERE order_id = ? AND kind = 'topic' ORDER BY id LIMIT 1",
+        (order_id,),
+    ).fetchone()
+    return card_link(row["chat_id"], row["message_id"]) if row else None
+
+
+def copy_edits(conn: sqlite3.Connection, order_id: int) -> list[tuple]:
+    """(chat_id, message_id, has_photo, text, keyboard) — как должна сейчас
+    выглядеть каждая копия мастеру. Считается при открытом соединении,
+    отправляется потом (send_copy_edits) — без базы в руках."""
+    from core import repairs as _repairs
+
+    rows = conn.execute(
+        f"SELECT chat_id, message_id, kind, has_photo FROM repair_order_messages WHERE order_id = ? AND {COPY_KINDS_SQL}",
+        (order_id,),
+    ).fetchall()
+    if not rows:
+        return []
+    repair = _repairs.get_repair(conn, order_id)
+    full_text, _keyboard = _repairs.card(conn, order_id)
+    keyboard = _link_kb(_main_link(conn, order_id))
+    return [
+        (row["chat_id"], row["message_id"], bool(row["has_photo"]),
+         master_text(repair) if row["kind"].startswith("master_chat:") else full_text, keyboard)
+        for row in rows
+    ]
+
+
+def send_copy_edits(edits: list[tuple]) -> None:
+    from core import notify as _notify
+
+    for chat_id, message_id, has_photo, text, keyboard in edits:
+        if has_photo:
+            _notify.edit_message_caption(chat_id, message_id, text, reply_markup=keyboard)
+        else:
+            _notify.edit_message(chat_id, message_id, text, reply_markup=keyboard)
+
+
+def move_copies(store, order_id: int) -> None:
+    """Мастер сменился: копии у прежнего удаляются, новому — свежие (тема
+    в группе точки и его личная группа), со ссылкой на главную карточку."""
+    if not store.simple_flow:
+        return
+    from core import notify as _notify
+    from core import repairs as _repairs
+    from core.storage import get_conn
+
+    with get_conn(store.db_path) as conn:
+        old = conn.execute(
+            f"SELECT chat_id, message_id FROM repair_order_messages WHERE order_id = ? AND {COPY_KINDS_SQL}", (order_id,),
+        ).fetchall()
+        conn.execute(f"DELETE FROM repair_order_messages WHERE order_id = ? AND {COPY_KINDS_SQL}", (order_id,))
+        repair = _repairs.get_repair(conn, order_id)
+        master = conn.execute("SELECT * FROM staff WHERE id = ?", (repair["master_id"],)).fetchone() if repair["master_id"] else None
+        full_text, _keyboard = _repairs.card(conn, order_id)
+        link = _main_link(conn, order_id)
+    for row in old:
+        _notify.delete_message(row["chat_id"], row["message_id"])
+    photo = None
+    path = os.path.join(_repairs.PHOTO_DIR, repair["device_photo_path"]) if repair["device_photo_path"] else None
+    if path and os.path.exists(path):
+        with open(path, "rb") as f:
+            photo = (f.read(), repair["device_photo_path"])
+    _post_copies(store, order_id, repair, master, full_text, link, photo)

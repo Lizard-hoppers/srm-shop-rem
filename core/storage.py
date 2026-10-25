@@ -205,6 +205,19 @@ CREATE TABLE IF NOT EXISTS gsheet_queue (
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Правки карточки ремонта словами (25.10, core.repair_edit): что было и
+-- что стало — по этой записи работает «↩️ Вернуть».
+CREATE TABLE IF NOT EXISTS repair_edits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id INTEGER NOT NULL REFERENCES repair_orders(id),
+    field TEXT NOT NULL,
+    old_value TEXT,
+    new_value TEXT,
+    staff_id INTEGER,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    undone_at TEXT
+);
+
 -- Журнал Telegram (23.10, core.tg_journal): кто пишет каждому боту CRM.
 CREATE TABLE IF NOT EXISTS tg_users (
     bot_id INTEGER NOT NULL,

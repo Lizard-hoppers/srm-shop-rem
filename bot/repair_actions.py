@@ -34,6 +34,7 @@ from core import auth as core_auth
 from core import documents as core_documents
 from core import notify as core_notify
 from core import repairs as core_repairs
+from core import simple_flow as core_simple_flow
 from core.storage import get_conn
 from core.inventory import InsufficientStockError
 from core.stores import get_store, registry_db_path, store_for_chat_id
@@ -89,10 +90,7 @@ def _sync_repair_cards_blocking(order_id: int, db_path: str) -> None:
     change, so both channels always agree. Plain sync function (not async)
     on purpose — see _sync_after_change below, it always runs off the
     event loop via asyncio.to_thread, never awaited directly."""
-    with get_conn(db_path) as conn:
-        text, keyboard = core_repairs.card(conn, order_id)
-        messages = core_repairs.get_order_messages(conn, order_id)
-    core_notify.sync_repair_cards(messages, text, keyboard)
+    core_repairs.sync_all_cards(db_path, order_id)
 
 
 def _sync_after_change(order_id: int, db_path: str) -> None:
@@ -104,6 +102,18 @@ def _sync_after_change(order_id: int, db_path: str) -> None:
     doesn't even wait for that thread — callback.answer() fires immediately,
     the card updates a moment later."""
     asyncio.create_task(asyncio.to_thread(_sync_repair_cards_blocking, order_id, db_path))
+
+
+def _master_changed_blocking(store, order_id: int) -> None:
+    core_simple_flow.move_copies(store, order_id)
+    core_repairs.sync_all_cards(store.db_path, order_id)
+
+
+def after_master_change(store, order_id: int) -> None:
+    """The master was changed from the chat: his copies move to the new
+    one (core.simple_flow.move_copies), then every card is refreshed.
+    Fire-and-forget, same as _sync_after_change."""
+    asyncio.create_task(asyncio.to_thread(_master_changed_blocking, store, order_id))
 
 
 @router.callback_query(F.data.startswith("repair_take:"))

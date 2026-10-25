@@ -588,9 +588,23 @@ def get_order_messages(conn: sqlite3.Connection, order_id: int) -> list[tuple[st
     this repair — what core.notify.sync_repair_cards() needs to edit them
     all in place."""
     rows = conn.execute(
-        "SELECT chat_id, message_id, has_photo FROM repair_order_messages WHERE order_id = ?", (order_id,)
+        f"SELECT chat_id, message_id, has_photo FROM repair_order_messages WHERE order_id = ? AND NOT {_simple_flow.COPY_KINDS_SQL}",
+        (order_id,),
     ).fetchall()
     return [(row["chat_id"], row["message_id"], bool(row["has_photo"])) for row in rows]
+
+
+def sync_all_cards(db_path: str, order_id: int) -> None:
+    """Every posted card of the repair brought up to date: the live cards
+    (get_order_messages) and the master's copies (core.simple_flow — their
+    own text and a link instead of the buttons). Blocking — run it off the
+    event loop."""
+    with _get_conn(db_path) as conn:
+        text, keyboard = card(conn, order_id)
+        messages = get_order_messages(conn, order_id)
+        copies = _simple_flow.copy_edits(conn, order_id)
+    _notify.sync_repair_cards(messages, text, keyboard)
+    _simple_flow.send_copy_edits(copies)
 
 
 def find_order_by_message(conn: sqlite3.Connection, chat_id: str, message_id: int) -> int | None:
