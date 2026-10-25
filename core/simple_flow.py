@@ -170,7 +170,7 @@ def card_link(chat_id, message_id) -> str:
     return f"https://t.me/c/{str(chat_id).removeprefix('-100')}/{message_id}"
 
 
-def master_text(repair: sqlite3.Row) -> str:
+def master_text(repair: sqlite3.Row, path: str | None = None) -> str:
     """The card for a master's own group — outsourcers sit there, so no
     client's name or phone: what to fix and how to get in."""
     label = _documents.label("repair", repair["id"])
@@ -182,6 +182,8 @@ def master_text(repair: sqlite3.Row) -> str:
         lines.append(f"🔑 <b>{html.escape(repair['device_password'])}</b>")
     if repair["intake_comment"]:
         lines.append(f"📝 {html.escape(repair['intake_comment'])}")
+    if path:
+        lines += ["", path]
     return "\n".join(lines)
 
 
@@ -267,7 +269,9 @@ def _post_copies(store, order_id: int, repair, master, full_text: str, link: str
         if sent:
             copies.append((str(store.staff_group_chat_id), sent, f"master_topic:{master['id']}", bool(photo)))
     if master and master["personal_chat_id"]:
-        sent = _post(_notify, master["personal_chat_id"], master_text(repair), photo, _link_kb(link))
+        with get_conn(store.db_path) as conn:
+            path = _repairs.roadmap(conn, repair)
+        sent = _post(_notify, master["personal_chat_id"], master_text(repair, path), photo, _link_kb(link))
         if sent:
             copies.append((str(master["personal_chat_id"]), sent, f"master_chat:{master['id']}", bool(photo)))
     if copies:
@@ -298,9 +302,10 @@ def copy_edits(conn: sqlite3.Connection, order_id: int) -> list[tuple]:
     repair = _repairs.get_repair(conn, order_id)
     full_text, _keyboard = _repairs.card(conn, order_id)
     keyboard = _link_kb(_main_link(conn, order_id))
+    path = _repairs.roadmap(conn, repair)
     return [
         (row["chat_id"], row["message_id"], bool(row["has_photo"]),
-         master_text(repair) if row["kind"].startswith("master_chat:") else full_text, keyboard)
+         master_text(repair, path) if row["kind"].startswith("master_chat:") else full_text, keyboard)
         for row in rows
     ]
 

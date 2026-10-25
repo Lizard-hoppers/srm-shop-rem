@@ -10170,6 +10170,59 @@ def scenario_card_edit_by_words() -> None:
             rat._sync_after_change, rat.after_master_change = orig_sync, orig_move
 
 
+def scenario_repair_roadmap() -> None:
+    """🗺 Путь ремонта в карточке (25.10): точка ➜ мастер ➜ готов ➜ выдан."""
+    print("scenario: путь ремонта в карточке")
+    from core import repair_edit, store_settings
+
+    with tempfile.TemporaryDirectory() as tmp, _separate_base(tmp, "path.sqlite3", ("007", "Гибрид")) as db_path:
+        with get_conn(db_path) as conn:
+            store_settings.set_point_mode(conn, True, False, "", location_id=2)
+            boss = auth.create_staff(conn, "rp-owner", "pass", "Павел", "owner")
+            alex = auth.create_master(conn, "Алексей", 559003, "percent", 100 / 3, location_id=None)
+            edik = auth.create_master(conn, "Эдик", 559004, "percent", 100 / 3, location_id=None)
+            client = clients.get_or_create_by_phone(conn, "Анна", "0671112244", source="offline")
+            shop = repairs.create_repair(conn, client, "", None, "iPhone 12", None, "экран", "offline", None, 2000, boss, location_id=1)
+            gib = repairs.create_repair(conn, client, "", None, "Redmi 9C", None, "АКБ", "offline", alex, 900, boss, location_id=2)
+            day = "2026-10-24 "
+
+            def stamp(order, times):
+                rows = conn.execute("SELECT id FROM repair_status_history WHERE order_id = ? ORDER BY id", (order,)).fetchall()
+                for row, at in zip(rows, times):
+                    conn.execute("UPDATE repair_status_history SET changed_at = ? WHERE id = ?", (at, row["id"]))
+
+            def path(order):
+                return repairs.roadmap(conn, repairs.get_repair(conn, order))
+
+            d23 = "2026-10-23 "
+            stamp(shop, [d23 + "07:01:00"])
+            check("a new 007 repair: the shop, then what is left",
+                  path(shop) == "🗺 <b>🏪 007 23.10 10:01</b> ➜ ○ В работе ➜ ○ Готов ➜ ○ Выдан")
+            repairs.claim_repair(conn, shop, alex)
+            repairs.complete_repair(conn, shop, alex)
+            stamp(shop, [d23 + "07:01:00", d23 + "07:30:00", day + "08:00:00"])
+            check("taken and done: the master with the time he took it, «Готов» with the date of another day, «Выдан» ahead",
+                  path(shop) == "🗺 🏪 007 23.10 10:01 ➜ 🔧 Алексей 10:30 ➜ <b>✅ Готов 24.10 11:00</b> ➜ ○ Выдан")
+            repairs.update_status(conn, shop, "in_progress", boss, "вернули")
+            stamp(shop, [d23 + "07:01:00", d23 + "07:30:00", day + "08:00:00", day + "08:10:00"])
+            check("a step back is shown as «↩»", path(shop).endswith("✅ Готов 24.10 11:00 ➜ <b>↩ В работе 11:10</b> ➜ ○ Готов ➜ ○ Выдан"))
+
+            stamp(gib, [day + "06:43:00"])
+            check("Гибрид: the master named at intake right after the точка, «Готов» ahead",
+                  path(gib) == "🗺 🏪 Гибрид 24.10 09:43 ➜ <b>🔧 Алексей</b> ➜ ○ Готов")
+            repair_edit.apply(conn, gib, "master", "Эдик", boss)
+            check("a master changed in the chat shows as the way the repair went", "🔧 Алексей ➜ <b>🔧 Эдик</b>" in path(gib))
+            repairs.update_status(conn, gib, "cancelled", boss, "Возврат")
+            repairs.update_status(conn, gib, "new", boss, "Изменить выбор")
+            repairs.update_status(conn, gib, "issued", boss, "Готов")
+            stamp(gib, [day + "06:43:00", day + "10:00:00", day + "10:01:00", day + "11:10:00"])
+            check("a «Возврат» taken back and then «Готов»: only «Готов» in the path, in bold, nothing ahead",
+                  path(gib) == "🗺 🏪 Гибрид 24.10 09:43 ➜ 🔧 Алексей ➜ 🔧 Эдик ➜ <b>✅ Готов 14:10</b>")
+            text, _kb = repairs.card(conn, gib)
+            check("the path is on the card, before the notes, instead of the one-step «Выдан:» line",
+                  "🗺 🏪 Гибрид" in text and "📦 Выдан:" not in text)
+
+
 def scenario_master_pay_gibrid() -> None:
     """Зарплата мастеров Гибрида в CRM (23.10, этап 3): ставка «ровно треть»,
     сводка по ремонтам за период = начисления, стартовый остаток, выплата
@@ -10574,6 +10627,7 @@ def main() -> None:
     scenario_point_bots()
     scenario_simple_flow()
     scenario_card_edit_by_words()
+    scenario_repair_roadmap()
     scenario_master_pay_gibrid()
     scenario_gsheet_mirror()
     scenario_gibrit_cutover()

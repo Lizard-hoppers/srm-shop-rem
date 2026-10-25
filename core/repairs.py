@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import html
+import json
 import logging
 import os
 import sqlite3
@@ -807,8 +808,100 @@ def _optional(repair, column: str):
         return None
 
 
+_CLOSED = ("issued", "cancelled")
+_STEP_RANK = {"new": 0, "in_progress": 1, "ready": 2, "issued": 3, "cancelled": 3}
+
+
+def _when(value: str | None, previous_day: str | None) -> tuple[str, str | None]:
+    """«24.10 09:43» — or just «14:10» on the same day as the step before."""
+    shown = kyiv_datetime(value)
+    if len(shown) != 16:
+        return "", previous_day
+    day, clock = shown[:5], shown[11:]
+    return (clock if day == previous_day else f"{day} {clock}"), day
+
+
+def _masters_chain(conn: sqlite3.Connection, repair: sqlite3.Row) -> list[str]:
+    """Who the repair was with, in order — from the master changes made in
+    the chat (core.repair_edit), ending with the master it has now."""
+    chain = []
+    for row in conn.execute(
+        "SELECT old_value, new_value FROM repair_edits WHERE order_id = ? AND field = 'master' AND undone_at IS NULL ORDER BY id",
+        (repair["id"],),
+    ):
+        old_id = json.loads(row["old_value"] or "{}").get("master_id")
+        if not chain and old_id:
+            old = conn.execute("SELECT name FROM staff WHERE id = ?", (old_id,)).fetchone()
+            if old:
+                chain.append(old["name"])
+        chain.append(row["new_value"])
+    current = repair["master_name"]
+    if current and (not chain or chain[-1] != current):
+        chain.append(current)
+    return chain if current else []
+
+
+def roadmap(conn: sqlite3.Connection, repair: sqlite3.Row) -> str:
+    """🗺 Путь ремонта одной строкой (25.10, Павел): точка приёма ➜ мастер ➜
+    готов ➜ выдан. Пройденное — со временем, текущий шаг жирным, что
+    осталось — кружком. Строится из истории статусов: повторы схлопнуты,
+    закрытие, которое потом переиграли («Возврат» → «Изменить выбор»),
+    выпадает, а откат назад виден как «↩»."""
+    simple = _simple_flow.is_simple(conn, repair["location_id"])
+    events = [(row["status"], row["changed_at"]) for row in conn.execute(
+        "SELECT status, changed_at FROM repair_status_history WHERE order_id = ? ORDER BY id", (repair["id"],),
+    )]
+    kept: list[tuple[str, str]] = []
+    for index, (status, at) in enumerate(events):
+        if status in _CLOSED and index < len(events) - 1:
+            continue
+        if kept and kept[-1][0] == status:
+            continue
+        kept.append((status, at))
+    if not kept or kept[0][0] != "new":
+        kept.insert(0, ("new", repair["created_at"]))
+
+    point = conn.execute("SELECT name FROM locations WHERE id = ?", (repair["location_id"],)).fetchone()
+    masters = [f"🔧 {html.escape(name)}" for name in _masters_chain(conn, repair)]
+    steps: list[str] = []
+    day = None
+    worked = False
+    for index, (status, at) in enumerate(kept):
+        when, day = _when(at, day)
+        back = index > 0 and _STEP_RANK[status] < _STEP_RANK[kept[index - 1][0]]
+        if index == 0:
+            steps.append(f"🏪 {html.escape(point['name'] if point else 'Точка')} {when}".strip())
+            if masters and not any(s == "in_progress" for s, _at in kept):
+                # The master named at intake (or later) without «Взять в работу» — at Гибрид that is every repair.
+                steps += masters
+                worked = True
+            continue
+        if status == "in_progress" and not worked and not back:
+            # The time he took it goes with the first master; changes after follow him.
+            first, *rest = masters or ["🔧 В работе"]
+            steps += [f"{first} {when}".strip(), *rest]
+            worked = True
+            continue
+        if status == "issued":
+            name = "✅ Готов" if simple else "📦 Выдан"
+        elif status == "cancelled":
+            name = "❌ Возврат" if simple else "❌ Отказ"
+        else:
+            name = ("↩ " if back else "") + {"new": "Новый", "in_progress": "В работе", "ready": "✅ Готов"}[status]
+        steps.append(f"{name} {when}".strip())
+    steps[-1] = f"<b>{steps[-1]}</b>"
+    status = repair["status"]
+    if status not in _CLOSED:
+        ahead = ["Готов"] if simple else (["Готов", "Выдан"] if status != "ready" else ["Выдан"])
+        if not simple and status == "new" and not masters:
+            ahead.insert(0, "В работе")
+        steps += [f"○ {step}" for step in ahead]
+    return "🗺 " + " ➜ ".join(steps)
+
+
 def render_card_text(
     repair: sqlite3.Row, parts: list | None = None, notes: list | None = None, notes_shown: int = CARD_NOTES,
+    path: str | None = None,
 ) -> str:
     """HTML-formatted staff-group/topic card for a repair — shared by the
     web panel (on intake) and the bot (after a button press edits it in
@@ -858,7 +951,10 @@ def render_card_text(
 
     timestamp_label = _STATUS_TIMESTAMP_LABEL.get(repair["status"])
     timestamp_col = _TIMESTAMP_COLUMN.get(repair["status"])
-    if timestamp_label and timestamp_col and repair[timestamp_col]:
+    if path:
+        # The path carries every step's time — the one-step line would repeat it.
+        lines += ["", path]
+    elif timestamp_label and timestamp_col and repair[timestamp_col]:
         lines.append(f"{timestamp_label}: {kyiv_datetime(repair[timestamp_col])}")
 
     # What was said about this repair in the chat (core.repair_notes) —
@@ -882,7 +978,8 @@ def card(conn: sqlite3.Connection, order_id: int) -> tuple[str, dict]:
     """(text, keyboard) of a repair's card as it should look right now."""
     repair = get_repair(conn, order_id)
     parts, notes = get_used_parts(conn, order_id), _notes.card_notes(conn, order_id)
-    text = render_card_text(repair, parts, notes)
+    path = roadmap(conn, repair)
+    text = render_card_text(repair, parts, notes, path=path)
     # A card with a photo is a caption, cut by Telegram at 1024 characters
     # — and a cut that lands inside the notes' quote leaves broken markup,
     # which Telegram rejects outright (the card would silently stop
@@ -891,7 +988,7 @@ def card(conn: sqlite3.Connection, order_id: int) -> tuple[str, dict]:
     shown = CARD_NOTES
     while notes and len(text) > CARD_TEXT_LIMIT and shown > 0:
         shown -= 1
-        text = render_card_text(repair, parts, notes, shown)
+        text = render_card_text(repair, parts, notes, shown, path=path)
     if _simple_flow.is_simple(conn, repair["location_id"]):
         numbers = None if repair["status"] in _simple_flow.OPEN_STATUSES else _simple_flow.card_numbers(conn, order_id)
         rows = _simple_flow.keyboard_rows(order_id, repair["status"], numbers)
