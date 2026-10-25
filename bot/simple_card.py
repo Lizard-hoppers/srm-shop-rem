@@ -18,7 +18,7 @@ from aiogram import F, Router
 from aiogram.exceptions import TelegramAPIError
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, ForceReply, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from bot.repair_actions import _sync_after_change
 from core import auth as core_auth
@@ -158,6 +158,33 @@ async def amount_typed(message: Message, state: FSMContext) -> None:
 
 # ---- «📦 Наш» (in the DM; bot.quick_actions sends the button here for a simple-mode точка)
 
+_OWN = "📦 <b>Наш заказ</b>\n"
+_OWN_STEPS = ("photo", "model", "problem", "master")
+
+
+def _own_back_keyboard(rows=()) -> InlineKeyboardMarkup:
+    """25.10 (Павел): «⬅️ Назад» и в «Нашем заказе», как в приёме ремонта."""
+    return InlineKeyboardMarkup(inline_keyboard=[*rows, [InlineKeyboardButton(text="⬅️ Назад", callback_data="own_back")]])
+
+
+def _was(value) -> str:
+    return f"\n<i>Было: {html.escape(value)}</i>" if value else ""
+
+
+def _own_step(step: str, data: dict) -> tuple[str, InlineKeyboardMarkup | None]:
+    """Вопрос шага и его кнопки. Сводки у этого диалога нет — уже введённое
+    показывается строкой «Было: …», когда к шагу вернулись «Назад»."""
+    from bot import quick_actions as qa
+
+    if step == "photo":
+        return _OWN + "📸 Пришлите фото устройства:", None
+    if step == "model":
+        return _OWN + "📱 Модель устройства:" + _was(data.get("model")), _own_back_keyboard()
+    if step == "problem":
+        return _OWN + "🔧 Краткое описание:" + _was(data.get("problem")), _own_back_keyboard()
+    store = get_store(data["store_id"])
+    return _OWN + "Выберите мастера:", _own_back_keyboard(qa._master_rows(store, "own_pick", "Не назначать ➡️"))
+
 async def own_start(message: Message, state: FSMContext, store) -> None:
     from bot import quick_actions as qa
 
@@ -173,18 +200,18 @@ async def own_photo(message: Message, state: FSMContext) -> None:
 
     file = await message.bot.get_file(message.photo[-1].file_id)
     buf = await message.bot.download_file(file.file_path)
-    await state.update_data(photo_bytes=buf.read())
+    data = await state.update_data(photo_bytes=buf.read())
     await state.set_state(OwnOrder.model)
-    await qa._advance(message, state, "📦 <b>Наш заказ</b>\n📱 Модель устройства:")
+    await qa._advance(message, state, *_own_step("model", data))
 
 
 @router.message(OwnOrder.model, F.text)
 async def own_model(message: Message, state: FSMContext) -> None:
     from bot import quick_actions as qa
 
-    await state.update_data(model=message.text.strip())
+    data = await state.update_data(model=message.text.strip())
     await state.set_state(OwnOrder.problem)
-    await qa._advance(message, state, "📦 <b>Наш заказ</b>\n🔧 Краткое описание:")
+    await qa._advance(message, state, *_own_step("problem", data))
 
 
 @router.message(OwnOrder.problem, F.text)
@@ -193,9 +220,23 @@ async def own_problem(message: Message, state: FSMContext) -> None:
 
     data = await state.update_data(problem=message.text.strip())
     await state.set_state(OwnOrder.master)
-    store = get_store(data["store_id"])
-    keyboard = InlineKeyboardMarkup(inline_keyboard=qa._master_rows(store, "own_pick", "Не назначать ➡️"))
-    await qa._advance(message, state, "📦 <b>Наш заказ</b>\nВыберите мастера:", reply_markup=keyboard)
+    await qa._advance(message, state, *_own_step("master", data))
+
+
+@router.callback_query(F.data == "own_back")
+async def own_back(callback: CallbackQuery, state: FSMContext) -> None:
+    """«⬅️ Назад»: снова прошлый вопрос, новый ответ заменит прежний."""
+    from bot import quick_actions as qa
+
+    group, _, current = (await state.get_state() or "").partition(":")
+    if group != "OwnOrder" or current not in _OWN_STEPS[1:]:
+        await callback.answer()
+        return
+    previous = _OWN_STEPS[_OWN_STEPS.index(current) - 1]
+    data = await state.get_data()
+    await state.set_state(getattr(OwnOrder, previous))
+    await qa._advance_callback(callback, state, *_own_step(previous, data))
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("own_pick:"), OwnOrder.master)

@@ -9865,6 +9865,14 @@ def scenario_simple_flow() -> None:
             await say(MGR_TG, "iPhone 11", chat_id=MGR_TG, chat_type="private")
             await say(MGR_TG, "замена АКБ", chat_id=MGR_TG, chat_type="private")
             check("then the master to pick", any("Выберите мастера" in m["text"] for m in sent))
+            await tap(MGR_TG, "own_back", chat_id=MGR_TG, chat_type="private")
+            check("«⬅️ Назад» in «Наш заказ»: the description again, with what was typed",
+                  any("Краткое описание" in m["text"] and "Было: замена АКБ" in m["text"] for m in sent))
+            await tap(MGR_TG, "own_back", chat_id=MGR_TG, chat_type="private")
+            check("…and back once more — the model", any("Модель устройства" in m["text"] and "Было: iPhone 11" in m["text"] for m in sent))
+            await say(MGR_TG, "iPhone 11", chat_id=MGR_TG, chat_type="private")
+            await say(MGR_TG, "замена АКБ", chat_id=MGR_TG, chat_type="private")
+            check("answering again goes on to the master", any("Выберите мастера" in m["text"] for m in sent))
             posted = []
             orig_notify = repairs.notify_and_save
             repairs.notify_and_save = lambda store, order_id, *a: posted.append(order_id)
