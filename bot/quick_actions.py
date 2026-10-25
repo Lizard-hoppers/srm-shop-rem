@@ -97,8 +97,7 @@ BTN_OUR_REPAIR = "🛠 Наш ремонт"
 OLD_BOT_REPAIR, OLD_BOT_OWN = "📝 Создать заказ на ремонт", "📦 Наш"
 BTN_SALE = "🛍 Продажа"
 BTN_CLIENT = "👤 Клиент"
-# 25.10 (Павел): «🧾 Услуга» на клавиатуре вместо «👤 Клиент» (им редко
-# пользуются; старая кнопка у кого осталась — работает). bot/service_flow.py.
+# 25.10 (Павел): «🧾 Услуга» — продажа услуг, bot/service_flow.py.
 BTN_SERVICE = "🧾 Услуга"
 BTN_BUYBACK = "🛒 Покупка"
 BTN_PURCHASE = "📦 Приход"
@@ -164,8 +163,10 @@ QUICK_ACTIONS_KEYBOARD = ReplyKeyboardMarkup(
         [KeyboardButton(text=BTN_REPAIR), KeyboardButton(text=BTN_OUR_REPAIR)],
         [KeyboardButton(text=BTN_SALE, style="success"), KeyboardButton(text=BTN_BUYBACK, style="success")],
         [KeyboardButton(text=BTN_PURCHASE), KeyboardButton(text=BTN_TRANSFER)],
-        [KeyboardButton(text=BTN_SERVICE, style="primary"), KeyboardButton(text=BTN_CASH)],
-        [KeyboardButton(text=BTN_SUMMARY), KeyboardButton(text=BTN_CANCEL, style="danger")],
+        # «👤 Клиент» вернули рядом с «🧾 Услугой» (Павел, 25.10)
+        [KeyboardButton(text=BTN_SERVICE, style="primary"), KeyboardButton(text=BTN_CLIENT, style="primary")],
+        [KeyboardButton(text=BTN_CASH), KeyboardButton(text=BTN_SUMMARY)],
+        [KeyboardButton(text=BTN_CANCEL, style="danger")],
     ],
     resize_keyboard=True,
     is_persistent=True,

@@ -10314,9 +10314,9 @@ def scenario_services() -> None:
             check("…and is on the pay list", "Віталій" in client.get(f"/masters?t={token}").text)
 
         # ---- бот
-        check("«🧾 Услуга» is on the keyboard in place of «👤 Клиент»",
+        check("«🧾 Услуга» and «👤 Клиент» are both on the keyboard",
               any(b.text == qa.BTN_SERVICE for row in qa.QUICK_ACTIONS_KEYBOARD.keyboard for b in row)
-              and not any(b.text == qa.BTN_CLIENT for row in qa.QUICK_ACTIONS_KEYBOARD.keyboard for b in row))
+              and any(b.text == qa.BTN_CLIENT for row in qa.QUICK_ACTIONS_KEYBOARD.keyboard for b in row))
         sent: list[dict] = []
 
         class _FakeBot(Bot):
