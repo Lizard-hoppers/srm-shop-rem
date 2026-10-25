@@ -37,6 +37,7 @@ from bot.transfer_flow import router as transfer_flow_router
 from core import assistant as core_assistant
 from core import bots as core_bots
 from core import gsheet_mirror
+from core import cash_watch
 from core import tg_journal
 from core.storage import get_conn
 from core.storage import init_db
@@ -175,6 +176,7 @@ async def _reminder_loop(bots: list[Bot]) -> None:
 
 
 _GSHEET_TICK_SECONDS = 20
+_CASH_WATCH_TICK_SECONDS = 10
 
 
 async def _gsheet_loop() -> None:
@@ -186,6 +188,16 @@ async def _gsheet_loop() -> None:
         except Exception:
             logging.getLogger(__name__).exception("google sheet copy failed")
         await asyncio.sleep(_GSHEET_TICK_SECONDS)
+
+
+async def _cash_watch_loop() -> None:
+    """Движения кассы — владельцам в личку (core.cash_watch)."""
+    while True:
+        try:
+            await asyncio.to_thread(cash_watch.run_once)
+        except Exception:
+            logging.getLogger(__name__).exception("cash watch failed")
+        await asyncio.sleep(_CASH_WATCH_TICK_SECONDS)
 
 
 async def _assistant_loop() -> None:
@@ -214,12 +226,14 @@ async def main() -> None:
     assistant_task = asyncio.create_task(_assistant_loop())
     reminder_task = asyncio.create_task(_reminder_loop(bots))
     gsheet_task = asyncio.create_task(_gsheet_loop())
+    cash_watch_task = asyncio.create_task(_cash_watch_loop())
     try:
         await dp.start_polling(*bots)
     finally:
         assistant_task.cancel()
         reminder_task.cancel()
         gsheet_task.cancel()
+        cash_watch_task.cancel()
 
 
 async def _set_up(bot: Bot) -> None:

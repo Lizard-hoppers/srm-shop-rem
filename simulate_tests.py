@@ -10351,6 +10351,52 @@ def scenario_services() -> None:
               row is not None and row["amount"] == 700 and remembered is not None and any("Проведено" in m["text"] for m in sent))
 
 
+def scenario_cash_watch() -> None:
+    """Каждое движение кассы — владельцам в личку (25.10): приход, расход,
+    отмена; кому — по точкам; Telegram просит подождать — очередь ждёт."""
+    print("scenario: движения кассы — владельцам в личку")
+    from core import accounts, cash, cash_watch, services
+
+    check("CRM_CASH_WATCHERS: who and which точки",
+          cash_watch.watchers("1417059280:*; 455284316:1 ;junk") == [(1417059280, None), (455284316, {1})])
+    with tempfile.TemporaryDirectory() as tmp, _separate_base(tmp, "watch.sqlite3", ("007", "Гибрид")) as db_path:
+        with get_conn(db_path) as conn:
+            boss = auth.create_staff(conn, "cw-owner", "pass", "Павел", "owner")
+            accounts.ensure_for_location(conn, 1)
+            accounts.ensure_for_location(conn, 2)
+            cash007, cash_gib = accounts.default_account(conn, 1, "cash"), accounts.default_account(conn, 2, "cash")
+            conn.execute("DELETE FROM cash_watch_queue")
+            services.sell(conn, 1, "Плёнка", 300, cash007["id"], boss)
+            cash.record_expense(conn, "cash", 120, "other", "вода", boss, location_id=1)
+            services.sell(conn, 2, "Чистка", 200, cash_gib["id"], boss)
+            first = conn.execute("SELECT id FROM cash_transactions ORDER BY id LIMIT 1").fetchone()["id"]
+            cash.cancel_transaction(conn, first)
+        sent = []
+        orig = os.environ.get("CRM_CASH_WATCHERS")
+        os.environ["CRM_CASH_WATCHERS"] = "111:*;222:1"
+        try:
+            answers = iter(["later"])
+            cash_watch.run_once(db_path, send=lambda loc, text, user: next(answers, "ok"))
+            with get_conn(db_path) as conn:
+                waiting = conn.execute("SELECT COUNT(*) AS n FROM cash_watch_queue").fetchone()["n"]
+            check("Telegram asks to wait — nothing is lost, the queue waits", waiting == 4)
+            done = cash_watch.run_once(db_path, send=lambda loc, text, user: sent.append((user, loc, text)) or "ok")
+        finally:
+            if orig is None:
+                os.environ.pop("CRM_CASH_WATCHERS", None)
+            else:
+                os.environ["CRM_CASH_WATCHERS"] = orig
+        to_owner = [t for u, _l, t in sent if u == 111]
+        to_andrey = [loc for u, loc, _t in sent if u == 222]
+        check("every movement goes out: the sale, the expense, the other точка's sale, the cancel", done == 4 and len(to_owner) == 4)
+        check("the one watching only 007 gets 007's and not Гибрид's", to_andrey == [1, 1, 1])
+        check("a line says the точка, the sum with its sign, the account, what it was, who and what is left",
+              "<b>007</b>" in to_owner[0] and "+300 грн" in to_owner[0] and "Услуга УС-" in to_owner[0]
+              and "👤 Павел" in to_owner[0] and "остаток" in to_owner[0])
+        check("an expense is a minus with its comment", "−120 грн" in to_owner[1] and "вода" in to_owner[1])
+        check("a cancel says so", to_owner[3].startswith("↩️") and "отменено" in to_owner[3] and "+300 грн" in to_owner[3])
+
+
 def scenario_master_pay_gibrid() -> None:
     """Зарплата мастеров Гибрида в CRM (23.10, этап 3): ставка «ровно треть»,
     сводка по ремонтам за период = начисления, стартовый остаток, выплата
@@ -10757,6 +10803,7 @@ def main() -> None:
     scenario_card_edit_by_words()
     scenario_repair_roadmap()
     scenario_services()
+    scenario_cash_watch()
     scenario_master_pay_gibrid()
     scenario_gsheet_mirror()
     scenario_gibrit_cutover()

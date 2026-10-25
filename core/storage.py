@@ -205,6 +205,15 @@ CREATE TABLE IF NOT EXISTS gsheet_queue (
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Движения кассы для рассылки владельцам (25.10, core.cash_watch) —
+-- заполняется триггерами на cash_transactions.
+CREATE TABLE IF NOT EXISTS cash_watch_queue (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tx_id INTEGER NOT NULL,
+    event TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- Услуги (25.10, core.services): справочник точки — бот предлагает их
 -- кнопками быстрого выбора — и проданные услуги (документ «УС»).
 CREATE TABLE IF NOT EXISTS services (
@@ -1191,6 +1200,12 @@ def init_db(db_path: str = DB_PATH) -> None:
                     WHEN (SELECT COALESCE(gsheet_id, '') FROM locations WHERE id = NEW.location_id) != ''
                     BEGIN INSERT INTO gsheet_queue (repair_id) VALUES (NEW.id); END"""
             )
+        # Каждое движение кассы и его отмена — владельцам в личку (core.cash_watch).
+        conn.execute("""CREATE TRIGGER IF NOT EXISTS cash_watch_insert AFTER INSERT ON cash_transactions
+                        BEGIN INSERT INTO cash_watch_queue (tx_id, event) VALUES (NEW.id, 'new'); END""")
+        conn.execute("""CREATE TRIGGER IF NOT EXISTS cash_watch_cancel AFTER UPDATE OF cancelled_at ON cash_transactions
+                        WHEN OLD.cancelled_at IS NULL AND NEW.cancelled_at IS NOT NULL
+                        BEGIN INSERT INTO cash_watch_queue (tx_id, event) VALUES (NEW.id, 'cancel'); END""")
         # Заход 5: a master is штатный or аутсорс and has skills on record;
         # a client repair remembers that its master said «без запчасти».
         _ensure_column(conn, "staff", "master_kind", "master_kind TEXT NOT NULL DEFAULT 'staff'")
