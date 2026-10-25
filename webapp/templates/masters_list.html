@@ -12,6 +12,7 @@
       <h3 style="margin:0;">{{ m.name }}</h3>
       <p class="meta" style="margin:2px 0 0;">
         <span class="pill {{ 'pill-ready' if m.active else 'pill-cancelled' }}">{{ t('master_status_active') if m.active else t('master_status_inactive') }}</span>
+        {% if m.role != 'master' %} · {{ role_labels.get(m.role, m.role) }}{% endif %}
         {% if m.pay_type %} · {{ t('pay_type_' ~ m.pay_type) }}: {{ m | rate }}{% endif %}
       </p>
     </div>
@@ -31,9 +32,11 @@
       <div class="stat-label">{{ t('stat_all_time') }}: {{ summaries[m.id].all_time.payout }}</div>
     </div>
   </div>
+  {% if m.role == 'master' %}{# a manager switched off here would lose his login to the CRM #}
   <form method="post" action="{{ link('/masters/' ~ m.id ~ (('/activate' if not m.active else '/deactivate'))) }}" style="margin-top: 10px;">
     <button type="submit" class="secondary">{{ t('activate_btn') if not m.active else t('deactivate_btn') }}</button>
   </form>
+  {% endif %}
 </div>
 {% else %}
 <p class="meta">{{ t('masters_empty') }}</p>

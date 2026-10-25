@@ -7,6 +7,7 @@ Mini App — что за услуга (руками) и сумма. Деньги
 прошлую цену."""
 from __future__ import annotations
 
+import math
 import sqlite3
 
 from core import accounts as _accounts
@@ -58,6 +59,21 @@ def list_all(conn: sqlite3.Connection, location_id: int) -> list[sqlite3.Row]:
     ).fetchall()
 
 
+def bonus_people(conn: sqlite3.Connection, location_id: int) -> list[sqlite3.Row]:
+    """Кому можно дать бонус с услуги: мастера и менеджеры точки (и общие)
+    с процентной ставкой."""
+    return conn.execute(
+        """SELECT * FROM staff WHERE active = 1 AND role IN ('master', 'manager') AND (location_id IS NULL OR location_id = ?)
+           AND pay_type = 'percent' AND pay_value > 0 ORDER BY role DESC, name""",
+        (location_id,),
+    ).fetchall()
+
+
+def bonus_amount(amount, rate) -> int:
+    """Его процент от суммы, вверх до 10 грн: 1250 × 33% = 412,5 → 420."""
+    return int(math.ceil(round(float(amount) * float(rate) / 100, 2) / 10) * 10)
+
+
 def _remember(conn: sqlite3.Connection, location_id: int, name: str, amount) -> int:
     known = find(conn, location_id, name)
     if known:
@@ -95,10 +111,11 @@ def hide(conn: sqlite3.Connection, service_id: int) -> None:
 
 def sell(
     conn: sqlite3.Connection, location_id: int, name: str, amount, account_id: int, staff_id: int | None,
-    *, key: str | None = None, comment: str | None = None,
+    *, key: str | None = None, comment: str | None = None, bonus_staff_id: int | None = None,
 ) -> int:
     """Провести продажу услуги: деньги на счёт, документ «УС», услуга — в
-    справочник. Возвращает id продажи (= номер документа)."""
+    справочник; bonus_staff_id — кому бонус по его % (в зарплату, из
+    прибыли услуги). Возвращает id продажи (= номер документа)."""
     name = clean_name(name)
     try:
         amount = money(amount)
@@ -111,6 +128,11 @@ def sell(
         raise ServiceError("Этого счёта нет у точки.")
     if account["currency"] != _accounts.BASE_CURRENCY:
         raise ServiceError("Услуга оплачивается в гривне — выберите гривневый счёт.")
+    bonus_to = None
+    if bonus_staff_id:
+        bonus_to = next((p for p in bonus_people(conn, location_id) if p["id"] == bonus_staff_id), None)
+        if not bonus_to:
+            raise ServiceError("Этому сотруднику бонус не начислить — у него не задан процент.")
     service_id = _remember(conn, location_id, name, amount)
     sale_id = conn.execute(
         """INSERT INTO service_sales (location_id, service_id, name, amount, account_id, staff_id, comment)
@@ -121,7 +143,11 @@ def sell(
                comment=f"Услуга: {name}")
     _documents.register(conn, "service", staff_id=staff_id, location_id=location_id, ref_table="service_sales",
                         ref_id=sale_id, title=name, amount=amount, key=key)
-    _documents.set_profit(conn, "service", sale_id, amount)
+    bonus = bonus_amount(amount, bonus_to["pay_value"]) if bonus_to else 0
+    if bonus:
+        _masters.accrue(conn, bonus_to["id"], "service", "service", sale_id, bonus,
+                        f"{_documents.label('service', sale_id)} «{name}»: {amount} × {_masters.rate_text('percent', bonus_to['pay_value'])}")
+    _documents.set_profit(conn, "service", sale_id, money(amount - bonus))
     return sale_id
 
 

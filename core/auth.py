@@ -121,6 +121,23 @@ def create_master(
     return cur.lastrowid
 
 
+# 25.10 (Павел): менеджеры тоже зарабатывают — бонусы с услуг. В зарплатах
+# (webapp/routers/masters.py) и в выплатах они рядом с мастерами; в ремонт
+# мастером их по-прежнему не назначить (list_masters — только мастера).
+PAYEE_ROLES = ("master", "manager")
+
+
+def list_payees(conn: sqlite3.Connection, include_inactive: bool = False) -> list[sqlite3.Row]:
+    active = "" if include_inactive else " AND active = 1"
+    return conn.execute(
+        f"SELECT * FROM staff WHERE role IN ('master', 'manager'){active} ORDER BY active DESC, role DESC, name"
+    ).fetchall()
+
+
+def get_payee(conn: sqlite3.Connection, staff_id: int) -> sqlite3.Row | None:
+    return conn.execute("SELECT * FROM staff WHERE id = ? AND role IN ('master', 'manager')", (staff_id,)).fetchone()
+
+
 def list_masters(conn: sqlite3.Connection, include_inactive: bool = False) -> list[sqlite3.Row]:
     if include_inactive:
         return conn.execute(
@@ -166,7 +183,7 @@ def update_master(
 ) -> None:
     conn.execute(
         "UPDATE staff SET name = ?, telegram_id = ?, pay_type = ?, pay_value = ?, location_id = ? "
-        "WHERE id = ? AND role = 'master'",
+        "WHERE id = ? AND role IN ('master', 'manager')",
         (name.strip(), telegram_id, pay_type, pay_value, location_id, staff_id),
     )
     # Штатный/аутсорс and skills are only touched when the caller says so

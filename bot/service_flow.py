@@ -25,6 +25,7 @@ from bot.miniapp_links import crm_link
 from core import accounts as core_accounts
 from core import auth as core_auth
 from core import documents as core_documents
+from core import masters as core_masters
 from core import notify as core_notify
 from core import services as core_services
 from core import simple_flow
@@ -65,6 +66,23 @@ def _amount_screen(data: dict) -> tuple[str, InlineKeyboardMarkup]:
     return _AMOUNT_QUESTION, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def _bonus_people(store) -> list:
+    with get_conn(store.db_path) as conn:
+        return core_services.bonus_people(conn, store.location_id)
+
+
+def _bonus_screen(store, data: dict) -> tuple[str, InlineKeyboardMarkup]:
+    """Кому бонус с этой услуги — его % вверх до 10 грн (core.services)."""
+    rows = []
+    for person in _bonus_people(store):
+        bonus = core_services.bonus_amount(data["amount"], person["pay_value"])
+        rate = core_masters.rate_text("percent", person["pay_value"])
+        rows.append([InlineKeyboardButton(text=f"{person['name']} · {rate} = {bonus} грн"[:60], callback_data=f"svc_bonus:{person['id']}")])
+    rows.append([InlineKeyboardButton(text="Без бонуса ➡️", callback_data="svc_bonus:0")])
+    rows.append([_BACK, _CANCEL])
+    return "Бонус кому?", InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def _pay_screen(store, data: dict) -> tuple[str, InlineKeyboardMarkup]:
     rows = [[InlineKeyboardButton(text=f"💵 {a['name']}", callback_data=f"svc_pay:{a['id']}")] for a in _accounts(store)]
     rows.append([_BACK, _CANCEL])
@@ -76,6 +94,7 @@ def _confirm_screen(data: dict) -> tuple[str, InlineKeyboardMarkup]:
         "🧾 <b>Проверьте и проведите</b>",
         f"Услуга: {html.escape(data['name'])}",
         f"Сумма: <b>{money(data['amount'])} грн</b>",
+        *([f"Бонус: {html.escape(data['bonus_label'])}"] if data.get("bonus_label") else []),
         f"Оплата: {html.escape(data['pay_label'])}",
     ])
     return text, InlineKeyboardMarkup(inline_keyboard=[
@@ -105,7 +124,7 @@ async def service_start(message: Message, state: FSMContext) -> None:
     await qa._reset(message, state)
     await state.set_state(qa.ServiceSale.name)
     accounts = _accounts(store)
-    await state.update_data(store_id=store.id, pay_needed=len(accounts) > 1)
+    await state.update_data(store_id=store.id, pay_needed=len(accounts) > 1, bonus_needed=bool(_bonus_people(store)))
     question, keyboard = _name_screen(store)
     await qa._consume(state, message)
     await qa._repost(message, state, qa._flow_screen(await state.get_state(), await state.get_data(), question), keyboard)
@@ -148,6 +167,14 @@ async def service_pick(callback: CallbackQuery, state: FSMContext) -> None:
 
 async def _after_amount(state: FSMContext, store, amount) -> tuple[str, InlineKeyboardMarkup]:
     data = await state.update_data(amount=amount)
+    if data.get("bonus_needed"):
+        await state.set_state(qa.ServiceSale.bonus)
+        return _bonus_screen(store, data)
+    return await _to_pay(state, store)
+
+
+async def _to_pay(state: FSMContext, store) -> tuple[str, InlineKeyboardMarkup]:
+    data = await state.get_data()
     accounts = _accounts(store)
     if len(accounts) == 1:
         data = await state.update_data(pay_account=accounts[0]["id"], pay_label=accounts[0]["name"])
@@ -180,6 +207,26 @@ async def service_amount_last(callback: CallbackQuery, state: FSMContext) -> Non
     await callback.answer()
 
 
+@router.callback_query(F.data.startswith("svc_bonus:"), qa.ServiceSale.bonus)
+async def service_bonus(callback: CallbackQuery, state: FSMContext) -> None:
+    ctx = await _store(callback, state)
+    if not ctx:
+        return
+    store, data = ctx
+    person_id = int(callback.data.split(":", 1)[1])
+    if person_id:
+        person = next((p for p in _bonus_people(store) if p["id"] == person_id), None)
+        if not person:
+            await callback.answer("Этому сотруднику бонус не начислить.", show_alert=True)
+            return
+        bonus = core_services.bonus_amount(data["amount"], person["pay_value"])
+        await state.update_data(bonus_staff_id=person_id, bonus_label=f"{person['name']} — {bonus} грн")
+    else:
+        await state.update_data(bonus_staff_id=None, bonus_label=None)
+    await qa._advance_callback(callback, state, *await _to_pay(state, store))
+    await callback.answer()
+
+
 @router.callback_query(F.data.startswith("svc_pay:"), qa.ServiceSale.pay)
 async def service_pay(callback: CallbackQuery, state: FSMContext) -> None:
     ctx = await _store(callback, state)
@@ -205,18 +252,17 @@ async def service_back(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer()
         return
     store, data = ctx
-    if current == "amount":
-        await state.set_state(qa.ServiceSale.name)
-        screen = _name_screen(store)
-    elif current == "pay" or (current == "confirm" and not data.get("pay_needed")):
-        await state.set_state(qa.ServiceSale.amount)
-        screen = _amount_screen(data)
-    elif current == "confirm":
-        await state.set_state(qa.ServiceSale.pay)
-        screen = _pay_screen(store, data)
+    steps = qa._steps_service(data)
+    if current == "confirm":
+        previous = steps[-1]
+    elif current in steps[1:]:
+        previous = steps[steps.index(current) - 1]
     else:
         await callback.answer()
         return
+    await state.set_state(getattr(qa.ServiceSale, previous))
+    screen = {"name": lambda: _name_screen(store), "amount": lambda: _amount_screen(data),
+              "bonus": lambda: _bonus_screen(store, data), "pay": lambda: _pay_screen(store, data)}[previous]()
     await qa._advance_callback(callback, state, *screen)
     await callback.answer()
 
@@ -226,6 +272,7 @@ def _card(sale_id: int, data: dict, staff_name: str) -> str:
         f"🧾 <b>{core_documents.label('service', sale_id)} • Услуга</b>",
         f"Услуга: {html.escape(data['name'])}",
         f"Сумма: {money(data['amount'])} грн",
+        *([f"Бонус: {html.escape(data['bonus_label'])}"] if data.get("bonus_label") else []),
         f"Оплата: {html.escape(data['pay_label'])}",
         f"Провёл: {html.escape(staff_name)}",
     ])
@@ -245,7 +292,7 @@ async def service_confirm(callback: CallbackQuery, state: FSMContext) -> None:
             if not staff:
                 raise core_services.ServiceError("Недостаточно прав.")
             sale_id = core_services.sell(conn, store.location_id, data["name"], data["amount"], data["pay_account"],
-                                         staff["id"], key=qa._tap_key(callback))
+                                         staff["id"], key=qa._tap_key(callback), bonus_staff_id=data.get("bonus_staff_id"))
     except core_services.ServiceError as exc:
         await callback.answer(str(exc)[:190], show_alert=True)
         return

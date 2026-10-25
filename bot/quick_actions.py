@@ -198,6 +198,7 @@ class ServiceSale(StatesGroup):
     """«🧾 Услуга» — handlers in bot/service_flow.py."""
     name = State()
     amount = State()
+    bonus = State()
     pay = State()
     confirm = State()
 
@@ -527,7 +528,7 @@ def _steps_repair(_data: dict) -> list[str]:
 
 
 def _steps_service(data: dict) -> list[str]:
-    return ["name", "amount"] + (["pay"] if data.get("pay_needed") else [])
+    return ["name", "amount"] + (["bonus"] if data.get("bonus_needed") else []) + (["pay"] if data.get("pay_needed") else [])
 
 
 def _summary_service(data: dict) -> list[str]:
@@ -536,6 +537,8 @@ def _summary_service(data: dict) -> list[str]:
         lines.append(f"Услуга: {html.escape(data['name'])}")
     if data.get("amount"):
         lines.append(f"Сумма: {money(data['amount'])} грн")
+    if data.get("bonus_label"):
+        lines.append(f"Бонус: {html.escape(data['bonus_label'])}")
     return lines
 
 

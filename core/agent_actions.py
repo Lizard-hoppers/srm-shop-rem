@@ -160,8 +160,11 @@ def _repair(conn, ctx, ref) -> sqlite3.Row:
     raise Refused(f"Открытого ремонта «{ref}» нет. Сейчас открыты: {listing or 'ни одного'}.")
 
 
-def _master(conn, name) -> sqlite3.Row:
-    rows = conn.execute("SELECT * FROM staff WHERE role = 'master' AND active = 1 ORDER BY name").fetchall()
+def _master(conn, name, payees: bool = False) -> sqlite3.Row:
+    """A master by name; payees=True — anyone who is paid (masters and
+    managers, core.auth.PAYEE_ROLES): a выплата, not a repair."""
+    roles = "('master', 'manager')" if payees else "('master')"
+    rows = conn.execute(f"SELECT * FROM staff WHERE role IN {roles} AND active = 1 ORDER BY name").fetchall()
     found = [m for m in rows if name and matches(str(name), m["name"])]
     if len(found) != 1:
         raise Refused("Какой мастер? Есть: " + ", ".join(m["name"] for m in rows) + ".")
@@ -433,12 +436,22 @@ def sell_service(conn, ctx, a) -> dict:
     _need_shift(conn, ctx)
     amount, account = _amount(a.get("amount")), _account(conn, ctx, a.get("account"))
     try:
-        sale_id = _services.sell(conn, ctx["location_id"], a.get("service"), amount, account["id"], ctx["staff"]["id"])
+        bonus_to = None
+        if a.get("bonus_to"):
+            people = _services.bonus_people(conn, ctx["location_id"])
+            found = [p for p in people if matches(str(a["bonus_to"]), p["name"])]
+            if len(found) != 1:
+                raise Refused("Кому бонус? С процентом есть: " + (", ".join(p["name"] for p in people) or "никого") + ".")
+            bonus_to = found[0]["id"]
+        sale_id = _services.sell(conn, ctx["location_id"], a.get("service"), amount, account["id"], ctx["staff"]["id"],
+                                 bonus_staff_id=bonus_to)
     except _services.ServiceError as exc:
         raise Refused(str(exc)) from exc
     name = _services.get_sale(conn, sale_id)["name"]
+    bonus = _masters.accrued_for(conn, "service", sale_id)
     return _doc_receipt(ctx, _documents.get_for(conn, "service", sale_id),
-                        f"услуга: {html.escape(name)} — {amount} грн · {html.escape(account['name'])}")
+                        f"услуга: {html.escape(name)} — {amount} грн · {html.escape(account['name'])}"
+                        + (f" · бонус {bonus} грн" if bonus else ""))
 
 
 def client_money(conn, ctx, a) -> dict:
@@ -461,7 +474,7 @@ def client_money(conn, ctx, a) -> dict:
 
 def master_payout(conn, ctx, a) -> dict:
     _need_shift(conn, ctx)
-    master = _master(conn, a.get("master"))
+    master = _master(conn, a.get("master"), payees=True)
     amount, account = _amount(a.get("amount")), _account(conn, ctx, a.get("account"))
     payout_id = _masters.pay_out(conn, master["id"], [(account["id"], amount, None)], paid_by=ctx["staff"]["id"],
                                  location_id=ctx["location_id"], comment=" ".join(str(a.get("comment") or "").split()) or None)
@@ -602,11 +615,12 @@ ACTIONS: dict[str, tuple] = {
         {"product": _PRODUCT, "qty": {"type": "integer"}, "price": {"type": "number", "description": "цена за штуку; не названа — из карточки товара"},
          **_CLIENT, "account": {"type": "string", "description": "«наличные», «карта»… или «в долг»"}}, ["product"]),
     "sell_service": (sell_service, _EVERYONE, "Продать услугу (не товар со склада): что за услуга и сумма; account — куда оплата.",
-        {"service": {"type": "string", "description": "что за услуга, как сказали: «наклейка плёнки»"}, "amount": _N, "account": _ACCOUNT},
+        {"service": {"type": "string", "description": "что за услуга, как сказали: «наклейка плёнки»"}, "amount": _N, "account": _ACCOUNT,
+         "bonus_to": {"type": "string", "description": "кому бонус с услуги (менеджер/мастер), если сказали"}},
         ["service", "amount"]),
     "client_money": (client_money, _CASH, "Принять деньги от клиента (in — он гасит долг / вносит аванс) или выдать ему (out — возврат аванса; только владелец/админ).",
         {"direction": {"type": "string", "enum": ["in", "out"]}, **_CLIENT, "amount": _N, "account": _ACCOUNT, "comment": _S}, ["direction", "amount"]),
-    "master_payout": (master_payout, _BOSS, "Выплатить мастеру деньги из кассы.", {"master": _S, "amount": _N, "account": _ACCOUNT, "comment": _S}, ["master", "amount"]),
+    "master_payout": (master_payout, _BOSS, "Выплатить мастеру или менеджеру (зарплата, бонус) деньги из кассы.", {"master": _S, "amount": _N, "account": _ACCOUNT, "comment": _S}, ["master", "amount"]),
     "stock_write_off": (stock_write_off, _CASH, "Списать товар со склада точки (брак, потеря). Нужна причина.", {"product": _PRODUCT, "qty": {"type": "integer"}, "comment": _S}, ["product", "qty", "comment"]),
     "stock_add": (stock_add, _CASH, "Оприходовать товар на склад точки без накладной (нашли, пересчёт).", {"product": _PRODUCT, "qty": {"type": "integer"}, "comment": _S}, ["product", "qty"]),
     "reserve_for_client": (reserve_for_client, _EVERYONE, "Отложить товар за клиентом на 24 часа (заказ с резервом).",

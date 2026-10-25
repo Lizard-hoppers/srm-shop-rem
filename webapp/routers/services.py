@@ -24,8 +24,9 @@ def _page(request: Request, staff, error: str | None = None, success: str | None
         accounts = [a for a in core_accounts.list_accounts(conn, location_id) if a["currency"] == core_accounts.BASE_CURRENCY]
         catalog = core_services.list_all(conn, location_id)
         sales = core_services.recent(conn, location_id)
+        people = core_services.bonus_people(conn, location_id)
     return render(
-        request, "services.html", staff=staff, accounts=accounts, catalog=catalog, sales=sales,
+        request, "services.html", staff=staff, accounts=accounts, catalog=catalog, sales=sales, people=people,
         labels={s["id"]: core_documents.label("service", s["id"]) for s in sales},
         can_edit=staff["role"] in _CATALOG_ROLES, error=error, success=success,
     )
@@ -39,7 +40,7 @@ def list_view(request: Request, staff=Depends(require_staff)):
 @router.post("")
 def sell_view(
     request: Request, name: str = Form(""), amount: str = Form(""), account_id: int = Form(0), idem: str = Form(""),
-    staff=Depends(require_staff),
+    bonus_staff_id: int = Form(0), staff=Depends(require_staff),
 ):
     key = idem_key("service", idem)
     try:
@@ -48,7 +49,7 @@ def sell_view(
                 return RedirectResponse(link(request, "/services"), status_code=303)
             parsed = core_accounts.parse_amount(amount)
             sale_id = core_services.sell(conn, loc(request), name, parsed if parsed is not None else amount, account_id,
-                                         staff["id"], key=key)
+                                         staff["id"], key=key, bonus_staff_id=bonus_staff_id or None)
     except core_services.ServiceError as exc:
         return _page(request, staff, error=str(exc))
     return _page(request, staff, success=f"{core_documents.label('service', sale_id)} проведена.")

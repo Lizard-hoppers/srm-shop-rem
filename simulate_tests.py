@@ -10276,6 +10276,20 @@ def scenario_services() -> None:
                 refused = True
             check("no name — refused", refused)
 
+        # ---- бонус с услуги
+        with get_conn(db_path) as conn:
+            mgr = auth.create_staff(conn, "sv-mgr", "pass", "Віталій", "manager", location_id=1)
+            conn.execute("UPDATE staff SET pay_type = 'percent', pay_value = 33 WHERE id = ?", (mgr,))
+            check("a bonus is his % rounded up to 10 грн: 1250 × 33% = 412,5 → 420",
+                  services.bonus_amount(1250, 33) == 420 and services.bonus_amount(900, 100 / 3) == 300)
+            check("managers with a % are offered for a bonus", mgr in [p["id"] for p in services.bonus_people(conn, 1)])
+            with_bonus = services.sell(conn, 1, "% крипта", 1250, cash["id"], boss, bonus_staff_id=mgr)
+            check("the bonus goes to his pay and comes off the service's profit",
+                  masters.accrued_for(conn, "service", with_bonus) == 420 and masters.owed(conn, mgr) == 420
+                  and documents.get_for(conn, "service", with_bonus)["profit"] == 830)
+            check("a manager is among those paid — and still not a repair master",
+                  mgr in [p["id"] for p in auth.list_payees(conn)] and mgr not in [m["id"] for m in auth.list_masters(conn)])
+
         # ---- Mini App
         token = make_token(boss, "1")
         import webapp.main  # noqa: F401
@@ -10295,6 +10309,9 @@ def scenario_services() -> None:
             with get_conn(db_path) as conn:
                 edited = services.get(conn, sid)
             check("the catalog: a service renamed and its price set", edited["name"] == "Чистка сетки динамика" and edited["price"] == 250)
+            page = client.get(f"/masters/{mgr}?t={token}")
+            check("a manager has his pay page: what he earned and what we owe", page.status_code == 200 and "420" in page.text)
+            check("…and is on the pay list", "Віталій" in client.get(f"/masters?t={token}").text)
 
         # ---- бот
         check("«🧾 Услуга» is on the keyboard in place of «👤 Клиент»",
@@ -10341,6 +10358,9 @@ def scenario_services() -> None:
             await say("abc")
             check("a sum that isn't a number is asked again", sent[-1]["text"].startswith("⚠️"))
             await say("700")
+            check("then «Бонус кому» — who has a %, with what he'd get, and «Без бонуса»",
+                  "Бонус кому" in sent[-1]["text"] and f"svc_bonus:{mgr}" in sent[-1]["buttons"] and "svc_bonus:0" in sent[-1]["buttons"])
+            await tap(f"svc_bonus:{mgr}")
             if "svc_pay:" in " ".join(sent[-1]["buttons"]):
                 await tap(next(b for b in sent[-1]["buttons"] if b.startswith("svc_pay:")))
             check("then «Проверьте и проведите» with what was entered",
@@ -10351,6 +10371,8 @@ def scenario_services() -> None:
         with get_conn(db_path) as conn:
             row = conn.execute("SELECT * FROM service_sales WHERE name = 'Прошивка'").fetchone()
             remembered = services.find(conn, 1, "прошивка")
+            bot_bonus = masters.accrued_for(conn, "service", row["id"]) if row else None
+        check("the bonus picked in the bot is in his pay: 700 × 33% = 231 → 240", bot_bonus == 240)
         check("«✅ Провести»: the service is sold, the new one remembered for the buttons",
               row is not None and row["amount"] == 700 and remembered is not None and any("Проведено" in m["text"] for m in sent))
 

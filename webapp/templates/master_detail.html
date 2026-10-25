@@ -163,7 +163,9 @@
   <button type="submit">{{ t('save_btn') }}</button>
 </form>
 
+{% if master.role == 'master' %}
 <form method="post" action="{{ link('/masters/' ~ master.id ~ (('/activate' if not master.active else '/deactivate'))) }}" style="margin-top: 12px;">
   <button type="submit" class="secondary">{{ t('activate_btn') if not master.active else t('deactivate_btn') }}</button>
 </form>
+{% endif %}
 {% endblock %}

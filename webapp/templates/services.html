@@ -16,6 +16,14 @@
   <label>{{ t('services_account') }}
     <select name="account_id">{% for a in accounts %}<option value="{{ a.id }}">{{ a.name }}</option>{% endfor %}</select>
   </label>
+  {% if people %}
+  <label>{{ t('services_bonus') }}
+    <select name="bonus_staff_id">
+      <option value="0">{{ t('services_no_bonus') }}</option>
+      {% for p in people %}<option value="{{ p.id }}">{{ p.name }} · {{ p | rate }}</option>{% endfor %}
+    </select>
+  </label>
+  {% endif %}
   <button type="submit">{{ t('services_sell') }}</button>
 </form>
 <script>

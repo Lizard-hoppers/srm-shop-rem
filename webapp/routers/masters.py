@@ -37,7 +37,7 @@ def _list_context(conn) -> dict:
     """Masters are one list for the whole business — a master's stats
     follow the master, whichever точка's repairs they worked on. `locations`
     feeds the «Точка» picker (which точка they log into / belong to)."""
-    masters = core_auth.list_masters(conn, include_inactive=True)
+    masters = core_auth.list_payees(conn, include_inactive=True)
     return {
         "masters": masters,
         "summaries": {m["id"]: core_masters.master_summary(conn, m) for m in masters},
@@ -77,7 +77,7 @@ def create_view(
 @router.get("/{master_id}")
 def detail_view(request: Request, master_id: int, staff=Depends(require_role(*_MASTERS_ROLES))):
     with get_conn() as conn:
-        master = core_auth.get_master(conn, master_id)
+        master = core_auth.get_payee(conn, master_id)
         if not master:
             return RedirectResponse(link(request, "/masters"), status_code=303)
         summary = core_masters.master_summary(conn, master)
@@ -132,7 +132,7 @@ async def payout_view(request: Request, master_id: int, staff=Depends(require_ro
                 )
     except (core_masters.PayoutError, core_cash.PaymentError) as exc:
         with get_conn() as conn:
-            master = core_auth.get_master(conn, master_id)
+            master = core_auth.get_payee(conn, master_id)
             if not master:
                 return RedirectResponse(link(request, "/masters"), status_code=303)
             return render(
@@ -145,7 +145,7 @@ async def payout_view(request: Request, master_id: int, staff=Depends(require_ro
 
 async def _back_with_error(request: Request, staff, master_id: int, error: str):
     with get_conn() as conn:
-        master = core_auth.get_master(conn, master_id)
+        master = core_auth.get_payee(conn, master_id)
         if not master:
             return RedirectResponse(link(request, "/masters"), status_code=303)
         return render(
@@ -193,7 +193,7 @@ def edit_view(
     staff=Depends(require_role(*_MASTERS_ROLES)),
 ):
     with get_conn() as conn:
-        master = core_auth.get_master(conn, master_id)
+        master = core_auth.get_payee(conn, master_id)
         if not master:
             return RedirectResponse(link(request, "/masters"), status_code=303)
         if not name.strip():
