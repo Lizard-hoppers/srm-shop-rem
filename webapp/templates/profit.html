@@ -23,7 +23,7 @@
   <tbody>
     <tr><td>{{ t('profit_sales') }} <span class="meta">· {{ profit.sales_count }} · {{ t('profit_revenue') }} {{ profit.sales_revenue | money }}</span></td><td>+{{ profit.sales_profit | money }}</td></tr>
     <tr><td>{{ t('profit_repairs') }} <span class="meta">· {{ profit.repairs_count }} · {{ t('profit_revenue') }} {{ profit.repairs_revenue | money }}</span></td><td>+{{ profit.repairs_profit | money }}</td></tr>
-    {% if profit.services_count %}<tr><td>{{ t('profit_services') }} <span class="meta">· {{ profit.services_count }}</span></td><td>+{{ profit.services_revenue | money }}</td></tr>{% endif %}
+    {% if profit.services_count %}<tr><td>{{ t('profit_services') }} <span class="meta">· {{ profit.services_count }} · {{ t('profit_revenue') }} {{ profit.services_revenue | money }}</span></td><td>+{{ profit.services_profit | money }}</td></tr>{% endif %}
     <tr><td><b>{{ t('profit_gross') }}</b></td><td><b>{{ profit.gross | money }}</b></td></tr>
     <tr><td>{{ t('expense_category_rent') }}</td><td>−{{ profit.expenses.rent | money }}</td></tr>
     <tr><td>{{ t('expense_category_salary') }}</td><td>−{{ profit.expenses.salary | money }}</td></tr>

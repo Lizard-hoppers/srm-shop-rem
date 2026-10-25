@@ -10235,7 +10235,7 @@ def scenario_services() -> None:
     from aiogram.types import CallbackQuery, Chat, Message, Update, User
 
     from bot import quick_actions as qa
-    from core import accounts, doc_cancel, documents, overview, services, store_settings
+    from core import accounts, doc_cancel, documents, masters, overview, services, store_settings
 
     TG = 561001
     with tempfile.TemporaryDirectory() as tmp, _separate_base(tmp, "services.sqlite3", ("Гибрид",)) as db_path:
@@ -10261,7 +10261,11 @@ def scenario_services() -> None:
             numbers = overview.profit(conn, start, end, 1)
             check("all of a service is profit: in «Прибыль» as услуги", numbers["services_count"] == 3 and numbers["services_revenue"] == 850
                   and numbers["net"] == 850)
+            masters.accrue(conn, boss, "service", "service", first, 100, "доля за услугу")
+            documents.set_profit(conn, "service", first, 200)
+            check("a share paid for a service comes off its profit", overview.profit(conn, start, end, 1)["net"] == 750)
             doc_cancel.cancel_document(conn, doc["id"], boss, "ошибка")
+            check("…and cancelling the service takes the share off too", masters.accrued_for(conn, "service", first) == 0)
             check("cancelling the document takes the money back off the account",
                   accounts.balance(conn, cash["id"]) == before + 550 and services.get_sale(conn, first)["status"] == "cancelled"
                   and overview.profit(conn, start, end, 1)["services_revenue"] == 550)

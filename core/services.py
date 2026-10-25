@@ -12,6 +12,7 @@ import sqlite3
 from core import accounts as _accounts
 from core import cash as _cash
 from core import documents as _documents
+from core import masters as _masters
 from core.accounts import money
 
 QUICK_LIMIT = 8
@@ -125,11 +126,13 @@ def sell(
 
 
 def cancel(conn: sqlite3.Connection, sale_id: int) -> None:
-    """Деньги со счёта — обратно (документ помечает отменённым core.doc_cancel)."""
+    """Деньги со счёта — обратно, начисление сотруднику (если записали) —
+    снято; документ помечает отменённым core.doc_cancel."""
     for row in conn.execute(
         "SELECT id FROM cash_transactions WHERE ref_type = 'service' AND ref_id = ? AND cancelled_at IS NULL", (sale_id,),
     ).fetchall():
         _cash.cancel_transaction(conn, row["id"])
+    _masters.cancel_accruals(conn, "service", sale_id)
     conn.execute("UPDATE service_sales SET status = 'cancelled' WHERE id = ?", (sale_id,))
 
 
