@@ -32,17 +32,19 @@ router = Router()
 GROUP_KEYBOARD = ReplyKeyboardMarkup(
     keyboard=[[KeyboardButton(text=BTN_REPAIRS_LIST), KeyboardButton(text=BTN_MY_REPAIRS)]], resize_keyboard=True, is_persistent=True,
 )
-# 26.10 (Павел): a master sees only his own repairs, never the точка's. In the
-# group of a simple-mode точка (Гибрид — its masters sit there) the button
-# is «📋 Мои ремонты» alone; the точка's whole list is for those below.
-MINE_KEYBOARD = ReplyKeyboardMarkup(
-    keyboard=[[KeyboardButton(text=BTN_MY_REPAIRS)]], resize_keyboard=True, is_persistent=True,
+# 26.10 (Павел): a master sees only his own repairs, never the точка's. A group
+# has one keyboard for all its topics, so the group of a simple-mode точка
+# (Гибрид — its masters sit there) keeps «🔧 Ремонты» alone, and the button
+# itself tells people apart (sees_all): the точка's list for those below, a
+# master his own (also in his topic). «📋 Мои ремонты» — his group and DM.
+REPAIRS_ONLY_KEYBOARD = ReplyKeyboardMarkup(
+    keyboard=[[KeyboardButton(text=BTN_REPAIRS_LIST)]], resize_keyboard=True, is_persistent=True,
 )
 ALL_REPAIRS_ROLES = ("owner", "admin", "manager", "storekeeper")
 
 
 def group_keyboard(store) -> ReplyKeyboardMarkup:
-    return MINE_KEYBOARD if getattr(store, "simple_flow", False) else GROUP_KEYBOARD
+    return REPAIRS_ONLY_KEYBOARD if getattr(store, "simple_flow", False) else GROUP_KEYBOARD
 
 
 def sees_all(staff, store=None) -> bool:
