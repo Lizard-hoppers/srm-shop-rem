@@ -17,7 +17,7 @@ from aiogram import F, Router
 from aiogram.filters import StateFilter
 from aiogram.types import Message
 
-from bot.quick_actions import QUICK_ACTIONS_KEYBOARD
+from bot.quick_actions import _resolve_staff_for_dm, keyboard_for
 from core import store_access
 
 router = Router()
@@ -33,5 +33,5 @@ async def unknown_text(message: Message) -> None:
     logger.info("unhandled DM text from staff %s: %r", message.from_user.id, message.text[:60])
     await message.answer(
         "Кнопки меню обновились — вот актуальные. Нажмите нужную ещё раз.",
-        reply_markup=QUICK_ACTIONS_KEYBOARD,
+        reply_markup=keyboard_for((_resolve_staff_for_dm(message.from_user.id) or (None, None))[1]),
     )

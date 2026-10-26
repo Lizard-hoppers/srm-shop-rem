@@ -21,7 +21,7 @@ from aiogram.types import (
 
 from bot.config import MINIAPP_URL
 from bot.miniapp_links import crm_link
-from bot.quick_actions import QUICK_ACTIONS_KEYBOARD, _resolve_staff_for_dm, _shift_is_open
+from bot.quick_actions import _resolve_staff_for_dm, _shift_is_open, keyboard_for
 from core import auth as core_auth
 from core import clients as core_clients
 from core import qr as core_qr
@@ -76,7 +76,8 @@ async def start(message: Message) -> None:
         # button (bottom-left, set in bot/bot.py) already opens the Mini
         # App directly, so a staff member always has that regardless of
         # /start. Straight to the quick-action buttons.
-        await message.answer("Быстрые действия:", reply_markup=QUICK_ACTIONS_KEYBOARD)
+        resolved = _resolve_staff_for_dm(message.from_user.id)
+        await message.answer("Быстрые действия:", reply_markup=keyboard_for(resolved[1] if resolved else None))
         # The «CRM» button next to the input field, for THIS chat. bot/bot.py
         # also sets it as the bot's default at startup, but on the bot the
         # CRM moved to on 10.10 (@OO7servis_bot) Telegram accepted that call

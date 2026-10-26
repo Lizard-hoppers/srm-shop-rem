@@ -30,6 +30,7 @@ from bot.repair_attachments import router as repair_attachments_router
 from bot.repairs_button import router as repairs_button_router
 from bot.sale_flow import router as sale_flow_router
 from bot.service_flow import router as service_flow_router
+from bot.my_repairs import router as my_repairs_router
 from bot.legacy_gibrit import router as legacy_gibrit_router
 from bot.simple_card import router as simple_card_router
 from bot.supplier_chat import router as supplier_chat_router
@@ -131,6 +132,7 @@ def build_dispatcher() -> Dispatcher:
     # of the note handler, so it is answered even when sent as a reply.
     # «🔧 Ремонты», the button docked in the groups (bot/repairs_button.py).
     dp.include_router(repairs_button_router)
+    dp.include_router(my_repairs_router)
     dp.include_router(assistant_chat_router)
     dp.include_router(reminder_flow.router)
     # Before quick_actions: that router ends in a catch-all for every FSM

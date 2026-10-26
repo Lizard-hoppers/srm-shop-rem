@@ -71,19 +71,23 @@ def _device(row: sqlite3.Row) -> str:
 def build(
     conn: sqlite3.Connection, location_id: int | None, *, statuses: tuple[str, ...] = OPEN_STATUSES,
     prefer_chat_id: str | int | None = None, topics: dict[str, int | None] | None = None,
+    master_id: int | None = None, heading: str | None = None,
 ) -> list[str]:
     """The answer as HTML message(s) — more than one only when the list
     doesn't fit a single Telegram message. `topics` maps a chat id to its
     «Ремонты» forum topic, for links into it."""
     statuses = tuple(s for s in OPEN_STATUSES if s in statuses) or OPEN_STATUSES
-    repairs = [r for r in _repairs.list_repairs(conn, location_id=location_id) if r["status"] in statuses]
+    repairs = [r for r in _repairs.list_repairs(conn, location_id=location_id) if r["status"] in statuses
+               and (master_id is None or r["master_id"] == master_id)]
     if not repairs:
+        if master_id is not None:
+            return [f"🔧 <b>{html.escape(heading or 'Ваши ремонты')}</b>: незакрытых нет."]
         scope = "" if statuses == OPEN_STATUSES else " с таким статусом"
         return [f"🔧 Невыданных ремонтов{scope} нет."]
     links = _links(conn, [r["id"] for r in repairs], str(prefer_chat_id) if prefer_chat_id is not None else None,
                    {str(k): v for k, v in (topics or {}).items()})
     total = money(sum(_repairs.current_price(r) or 0 for r in repairs))
-    title = "Ремонтов не выдано" if statuses == OPEN_STATUSES else "Ремонтов"
+    title = html.escape(heading) if heading else ("Ремонтов не выдано" if statuses == OPEN_STATUSES else "Ремонтов")
     lines = [f"🔧 <b>{title}: {len(repairs)}</b> · на {total} грн"]
     for status in statuses:
         group = [r for r in repairs if r["status"] == status]

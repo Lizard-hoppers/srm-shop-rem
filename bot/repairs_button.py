@@ -21,7 +21,7 @@ from aiogram import F, Router
 from aiogram.exceptions import TelegramAPIError
 from aiogram.types import KeyboardButton, LinkPreviewOptions, Message, ReplyKeyboardMarkup
 
-from bot.quick_actions import BTN_REPAIRS_LIST
+from bot.quick_actions import BTN_MY_REPAIRS, BTN_REPAIRS_LIST
 from core import repair_digest
 from core.storage import get_conn
 from core.stores import store_for_chat_id
@@ -29,7 +29,7 @@ from core.stores import store_for_chat_id
 router = Router()
 
 GROUP_KEYBOARD = ReplyKeyboardMarkup(
-    keyboard=[[KeyboardButton(text=BTN_REPAIRS_LIST)]], resize_keyboard=True, is_persistent=True,
+    keyboard=[[KeyboardButton(text=BTN_REPAIRS_LIST), KeyboardButton(text=BTN_MY_REPAIRS)]], resize_keyboard=True, is_persistent=True,
 )
 _NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
 # The list last sent to each chat/topic, to take it away when the next one

@@ -108,9 +108,11 @@ BTN_CANCEL = "❌ Отмена"
 # The one button of the group keyboard (bot/repairs_button.py) — listed
 # here so its text is normalised like the rest.
 BTN_REPAIRS_LIST = "🔧 Ремонты"
+# 26.10 (Павел): у мастера — его незакрытые ремонты (bot/my_repairs.py).
+BTN_MY_REPAIRS = "📋 Мои ремонты"
 _ENTRY_BUTTONS = {
     BTN_SALE, BTN_REPAIR, BTN_REPAIR_LEGACY, BTN_OUR_REPAIR, BTN_CLIENT, BTN_SERVICE, BTN_BUYBACK, BTN_PURCHASE, BTN_SUMMARY, BTN_CASH, BTN_TRANSFER, BTN_CANCEL,
-    BTN_REPAIRS_LIST,
+    BTN_REPAIRS_LIST, BTN_MY_REPAIRS,
 }
 
 
@@ -171,6 +173,17 @@ QUICK_ACTIONS_KEYBOARD = ReplyKeyboardMarkup(
     resize_keyboard=True,
     is_persistent=True,
 )
+
+# A master's keyboard: «📋 Мои ремонты» first, then the same quick actions.
+MASTER_KEYBOARD = ReplyKeyboardMarkup(
+    keyboard=[[KeyboardButton(text=BTN_MY_REPAIRS, style="primary")], *QUICK_ACTIONS_KEYBOARD.keyboard],
+    resize_keyboard=True,
+    is_persistent=True,
+)
+
+
+def keyboard_for(staff) -> ReplyKeyboardMarkup:
+    return MASTER_KEYBOARD if staff and staff["role"] == "master" else QUICK_ACTIONS_KEYBOARD
 
 
 class RepairIntake(StatesGroup):
@@ -844,7 +857,7 @@ async def repair_start(message: Message, state: FSMContext) -> None:
 
     if message.text in (BTN_REPAIR_LEGACY, OLD_BOT_REPAIR):
         # An old keyboard is still on this person's screen — replace it.
-        await message.answer("Кнопки меню обновились — вот актуальные.", reply_markup=QUICK_ACTIONS_KEYBOARD)
+        await message.answer("Кнопки меню обновились — вот актуальные.", reply_markup=keyboard_for(staff))
     if not await _shift_gate(message, state, store, staff):
         return
     await _reset(message, state)

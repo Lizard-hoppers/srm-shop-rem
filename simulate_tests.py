@@ -8432,7 +8432,7 @@ def scenario_repairs_button() -> None:
     from aiogram.types import Chat, Message, Update, User
 
     from bot import repairs_button
-    from bot.quick_actions import BTN_REPAIRS_LIST
+    from bot.quick_actions import BTN_MY_REPAIRS, BTN_REPAIRS_LIST
 
     WORK, MASTERS, ELSEWHERE, TOPIC, ANYONE = -1004480000311, -1004480000312, -1004480000313, 5, 889201
 
@@ -8481,8 +8481,8 @@ def scenario_repairs_button() -> None:
             listing = [m for m in sent if "send" in m]
             check("the button's tap (as the phone sends it, with the invisible selector) in the masters' group shows the repairs not handed out — from anyone in the group, a master needs no CRM account",
                   len(listing) == 1 and "Ремонтов не выдано: 1" in listing[0]["send"] and "iPhone 13" in listing[0]["send"] and "Redmi 12" not in listing[0]["send"])
-            check("the list carries the keyboard again, one button, persistent — it stays docked and comes back for whoever lost it",
-                  listing[0]["keyboard"] == [[BTN_REPAIRS_LIST]] and listing[0]["persistent"] is True)
+            check("the list carries the keyboard again — «🔧 Ремонты» and «📋 Мои ремонты», persistent — it stays docked and comes back for whoever lost it",
+                  listing[0]["keyboard"] == [[BTN_REPAIRS_LIST, BTN_MY_REPAIRS]] and listing[0]["persistent"] is True)
             check("the «🔧 Ремонты» line the tap sent is removed from the chat", sent[0] == {"delete": tap})
             previous = listing[0]["id"]
             await say(BTN_REPAIRS_LIST, MASTERS)
@@ -8490,7 +8490,7 @@ def scenario_repairs_button() -> None:
             await say(BTN_REPAIRS_LIST, WORK, thread=TOPIC)
             check("in the work group's «Ремонты» topic the list is sent into that topic", [m["thread"] for m in sent if "send" in m] == [TOPIC] and {"delete": previous} not in sent)
             await say("бот, сколько у нас ремонтов", MASTERS)
-            check("«бот, сколько у нас ремонтов» gives the same list and attaches the button too", [m["keyboard"] for m in sent if "send" in m] == [[[BTN_REPAIRS_LIST]]])
+            check("«бот, сколько у нас ремонтов» gives the same list and attaches the button too", [m["keyboard"] for m in sent if "send" in m] == [[[BTN_REPAIRS_LIST, BTN_MY_REPAIRS]]])
             await say(BTN_REPAIRS_LIST, ELSEWHERE)
             check("in a group that isn't a shop's the text does nothing", sent == [])
             with get_conn(db_path) as conn:
@@ -10413,6 +10413,47 @@ def scenario_cash_watch() -> None:
         check("a cancel says so", to_owner[3].startswith("↩️") and "отменено" in to_owner[3] and "+300 грн" in to_owner[3])
 
 
+def scenario_my_repairs() -> None:
+    """«📋 Мои ремонты» (26.10): у мастера в личке, в его группе и в его теме
+    рабочей группы — его незакрытые ремонты."""
+    print("scenario: «Мои ремонты» у мастера")
+    from bot import my_repairs
+    from bot import quick_actions as qa
+    from core import repair_digest, store_settings
+
+    GROUP, PERSONAL, TOPIC = -1005590001, -1005590009, 77
+    with tempfile.TemporaryDirectory() as tmp, _separate_base(tmp, "mine.sqlite3", ("Гибрид",)) as db_path:
+        with get_conn(db_path) as conn:
+            conn.execute("UPDATE locations SET staff_group_chat_id = ? WHERE id = 1", (GROUP,))
+            store_settings.set_point_mode(conn, True, False, "", location_id=1)
+            boss = auth.create_staff(conn, "mr-owner", "pass", "Павел", "owner")
+            alex = auth.create_master(conn, "Алексей", 559103, "percent", 100 / 3, location_id=1)
+            oleg = auth.create_master(conn, "Олег Som", None, None, None, location_id=1, master_kind="outsource")
+            auth.set_master_chats(conn, alex, TOPIC, None)
+            auth.set_master_chats(conn, oleg, 78, PERSONAL)
+            client = clients.get_or_create_by_phone(conn, "Анна", "0671119988", source="offline")
+            mine = repairs.create_repair(conn, client, "", None, "Redmi 9C", None, "экран", "offline", alex, 2200, boss, location_id=1)
+            done = repairs.create_repair(conn, client, "", None, "Poco X3", None, "плата", "offline", alex, 900, boss, location_id=1)
+            repairs.update_status(conn, done, "issued", boss, "Готов")
+            repairs.create_repair(conn, client, "", None, "iPhone 11", None, "АКБ", "offline", oleg, 1500, boss, location_id=1)
+            repairs.save_order_messages(conn, mine, [(str(GROUP), 501, "topic", True)])
+            alex_row = auth.get_staff_by_id(conn, alex)
+        text = "\n".join(my_repairs.chunks_for(alex_row))
+        check("his list: only his repairs not handed out, linked to the card in the work group",
+              "Ремонты — Алексей" in text and "Redmi 9C" in text and "Poco X3" not in text and "iPhone 11" not in text
+              and "t.me/c/5590001/" in text)
+        check("in his own group it is that group's master, whoever presses", my_repairs.master_for(PERSONAL, "group", None, 999)["id"] == oleg)
+        check("in his topic of the work group — his", my_repairs.master_for(GROUP, "supergroup", TOPIC, 999)["id"] == alex)
+        check("in the work group's feed — whoever pressed, if he is linked; nobody else", my_repairs.master_for(GROUP, "supergroup", None, 559103)["id"] == alex
+              and my_repairs.master_for(GROUP, "supergroup", None, 999) is None)
+        with get_conn(db_path) as conn:
+            nothing = repair_digest.build(conn, None, master_id=boss, heading="Ремонты — Павел")
+        check("nothing open — said so", "незакрытых нет" in nothing[0])
+        check("a master's keyboard has «📋 Мои ремонты» first; others keep theirs",
+              qa.keyboard_for({"role": "master"}).keyboard[0][0].text == qa.BTN_MY_REPAIRS
+              and qa.keyboard_for({"role": "manager"}) is qa.QUICK_ACTIONS_KEYBOARD)
+
+
 def scenario_master_pay_gibrid() -> None:
     """Зарплата мастеров Гибрида в CRM (23.10, этап 3): ставка «ровно треть»,
     сводка по ремонтам за период = начисления, стартовый остаток, выплата
@@ -10820,6 +10861,7 @@ def main() -> None:
     scenario_repair_roadmap()
     scenario_services()
     scenario_cash_watch()
+    scenario_my_repairs()
     scenario_master_pay_gibrid()
     scenario_gsheet_mirror()
     scenario_gibrit_cutover()
