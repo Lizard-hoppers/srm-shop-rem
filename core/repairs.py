@@ -841,6 +841,19 @@ def _masters_chain(conn: sqlite3.Connection, repair: sqlite3.Row) -> list[str]:
     return chain if current else []
 
 
+def accepted_by_name(conn: sqlite3.Connection, repair: sqlite3.Row) -> str | None:
+    """Who took the repair in — whose responsibility it is (26.10, Павел):
+    the author of its first history line, else repair_orders.accepted_by."""
+    row = conn.execute(
+        """SELECT staff.name FROM repair_status_history h JOIN staff ON staff.id = h.changed_by
+           WHERE h.order_id = ? ORDER BY h.id LIMIT 1""",
+        (repair["id"],),
+    ).fetchone()
+    if not row and "accepted_by" in repair.keys() and repair["accepted_by"]:
+        row = conn.execute("SELECT name FROM staff WHERE id = ?", (repair["accepted_by"],)).fetchone()
+    return row["name"] if row else None
+
+
 def roadmap(conn: sqlite3.Connection, repair: sqlite3.Row) -> str:
     """🗺 Путь ремонта одной строкой (25.10, Павел): точка приёма ➜ мастер ➜
     готов ➜ выдан. Пройденное — со временем, текущий шаг жирным, что
@@ -862,6 +875,7 @@ def roadmap(conn: sqlite3.Connection, repair: sqlite3.Row) -> str:
         kept.insert(0, ("new", repair["created_at"]))
 
     point = conn.execute("SELECT name FROM locations WHERE id = ?", (repair["location_id"],)).fetchone()
+    taker = accepted_by_name(conn, repair)
     masters = [f"🔧 {html.escape(name)}" for name in _masters_chain(conn, repair)]
     steps: list[str] = []
     day = None
@@ -870,7 +884,8 @@ def roadmap(conn: sqlite3.Connection, repair: sqlite3.Row) -> str:
         when, day = _when(at, day)
         back = index > 0 and _STEP_RANK[status] < _STEP_RANK[kept[index - 1][0]]
         if index == 0:
-            steps.append(f"🏪 {html.escape(point['name'] if point else 'Точка')} {when}".strip())
+            who = f" · принял {html.escape(taker)}" if taker else ""
+            steps.append(f"🏪 {html.escape(point['name'] if point else 'Точка')}{who} {when}".strip())
             if masters and not any(s == "in_progress" for s, _at in kept):
                 # The master named at intake (or later) without «Взять в работу» — at Гибрид that is every repair.
                 steps += masters

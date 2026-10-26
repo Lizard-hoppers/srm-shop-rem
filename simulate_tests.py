@@ -10187,19 +10187,19 @@ def scenario_repair_roadmap() -> None:
             d23 = "2026-10-23 "
             stamp(shop, [d23 + "07:01:00"])
             check("a new 007 repair: the shop, then what is left",
-                  path(shop) == "🗺 <b>🏪 007 23.10 10:01</b> ➜ ○ В работе ➜ ○ Готов ➜ ○ Выдан")
+                  path(shop) == "🗺 <b>🏪 007 · принял Павел 23.10 10:01</b> ➜ ○ В работе ➜ ○ Готов ➜ ○ Выдан")
             repairs.claim_repair(conn, shop, alex)
             repairs.complete_repair(conn, shop, alex)
             stamp(shop, [d23 + "07:01:00", d23 + "07:30:00", day + "08:00:00"])
             check("taken and done: the master with the time he took it, «Готов» with the date of another day, «Выдан» ahead",
-                  path(shop) == "🗺 🏪 007 23.10 10:01 ➜ 🔧 Алексей 10:30 ➜ <b>✅ Готов 24.10 11:00</b> ➜ ○ Выдан")
+                  path(shop) == "🗺 🏪 007 · принял Павел 23.10 10:01 ➜ 🔧 Алексей 10:30 ➜ <b>✅ Готов 24.10 11:00</b> ➜ ○ Выдан")
             repairs.update_status(conn, shop, "in_progress", boss, "вернули")
             stamp(shop, [d23 + "07:01:00", d23 + "07:30:00", day + "08:00:00", day + "08:10:00"])
             check("a step back is shown as «↩»", path(shop).endswith("✅ Готов 24.10 11:00 ➜ <b>↩ В работе 11:10</b> ➜ ○ Готов ➜ ○ Выдан"))
 
             stamp(gib, [day + "06:43:00"])
             check("Гибрид: the master named at intake right after the точка, «Готов» ahead",
-                  path(gib) == "🗺 🏪 Гибрид 24.10 09:43 ➜ <b>🔧 Алексей</b> ➜ ○ Готов")
+                  path(gib) == "🗺 🏪 Гибрид · принял Павел 24.10 09:43 ➜ <b>🔧 Алексей</b> ➜ ○ Готов")
             repair_edit.apply(conn, gib, "master", "Эдик", boss)
             check("a master changed in the chat shows as the way the repair went", "🔧 Алексей ➜ <b>🔧 Эдик</b>" in path(gib))
             repairs.update_status(conn, gib, "cancelled", boss, "Возврат")
@@ -10207,8 +10207,12 @@ def scenario_repair_roadmap() -> None:
             repairs.update_status(conn, gib, "issued", boss, "Готов")
             stamp(gib, [day + "06:43:00", day + "10:00:00", day + "10:01:00", day + "11:10:00"])
             check("a «Возврат» taken back and then «Готов»: only «Готов» in the path, in bold, nothing ahead",
-                  path(gib) == "🗺 🏪 Гибрид 24.10 09:43 ➜ 🔧 Алексей ➜ 🔧 Эдик ➜ <b>✅ Готов 14:10</b>")
+                  path(gib) == "🗺 🏪 Гибрид · принял Павел 24.10 09:43 ➜ 🔧 Алексей ➜ 🔧 Эдик ➜ <b>✅ Готов 14:10</b>")
             text, _kb = repairs.card(conn, gib)
+            conn.execute("DELETE FROM repair_status_history WHERE order_id = ?", (gib,))
+            conn.execute("UPDATE repair_orders SET accepted_by = ? WHERE id = ?", (boss, gib))
+            check("no history of the intake (moved from the old bot) — who took it in comes from accepted_by",
+                  "🏪 Гибрид · принял Павел" in path(gib))
             check("the path is on the card, before the notes, instead of the one-step «Выдан:» line",
                   "🗺 🏪 Гибрид" in text and "📦 Выдан:" not in text)
 

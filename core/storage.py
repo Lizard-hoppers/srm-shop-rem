@@ -1190,6 +1190,9 @@ def init_db(db_path: str = DB_PATH) -> None:
         _ensure_column(conn, "staff", "personal_chat_id", "personal_chat_id INTEGER")
         # «📦 Наш» — ремонт устройства самой точки (выплата мастеру вручную).
         _ensure_column(conn, "repair_orders", "own_order", "own_order INTEGER NOT NULL DEFAULT 0")
+        # Кто принял ремонт, когда истории приёма нет (перенесённые из старого
+        # бота Гибрида: его «created_by»), — для «принял …» в пути карточки.
+        _ensure_column(conn, "repair_orders", "accepted_by", "accepted_by INTEGER REFERENCES staff(id)")
         # Копия в Google-таблицу (core.gsheet_mirror): ключ таблицы точки;
         # любое изменение ремонта такой точки встаёт в очередь — триггером,
         # чтобы не потерять ни один путь записи.
