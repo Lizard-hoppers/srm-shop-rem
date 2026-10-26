@@ -1870,38 +1870,35 @@ def scenario_quick_intake_chat() -> None:
         await qa.repair_got_password(say("1234 <x>"), state)
         await qa.repair_skip_comment(tap("repair_comment_skip"), state)
 
-        await qa.repair_master_pick(tap("rm_pick:0"), state)
-        await qa.repair_back(tap("rm_back"), state)
-        check("«⬅️ Назад» on the «Проверьте данные» card: the master question in its place, one bot message",
-              "шаг 9 из 9" in screen()["text"] and "Выберите мастера" in screen()["text"] and len(chat.bot_messages) == 1)
+        # 26.10: выбрали мастера — ремонт создан сразу, без «Создать ремонт».
+        created = []
+        orig_create, orig_notify, orig_done = qa.core_repairs.create_repair_intake, qa.core_repairs.notify_and_save, qa._already_done
+        qa.core_repairs.create_repair_intake = lambda conn, **kw: created.append(kw) or (4242, "card", None, None)
+        qa.core_repairs.notify_and_save = lambda *a: None
 
-        await qa.repair_master_pick(tap("rm_pick:0"), state)
+        async def _not_done(callback, db_path):
+            return False
+
+        qa._already_done = _not_done
+        try:
+            await qa.repair_master_pick(tap("rm_pick:0"), state)
+        finally:
+            qa.core_repairs.create_repair_intake, qa.core_repairs.notify_and_save, qa._already_done = orig_create, orig_notify, orig_done
         card = screen()
-        check("answering the last question leaves exactly one bot message — the card", len(chat.bot_messages) == 1)
-        check("the confirm card carries its accept/cancel buttons", card["markup"] is not None)
-        check("the confirm card is a PHOTO message (Павел: должна быть с фото) with the full recap",
-              all(part in card["text"] for part in ("iPhone 12", "Не включается", "+380501234567"))
-              and "пока не известна" in card["text"])
-        check("the card shows the password and that no master was chosen",
-              "Пароль: 1234 &lt;x&gt;" in card["text"] and "Мастер: не назначен" in card["text"])
-        check("the confirm card escapes the staff-typed name too", "&lt;дома&gt;" in card["text"])
-        check("the reply that produced the card is gone from the chat", chat.staff_messages == [])
-        check("the confirm card is the last message in the chat", chat.last()["id"] == card["id"])
+        check("picking the master — the last step — creates the repair at once, no «Создать ремонт»",
+              len(created) == 1 and created[0]["model"] == "iPhone 12" and created[0]["client_phone"] == "+380501234567"
+              and await state.get_state() is None)
+        check("what stays in the chat is one PHOTO card with the full recap and «создан»",
+              len(chat.bot_messages) == 1 and "РК-4242 создан" in card["text"]
+              and all(part in card["text"] for part in ("iPhone 12", "Не включается", "+380501234567"))
+              and "пока не известна" in card["text"] and "Мастер: не назначен" in card["text"])
+        check("the card shows the password, escaped like the name", "Пароль: 1234 &lt;x&gt;" in card["text"] and "&lt;дома&gt;" in card["text"])
+        check("the trail is gone from the chat", chat.staff_messages == [])
 
-        await qa.repair_confirm_fallback(say("а что дальше?"), state)
-        check("a stray message on the confirm card does NOT replace it — the card is untouched",
-              any(m["id"] == card["id"] and m["markup"] is not None for m in chat.log))
-        check("...a separate reminder is posted instead, pointing back at the card",
-              chat.last()["id"] != card["id"] and "Нажмите" in chat.last()["text"])
-
-        # Бросить диалог на середине и начать другой: и брошенный экран, И
-        # тот самый reminder (потому и трекается через user_message_ids,
-        # не остаётся сиротой) не должны остаться висеть в чате.
         await qa.client_start(say(qa.BTN_CLIENT), state)
         await qa.client_menu_add(tap("client_menu_add"), state)
-        check("starting another flow wipes both the abandoned card and its reminder",
-              len(chat.bot_messages) == 1)
-        check("the new flow starts at its own step 1 of 2", "шаг 1 из 2" in screen()["text"])
+        check("another flow after it keeps the created repair's card and opens at its own step 1",
+              len(chat.bot_messages) == 2 and "шаг 1 из 2" in screen()["text"])
 
     try:
         asyncio.run(run())
@@ -5951,18 +5948,11 @@ def scenario_repair_part_chat() -> None:
             await qa.repair_got_comment(say("царапина на корпусе"), state)
             check("the master step offers this точка's masters and «не назначать»",
                   f"rm_pick:{master}" in _buttons(screen()["markup"]) and "rm_pick:0" in _buttons(screen()["markup"]))
-            await qa.repair_master_pick(tap("rm_pick:0"), state)
+            await qa.repair_master_pick(tap(f"rm_pick:{master}"), state)
             card = screen()
-            check("a returning client's name is not asked again — straight to the card with it filled in",
-                  card["kind"] == "photo" and "Имя: Постоянный Клиент" in card["text"] and "Мастер: не назначен" in card["text"])
-            check("the card offers «Создать ремонт», «Мастер» and «Отмена»",
-                  set(_buttons(card["markup"])) == {"quick_repair_confirm", "rm_back", "rm_menu", "quick_repair_cancel"})
-            await qa.repair_master_menu(tap("rm_menu"), state)
-            check("«Мастер» turns the buttons into the list of masters", f"rm_set:{master}" in _buttons(screen()["markup"]) and "rm_set:0" in _buttons(screen()["markup"]))
-            await qa.repair_master_set(tap(f"rm_set:{master}"), state)
-            check("picking one rewrites the «Мастер» line and brings the buttons back",
-                  "Мастер: Эдик" in screen()["text"] and "quick_repair_confirm" in _buttons(screen()["markup"]))
-            await qa.repair_confirm(tap("quick_repair_confirm"), state)
+            check("a returning client's name is not asked again; the master picked — the repair is created, the card stays",
+                  card["kind"] == "photo" and "Имя: Постоянный Клиент" in card["text"] and "Мастер: Эдик" in card["text"]
+                  and "создан" in card["text"] and _buttons(card["markup"]) == [])
             with get_conn(db_path) as conn:
                 repair = repairs.list_repairs(conn)[0]
                 check("the repair is created for that client, with that master and price",

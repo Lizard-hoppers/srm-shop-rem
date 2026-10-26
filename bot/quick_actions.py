@@ -192,7 +192,6 @@ class RepairIntake(StatesGroup):
     password = State()
     comment = State()
     master = State()
-    confirm = State()
 
 
 class ServiceSale(StatesGroup):
@@ -708,7 +707,7 @@ def _flow_screen(state_name: str | None, data: dict, question: str) -> str:
     title, steps_of, summary_of = spec
     steps = steps_of(data)
     if step_name not in steps:
-        # Карточки подтверждения (RepairIntake.confirm и т.д.) приносят
+        # Карточки подтверждения (покупка, продажа и т.д.) приносят
         # свой полный текст со всей сводкой — шапку добавлять некуда.
         return question
     header = f"{title} · шаг {steps.index(step_name) + 1} из {len(steps)}"
@@ -1925,8 +1924,11 @@ async def repair_skip_comment(callback: CallbackQuery, state: FSMContext) -> Non
 
 @router.callback_query(F.data.startswith("rm_pick:"), RepairIntake.master)
 async def repair_master_pick(callback: CallbackQuery, state: FSMContext) -> None:
-    """The last question: the master. After it — the «Проверьте данные»
-    card, where the choice can still be changed («👤 Мастер»)."""
+    """The last question: the master — and with it the repair is created
+    at once (26.10, Павел: in Гибрид's old bot it was, and a separate
+    «Создать ремонт» was left unpressed — Никита's repairs of 25.10 never
+    happened). A mistake is fixed on the card afterwards («бот, смени
+    номер на …», core.repair_edit)."""
     data = await state.get_data()
     master_id = int(callback.data.split(":", 1)[1])
     master_name = None
@@ -1942,53 +1944,19 @@ async def repair_master_pick(callback: CallbackQuery, state: FSMContext) -> None
             return
         master_name = master["name"]
     data = await state.update_data(master_id=master_id or None, master_name=master_name)
-    await _send_repair_confirm(callback.message, state, data, consume=False)
-    await callback.answer()
+    await _create_intake_repair(callback, state, data)
 
 
-def _repair_confirm_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Создать ремонт", callback_data="quick_repair_confirm", style="success")],
-        [
-            _RM_BACK,
-            InlineKeyboardButton(text="👤 Мастер", callback_data="rm_menu"),
-            InlineKeyboardButton(text="❌ Отмена", callback_data="quick_repair_cancel", style="danger"),
-        ],
-    ])
-
-
-async def _send_repair_confirm(message: Message, state: FSMContext, data: dict, consume: bool = True) -> None:
-    """The «Проверьте данные» card. Not _advance: it is a PHOTO message
-    (Павел wants the actual device photo on the card, not a text line
-    saying it exists), and _repost/_advance only ever send plain text.
-    Same Clean-Chat shape by hand instead — consume the reply, send the
-    new screen, delete the previous one. `consume=False` when it is
-    reached by a button (the master step) — `message` is then the bot's
-    own screen, not a reply of the employee's to clear away."""
-    await state.set_state(RepairIntake.confirm)
-    keyboard = _repair_confirm_keyboard()
-    caption = _repair_confirm_caption(data)
-    if consume:
-        await _consume(state, message)
-    previous_id = data.get("prompt_message_id")
-    photo = BufferedInputFile(data["photo_bytes"], filename="device.jpg")
-    sent = await message.answer_photo(photo, caption=caption, reply_markup=keyboard)
-    await state.update_data(prompt_message_id=sent.message_id, prompt_text=caption, prompt_markup=keyboard)
-    if previous_id:
-        await _safe_delete_many(message.bot, message.chat.id, [previous_id])
-
-
-def _repair_confirm_caption(data: dict) -> str:
-    """Full recap as a PHOTO caption (Павел, 18.09): the confirm screen
-    must actually show the device photo, not just say "фото приложено" —
-    photo is collected first now, so it's already in hand by this point.
+def _repair_recap(data: dict, title: str) -> str:
+    """Full recap as a PHOTO caption (Павел, 18.09): the card that stays in
+    the chat must show the device photo, not just say "фото приложено".
     Telegram caps a photo caption at 1024 chars (core.notify._as_caption
     hits the same limit on the group card) — a free-typed defect
     description has no length limit on its own end, so this stays a
     safety net, not the expected case."""
     price_line = f"Оценка: {data['price_estimate']} грн" if data.get("price_estimate") else "Оценка: пока не известна"
     lines = [
-        "📋 Проверьте данные:",
+        title,
         "",
         f"Телефон: {html.escape(data['client_phone'])}",
         f"Имя: {html.escape(data['client_name'])}",
@@ -2002,47 +1970,6 @@ def _repair_confirm_caption(data: dict) -> str:
     lines.append(f"Мастер: {html.escape(data['master_name']) if data.get('master_name') else 'не назначен'}")
     text = "\n".join(lines)
     return text if len(text) <= 1024 else text[:1023] + "…"
-
-
-# «👤 Мастер» on the card: the buttons under the photo turn into the list
-# of masters, a pick turns them back and rewrites the «Мастер:» line. Done
-# on the card itself rather than as one more question in the dialog —
-# most repairs are taken in with no master chosen yet (whoever is free
-# presses «Взять в работу» in the group).
-
-@router.callback_query(F.data == "rm_menu", RepairIntake.confirm)
-async def repair_master_menu(callback: CallbackQuery, state: FSMContext) -> None:
-    data = await state.get_data()
-    try:
-        store = get_store(data["store_id"])
-    except KeyError:
-        await callback.answer("Магазин больше не настроен.", show_alert=True)
-        return
-    await callback.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=_master_rows(store, "rm_set", "Не назначать")))
-    await callback.answer()
-
-
-@router.callback_query(F.data.startswith("rm_set:"), RepairIntake.confirm)
-async def repair_master_set(callback: CallbackQuery, state: FSMContext) -> None:
-    data = await state.get_data()
-    master_id = int(callback.data.split(":", 1)[1])
-    master_name = None
-    if master_id:
-        try:
-            store = get_store(data["store_id"])
-        except KeyError:
-            await callback.answer("Магазин больше не настроен.", show_alert=True)
-            return
-        master = _pickable_master(store, master_id)
-        if not master:
-            await callback.answer("Этого мастера выбрать нельзя.", show_alert=True)
-            return
-        master_name = master["name"]
-    data = await state.update_data(master_id=master_id or None, master_name=master_name)
-    caption, keyboard = _repair_confirm_caption(data), _repair_confirm_keyboard()
-    await callback.message.edit_caption(caption=caption, reply_markup=keyboard)
-    await state.update_data(prompt_text=caption, prompt_markup=keyboard)
-    await callback.answer()
 
 
 def _repair_step(step: str, data: dict) -> tuple[str, InlineKeyboardMarkup | None]:
@@ -2068,41 +1995,23 @@ async def repair_back(callback: CallbackQuery, state: FSMContext) -> None:
     group, _, current = (await state.get_state() or "").partition(":")
     data = await state.get_data()
     steps = _steps_repair(data)
-    if group != "RepairIntake" or (current != "confirm" and current not in steps[1:]):
+    if group != "RepairIntake" or current not in steps[1:]:
         await callback.answer()
         return
-    previous = "master" if current == "confirm" else steps[steps.index(current) - 1]
+    previous = steps[steps.index(current) - 1]
     if previous == "name" and data.get("name_known"):
         previous = "phone"
     await state.set_state(getattr(RepairIntake, previous))
     question, keyboard = _repair_step(previous, data)
-    if current == "confirm":
-        # The «Проверьте данные» card is a photo — a text screen takes its place.
-        await _repost(callback.message, state, _flow_screen(await state.get_state(), data, question), keyboard)
-    else:
-        await _advance_callback(callback, state, question, keyboard)
+    await _advance_callback(callback, state, question, keyboard)
     await callback.answer()
 
 
-@router.message(RepairIntake.confirm)
-async def repair_confirm_fallback(message: Message, state: FSMContext) -> None:
-    """Stray message while the photo confirm card is showing. Unlike
-    _nudge (which _reposts as plain text — quick_flow_fallback's normal
-    path for every other flow's confirm step), this card carries the
-    device photo, so a text-only repost would silently lose it. Just
-    delete the stray reply and point back at the card instead — tracked
-    in user_message_ids (not prompt_message_id: the card itself stays
-    "current") so this reminder gets swept on confirm/cancel/abandon same
-    as any other clutter, instead of lingering as a second permanent
-    message once the flow actually finishes."""
-    await _consume(state, message)
-    sent = await message.answer("Нажмите «✅ Принять» или «❌ Отмена» на карточке выше.")
-    await _track(state, sent)
-
-
-@router.callback_query(F.data == "quick_repair_confirm", RepairIntake.confirm)
-async def repair_confirm(callback: CallbackQuery, state: FSMContext) -> None:
-    data = await state.get_data()
+async def _create_intake_repair(callback: CallbackQuery, state: FSMContext, data: dict) -> None:
+    """Create the repair the dialog has collected, post its cards, and leave
+    one message in the chat: the device photo with the full recap,
+    «✅ РК-… создан» and «Открыть в CRM» (Павел, 18.09: "карточка должна
+    остаться"). The trail goes."""
     try:
         store = get_store(data["store_id"])
     except KeyError:
@@ -2135,29 +2044,20 @@ async def repair_confirm(callback: CallbackQuery, state: FSMContext) -> None:
     # would freeze the whole bot (every user's messages) for that long.
     await asyncio.to_thread(core_repairs.notify_and_save, store, order_id, card_text, keyboard, photo_for_notify)
 
-    user_message_ids = data.get("user_message_ids", [])
+    trail = list(data.get("user_message_ids", [])) + [data.get("prompt_message_id") or callback.message.message_id]
     await state.clear()
-    # Clean Chat everywhere else means "delete the trail, keep only the
-    # final screen" — but this card (photo + full details) stays exactly
-    # as approved (Павел, 18.09: "карточка должна остаться, а не
-    # удалиться"), not collapse into a short "принято" line. Trail still
-    # goes; just strip the buttons (edit_reply_markup — works on a photo
-    # message, unlike edit_text/edit_caption's own separate methods) so a
-    # second tap can't double-submit, and post the CRM link separately.
-    await _safe_delete_many(callback.bot, callback.message.chat.id, user_message_ids)
-    await callback.message.edit_reply_markup(reply_markup=None)
-
+    label = core_documents.label("repair", order_id)
     open_keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(
-            text="Открыть в CRM",
-            web_app=WebAppInfo(url=crm_link(f"/repairs/{order_id}", staff["id"], store.id)),
-        ),
+        InlineKeyboardButton(text="Открыть в CRM", web_app=WebAppInfo(url=crm_link(f"/repairs/{order_id}", staff["id"], store.id))),
     ]])
-    await callback.message.answer(
-        f"✅ {core_documents.label('repair', order_id)} создан.\n\nЕсли нужно уточнить цену или мастера — карточка ремонта:",
-        reply_markup=open_keyboard,
+    caption = _repair_recap(data, f"✅ <b>{label} создан</b>")
+    hint = "\n\nОшиблись — ответьте на карточку в группе: «бот, смени номер на …»"
+    await callback.message.answer_photo(
+        BufferedInputFile(data["photo_bytes"], filename="device.jpg"),
+        caption=caption + hint if len(caption + hint) <= 1024 else caption, reply_markup=open_keyboard,
     )
-    await callback.answer("Готово")
+    await _safe_delete_many(callback.bot, callback.message.chat.id, trail)
+    await callback.answer(f"{label} создан")
 
 
 def _parse_positive_int(text: str) -> int | None:
