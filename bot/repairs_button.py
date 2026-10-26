@@ -22,6 +22,7 @@ from aiogram.exceptions import TelegramAPIError
 from aiogram.types import KeyboardButton, LinkPreviewOptions, Message, ReplyKeyboardMarkup
 
 from bot.quick_actions import BTN_MY_REPAIRS, BTN_REPAIRS_LIST
+from core import auth as core_auth
 from core import repair_digest
 from core.storage import get_conn
 from core.stores import store_for_chat_id
@@ -31,6 +32,26 @@ router = Router()
 GROUP_KEYBOARD = ReplyKeyboardMarkup(
     keyboard=[[KeyboardButton(text=BTN_REPAIRS_LIST), KeyboardButton(text=BTN_MY_REPAIRS)]], resize_keyboard=True, is_persistent=True,
 )
+# 26.10 (Павел): a master sees only his own repairs, never the точка's. In the
+# group of a simple-mode точка (Гибрид — its masters sit there) the button
+# is «📋 Мои ремонты» alone; the точка's whole list is for those below.
+MINE_KEYBOARD = ReplyKeyboardMarkup(
+    keyboard=[[KeyboardButton(text=BTN_MY_REPAIRS)]], resize_keyboard=True, is_persistent=True,
+)
+ALL_REPAIRS_ROLES = ("owner", "admin", "manager", "storekeeper")
+
+
+def group_keyboard(store) -> ReplyKeyboardMarkup:
+    return MINE_KEYBOARD if getattr(store, "simple_flow", False) else GROUP_KEYBOARD
+
+
+def sees_all(staff, store=None) -> bool:
+    """Whether this person may see the точка's whole list of repairs: never a
+    master; someone not in the CRM only where no masters sit (a точка that
+    isn't in the simple mode — 007's masters' group is the owners')."""
+    if staff:
+        return staff["role"] in ALL_REPAIRS_ROLES
+    return store is not None and not getattr(store, "simple_flow", False)
 _NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
 # The list last sent to each chat/topic, to take it away when the next one
 # comes. In memory: after a restart one old list simply stays in the chat.
@@ -54,7 +75,7 @@ async def send_list(message: Message, store, statuses: tuple[str, ...] = repair_
     sent = []
     for index, chunk in enumerate(chunks):
         last = index == len(chunks) - 1
-        reply = await message.answer(chunk, link_preview_options=_NO_PREVIEW, reply_markup=GROUP_KEYBOARD if in_group and last else None)
+        reply = await message.answer(chunk, link_preview_options=_NO_PREVIEW, reply_markup=group_keyboard(store) if in_group and last else None)
         sent.append(reply.message_id)
     if in_group:
         _last_list[place] = sent
@@ -64,6 +85,15 @@ async def send_list(message: Message, store, statuses: tuple[str, ...] = repair_
 async def pressed(message: Message) -> None:
     store = store_for_chat_id(message.chat.id)
     if not store:
+        return
+    with get_conn(store.db_path) as conn:
+        staff = core_auth.get_staff_by_telegram_id(conn, message.from_user.id) if message.from_user else None
+    if not sees_all(staff, store):
+        # A master (or someone not in the CRM) pressing it on an old keyboard
+        # gets his own list — the точка's isn't his business.
+        from bot import my_repairs
+
+        await my_repairs.my_repairs_group(message)
         return
     try:
         await message.delete()

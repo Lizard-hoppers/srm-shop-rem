@@ -214,11 +214,22 @@ async def undo_action(callback: CallbackQuery) -> None:
         _sync_after_change(int(what[1]), store.db_path)
 
 
-async def _send_list(message: Message, store, statuses: tuple[str, ...]) -> None:
+async def _send_list(message: Message, store, statuses: tuple[str, ...], staff=None) -> None:
     # Imported here: that module takes its button's text from quick_actions,
     # which this one already pulls in — no cycle, just kept out of the header.
     from bot import repairs_button
 
+    if not repairs_button.sees_all(staff, store):
+        # The точка's list is not a master's business (26.10): his own, or nothing.
+        from bot import my_repairs
+
+        if staff and staff["role"] == "master":
+            chunks = my_repairs.chunks_for(staff)
+            for chunk in chunks:
+                await message.reply(chunk, link_preview_options=_NO_PREVIEW)
+        else:
+            await message.reply("Список ремонтов точки — для администраторов и менеджеров. Ваши ремонты — кнопка «📋 Мои ремонты».")
+        return
     await repairs_button.send_list(message, store, statuses)
 
 
@@ -361,7 +372,7 @@ async def _handle(message: Message, store, staff, question: str) -> None:
         # Without the model: the one thing that needs none of it.
         about_repairs = any(word in question.lower() for word in _REPAIR_WORDS)
         if about_repairs or statuses_asked(question) != repair_digest.OPEN_STATUSES:
-            await _send_list(message, store, statuses_asked(question))
+            await _send_list(message, store, statuses_asked(question), staff)
         else:
             await message.reply("ИИ сейчас недоступен — попробуйте через минуту.\n\n" + _HELP)
         return
@@ -372,7 +383,7 @@ async def _handle(message: Message, store, staff, question: str) -> None:
     await _show_receipts(message, store, receipts)
     for kind, value in actions:
         if kind == "open_repairs":
-            await _send_list(message, store, value)
+            await _send_list(message, store, value, staff)
         elif kind == "repair_card":
             await _send_card(message, store, staff, value)
 

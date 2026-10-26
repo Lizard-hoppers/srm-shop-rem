@@ -94,8 +94,8 @@ async def my_repairs_group(message: Message) -> None:
         await message.delete()
     except TelegramAPIError:
         pass  # not an admin here — the line just stays
-    in_store_group = store_for_chat_id(message.chat.id) is not None
-    keyboard = repairs_button.GROUP_KEYBOARD if in_store_group else PERSONAL_KEYBOARD
+    store = store_for_chat_id(message.chat.id)
+    keyboard = repairs_button.group_keyboard(store) if store else PERSONAL_KEYBOARD
     if not master:
         await message.answer("Чьи ремонты? Нажмите «📋 Мои ремонты» в своей теме или своей группе.", reply_markup=keyboard)
         return
