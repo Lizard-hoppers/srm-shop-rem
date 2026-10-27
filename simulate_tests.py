@@ -10480,6 +10480,25 @@ def scenario_my_repairs() -> None:
         asyncio.run(my_repairs.my_repairs_pinned(tap))
         check("pressing it puts his list into the topic", len(tap.message.sent) == 1 and "Ремонты — Алексей" in tap.message.sent[0]
               and "Redmi 9C" in tap.message.sent[0] and "iPhone 11" not in tap.message.sent[0])
+        # ---- Mini App: смена мастера и цены — карточки в Telegram следом
+        import webapp.main  # noqa: F401
+        from webapp.routers import repairs as web_repairs
+
+        moved, synced = [], []
+        orig_move, orig_sync = web_repairs.core_simple_flow.move_copies, web_repairs.core_repairs.sync_all_cards
+        web_repairs.core_simple_flow.move_copies = lambda store, order_id: moved.append(order_id)
+        web_repairs.core_repairs.sync_all_cards = lambda db, order_id: synced.append(order_id)
+        try:
+            with TestClient(webapp.main.app) as client:
+                token = make_token(boss, "1")
+                client.post(f"/repairs/{mine}/assign?t={token}", data={"master_id": str(oleg)})
+                client.post(f"/repairs/{mine}/assign?t={token}", data={"master_id": str(oleg)})
+                client.post(f"/repairs/{mine}/price?t={token}", data={"price_estimate": "2500", "price_final": "", "warranty_until": ""})
+        finally:
+            web_repairs.core_simple_flow.move_copies, web_repairs.core_repairs.sync_all_cards = orig_move, orig_sync
+        check("a master changed in the Mini App: the copies move and the cards are redrawn — once, not for the same master again",
+              moved == [mine] and synced.count(mine) == 2)
+        check("a price changed in the Mini App redraws the cards too", synced[-1] == mine)
         with get_conn(db_path) as conn:
             nothing = repair_digest.build(conn, None, master_id=boss, heading="Ремонты — Павел")
         check("nothing open — said so", "незакрытых нет" in nothing[0])

@@ -22,6 +22,7 @@ from core import simple_flow as core_simple_flow
 from core import vision_ocr
 from core.inventory import InsufficientStockError
 from core.storage import get_conn
+from core.stores import get_store
 from webapp.deps import idem_key, link, loc, optional_int, require_role, require_staff
 from webapp.payments import payments_from_form
 from webapp.templating import render
@@ -386,25 +387,41 @@ async def repair_photo_view(
     return JSONResponse({"ok": True, "photo_url": f"/static/device_photos/{filename}"})
 
 
+def _master_changed(location_id: int, order_id: int) -> None:
+    """After the response: the master's copies move to the new one
+    (core.simple_flow.move_copies), then every card is redrawn — the same
+    as a master changed from the chat (bot.repair_actions.after_master_change)."""
+    store = get_store(str(location_id))
+    core_simple_flow.move_copies(store, order_id)
+    core_repairs.sync_all_cards(store.db_path, order_id)
+
+
 @router.post("/{order_id}/assign")
 def assign_view(
-    request: Request, order_id: int, master_id: str = Form(""),
+    request: Request, background_tasks: BackgroundTasks, order_id: int, master_id: str = Form(""),
     staff=Depends(require_role(*_REPAIR_WRITE_ROLES)),
 ):
+    """27.10: the Telegram cards follow — before, a master changed here left
+    the old one on the card (and «бот, смени мастера» then said «и так»)."""
+    new_master = optional_int(master_id)
     with get_conn() as conn:
-        core_repairs.assign_master(conn, order_id, optional_int(master_id))
+        before = core_repairs.get_repair(conn, order_id)
+        core_repairs.assign_master(conn, order_id, new_master)
+    if before and before["master_id"] != new_master:
+        background_tasks.add_task(_master_changed, before["location_id"], order_id)
     return RedirectResponse(link(request, f"/repairs/{order_id}"), status_code=303)
 
 
 @router.post("/{order_id}/price")
 def price_view(
-    request: Request, order_id: int,
+    request: Request, background_tasks: BackgroundTasks, order_id: int,
     price_estimate: str = Form(""), price_final: str = Form(""),
     warranty_until: str = Form(""), staff=Depends(require_role(*_REPAIR_WRITE_ROLES)),
 ):
     with get_conn() as conn:
         core_repairs.set_price(conn, order_id, optional_int(price_estimate), optional_int(price_final))
         core_repairs.set_warranty(conn, order_id, warranty_until.strip() or None)
+    background_tasks.add_task(core_repairs.sync_all_cards, request.state.store.db_path, order_id)
     return RedirectResponse(link(request, f"/repairs/{order_id}"), status_code=303)
 
 
