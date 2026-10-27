@@ -1267,6 +1267,10 @@ def init_db(db_path: str = DB_PATH) -> None:
         # только свои (12.10): куда слать карточки этого поставщика и где
         # лежит карточка каждой сметы.
         _ensure_column(conn, "supplier_chats", "desk_chat_id", "desk_chat_id TEXT")
+        # «Оплата на сегодня» из отчёта бота поставщика (core.supplier_report).
+        _ensure_column(conn, "suppliers", "due_amount", "due_amount REAL")
+        _ensure_column(conn, "suppliers", "due_currency", "due_currency TEXT")
+        _ensure_column(conn, "suppliers", "due_as_of", "due_as_of TEXT")
         _ensure_column(conn, "supplier_chats", "desk_thread_id", "desk_thread_id INTEGER")
         _ensure_column(conn, "supplier_invoices", "card_chat_id", "card_chat_id TEXT")
         conn.execute(

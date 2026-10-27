@@ -10705,6 +10705,27 @@ def scenario_supplier_opening() -> None:
               let_in is not None and elsewhere is None and by_dima == 500)
         check("only the owner/admin gives access, and «убери доступ» takes it back", "владелец" in refused and gone is None)
 
+        # ---- отчёт бота поставщика
+        from core import supplier_report
+        REPORT = "💰 Баланс по взаиморасчётам\n📅 Данные на 27.10.2026, 16:20\n\n🔸 Долг клиента: 3 210,0 $\n⏰ Оплата на сегодня: 1 473,0 $"
+        parsed = supplier_report.parse(REPORT)
+        check("the supplier's bot's report: «Долг клиента» — we owe, «Оплата на сегодня» kept, the date is not a sum",
+              parsed == {"as_of": "27.10.2026 16:20", "balance": (3210, "USD"), "due": (1473, "USD")})
+        check("a date is never the amount", supplier_chat._money_said("Данные на 27.10.2026, 16:20 оплата 500") == (500, "UAH"))
+        said.clear()
+        supplier_chat._say = fake_say
+        try:
+            asyncio.run(supplier_chat._command(_Msg(REPORT), link, "возьми эту информацию", owner))
+            with get_conn(db_path) as conn:
+                usd_now = suppliers.balance(conn, link["supplier_id"], "USD")
+                due = suppliers.due_text(conn, link["supplier_id"])
+            asyncio.run(supplier_chat._command(_Msg(), link, "баланс", owner))
+        finally:
+            supplier_chat._say = orig
+        check("«бот, возьми эту информацию» in reply to the report: 3 210 $ owed, 1 473 $ due today",
+              usd_now == 3210 and "1473" in (due or "") and "Сверка" in said[0])
+        check("«бот, баланс» shows what is due today too", "к оплате 1473 USD" in said[-1])
+
 
 def scenario_master_pay_gibrid() -> None:
     """Зарплата мастеров Гибрида в CRM (23.10, этап 3): ставка «ровно треть»,

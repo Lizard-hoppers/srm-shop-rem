@@ -46,6 +46,7 @@ from core import doc_cancel
 from core import documents as core_documents
 from core import locations as core_locations
 from core import supplier_accounts as suppliers
+from core import supplier_report
 from core import supplier_files
 from core.accounts import money
 from core.storage import get_conn
@@ -430,8 +431,10 @@ async def _read_file(message: Message, link, file_id: str, file_name: str, size:
 
 
 def _money_said(text: str) -> tuple[float | int, str] | None:
-    """«оплата 5 000 usd» -> (5000, 'USD'); None when no amount is named."""
-    match = _AMOUNT.search(text)
+    """«оплата 5 000 usd» -> (5000, 'USD'); None when no amount is named.
+    A date or a clock time is never the amount (27.10: «27.10» was read off
+    «Данные на 27.10.2026» as 27,1 $)."""
+    match = _AMOUNT.search(supplier_report.without_dates(text))
     amount = core_accounts.parse_amount(match.group(1)) if match else None
     if not amount:
         return None
@@ -444,6 +447,8 @@ async def _command(message: Message, link, question: str, actor=None) -> None:
     if await _access(message, question, actor):
         return
     replied = message.reply_to_message
+    if replied and await _report(message, link, replied.text or replied.caption, actor):
+        return
     if not _AMOUNT.search(question) and replied and (replied.text or replied.caption):
         # «бот, возьми эту информацию» in reply to «у них 3210»: the number is there.
         question = f"{question} {replied.text or replied.caption}"
@@ -469,12 +474,39 @@ async def _command(message: Message, link, question: str, actor=None) -> None:
     if any(word in lowered for word in _BALANCE_WORDS):
         with get_conn(registry_db_path()) as conn:
             lines = [f"<b>{html.escape(link['supplier_name'])}</b> — {suppliers.balance_text(conn, link['supplier_id'])}"]
+            due = suppliers.due_text(conn, link["supplier_id"])
+            if due:
+                lines.append(f"⏰ {due}")
             for row in suppliers.recent(conn, link["supplier_id"], limit=5):
                 what = suppliers.MODES[row["pay_mode"]] if row["kind"] == "invoice" else "оплата"
                 lines.append(f"• {suppliers.label(row)} · {kyiv_datetime(row['posted_at'])} · {money(row['amount'])} {_cur(row['currency'])} · {what}")
         await _say(message, "\n".join(lines))
         return
     await _say(message, _HELP)
+
+
+async def _report(message: Message, link, text: str | None, actor) -> bool:
+    """The supplier's own bot's «Баланс по взаиморасчётам» (core.supplier_report),
+    replied to or forwarded here: its balance becomes ours, its «оплата на
+    сегодня» is kept. True if the text was such a report."""
+    report = supplier_report.parse(text)
+    if not report:
+        return False
+    lines = []
+    with get_conn(registry_db_path()) as conn:
+        if "balance" in report:
+            amount, currency = report["balance"]
+            before, after = suppliers.set_opening(conn, link["supplier_id"], currency, amount, actor["id"] if actor else None)
+            lines.append(f"баланс: {'мы должны ' + str(money(after)) if after > 0 else ('наш депозит ' + str(money(-after)) if after < 0 else '0')} "
+                         f"{_cur(currency)} (было {money(before)})")
+        if "due" in report:
+            amount, currency = report["due"]
+            suppliers.set_due(conn, link["supplier_id"], amount, currency, report.get("as_of"))
+            lines.append(f"к оплате сегодня: {money(amount)} {_cur(currency)}")
+        total = suppliers.balance_text(conn, link["supplier_id"])
+    when = f" на {report['as_of']}" if report.get("as_of") else ""
+    await _say(message, f"✅ Сверка с отчётом поставщика{when}:\n• " + "\n• ".join(lines) + f"\nВзаиморасчёты: {total}")
+    return True
 
 
 async def _number_answered(message: Message, invoice, value: str, staff) -> bool:
@@ -520,6 +552,8 @@ async def in_chat(message: Message, link) -> None:
                 invoice = suppliers.by_card(conn, message.chat.id, replied.message_id)
             if invoice and await _number_answered(message, invoice, message.text, actor):
                 return
+        if message.forward_origin and await _report(message, link, message.text, actor):
+            return  # the supplier's bot's report, forwarded here — read without «бот»
         question = question_of(message.text)
         if question is not None:
             await _command(message, link, question, actor)

@@ -127,6 +127,19 @@ def balance(conn: sqlite3.Connection, supplier_id: int, currency: str):
     return balances(conn, supplier_id).get(currency, 0)
 
 
+def set_due(conn: sqlite3.Connection, supplier_id: int, amount, currency: str | None, as_of: str | None) -> None:
+    """«Оплата на сегодня» as the supplier's own report says (core.supplier_report)."""
+    conn.execute("UPDATE suppliers SET due_amount = ?, due_currency = ?, due_as_of = ? WHERE id = ?",
+                 (amount, currency, as_of, supplier_id))
+
+
+def due_text(conn: sqlite3.Connection, supplier_id: int) -> str | None:
+    row = conn.execute("SELECT due_amount, due_currency, due_as_of FROM suppliers WHERE id = ?", (supplier_id,)).fetchone()
+    if not row or row["due_amount"] is None:
+        return None
+    return f"к оплате {money(row['due_amount'])} {row['due_currency'] or 'UAH'}" + (f" (по их отчёту на {row['due_as_of']})" if row["due_as_of"] else "")
+
+
 def balance_text(conn: sqlite3.Connection, supplier_id: int) -> str:
     """«мы должны 5400 UAH · наш депозит 300 USD», or «взаиморасчёты 0»."""
     parts = [(f"мы должны {value} {cur}" if value > 0 else f"наш депозит {money(-value)} {cur}")
