@@ -10487,6 +10487,7 @@ def scenario_my_repairs() -> None:
         from core.stores import get_store
         check("in a simple-mode точка's group the keyboard is «🔧 Ремонты» alone (one keyboard for every topic)",
               [[b.text for b in row] for row in repairs_button.group_keyboard(get_store("1")).keyboard] == [[qa.BTN_REPAIRS_LIST]])
+        check("the pinned «🔧 Ремонты» of the feed is the same button", repairs_button.PINNED_BUTTON.inline_keyboard[0][0].callback_data == "all_repairs")
         check("the точка's whole list is for owner/admin/manager, not a master or a stranger",
               repairs_button.sees_all({"role": "manager"}) and not repairs_button.sees_all({"role": "master"})
               and not repairs_button.sees_all(None, get_store("1")))

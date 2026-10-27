@@ -19,7 +19,9 @@ from __future__ import annotations
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramAPIError
-from aiogram.types import KeyboardButton, LinkPreviewOptions, Message, ReplyKeyboardMarkup
+from aiogram.types import (
+    CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, LinkPreviewOptions, Message, ReplyKeyboardMarkup,
+)
 
 from bot.quick_actions import BTN_MY_REPAIRS, BTN_REPAIRS_LIST
 from core import auth as core_auth
@@ -81,6 +83,45 @@ async def send_list(message: Message, store, statuses: tuple[str, ...] = repair_
         sent.append(reply.message_id)
     if in_group:
         _last_list[place] = sent
+
+
+# 27.10 (Павел): the same «🔧 Ремонты» pinned in the work group's feed, under
+# a message — it stays at the top whatever the keyboard. Who sees what is as
+# with the keyboard button (sees_all).
+PINNED_BUTTON = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=BTN_REPAIRS_LIST, callback_data="all_repairs")]])
+
+
+@router.callback_query(F.data == "all_repairs")
+async def pinned_pressed(callback: CallbackQuery) -> None:
+    message = callback.message
+    store = store_for_chat_id(message.chat.id) if message else None
+    if not store:
+        await callback.answer()
+        return
+    with get_conn(store.db_path) as conn:
+        staff = core_auth.get_staff_by_telegram_id(conn, callback.from_user.id)
+    if not sees_all(staff, store):
+        from bot import my_repairs
+
+        if staff and staff["role"] == "master":
+            for chunk in my_repairs.chunks_for(staff):
+                await message.answer(chunk, link_preview_options=_NO_PREVIEW)
+            await callback.answer()
+        else:
+            await callback.answer("Список ремонтов точки — для администраторов и менеджеров. Свои ремонты — кнопка в вашей теме.",
+                                  show_alert=True)
+        return
+    topics = {str(store.staff_group_chat_id): store.repair_topic_id} if store.staff_group_chat_id else {}
+    with get_conn(store.db_path) as conn:
+        chunks = repair_digest.build(conn, store.location_id, prefer_chat_id=message.chat.id, topics=topics)
+    place = (message.chat.id, message.message_thread_id if message.is_topic_message else None)
+    for old in _last_list.pop(place, []):
+        try:
+            await message.bot.delete_message(message.chat.id, old)
+        except TelegramAPIError:
+            pass
+    _last_list[place] = [(await message.answer(chunk, link_preview_options=_NO_PREVIEW)).message_id for chunk in chunks]
+    await callback.answer()
 
 
 @router.message(F.text == BTN_REPAIRS_LIST, F.chat.type.in_({"group", "supergroup"}))
