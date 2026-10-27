@@ -1198,6 +1198,9 @@ def init_db(db_path: str = DB_PATH) -> None:
         # Копии карточки мастеру: его тема в группе точки и его личная группа.
         _ensure_column(conn, "staff", "topic_id", "topic_id INTEGER")
         _ensure_column(conn, "staff", "personal_chat_id", "personal_chat_id INTEGER")
+        # 27.10: мастер без доступа к группе точки (Олег Som) получает в свою
+        # группу полную живую карточку с кнопками, а не урезанную копию.
+        _ensure_column(conn, "staff", "full_cards", "full_cards INTEGER NOT NULL DEFAULT 0")
         # «📦 Наш» — ремонт устройства самой точки (выплата мастеру вручную).
         _ensure_column(conn, "repair_orders", "own_order", "own_order INTEGER NOT NULL DEFAULT 0")
         # Кто принял ремонт, когда истории приёма нет (перенесённые из старого

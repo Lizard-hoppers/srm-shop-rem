@@ -10047,6 +10047,22 @@ def scenario_card_edit_by_words() -> None:
                   "4321" in personal[3] and "Анна" not in personal[3] and "Анна" in topic[3]
                   and "t.me/c/5580001/" in str(personal[4]) and "gb_" not in str(topic[4]))
 
+            # 27.10: a master who isn't in the work group gets the whole live card in his own group
+            with get_conn(db_path) as conn:
+                conn.execute("UPDATE staff SET full_cards = 1 WHERE id = ?", (alex,))
+                full_order = repairs.create_repair(conn, client, "", None, "Note 12", None, "дисплей", "offline", alex, 1800, mgr, location_id=1)
+                full_text, full_kb = repairs.card(conn, full_order)
+            calls.clear()
+            repairs.notify_and_save(store, full_order, full_text, full_kb, (b"\xff\xd8\xff", "x.jpg"))
+            to_him = next((p for m, p in calls if str(p.get("chat_id")) == str(PERSONAL)), None)
+            with get_conn(db_path) as conn:
+                live = [m[0] for m in repairs.get_order_messages(conn, full_order)]
+            check("full_cards: his group gets the whole card — the client and the «Готов / Возврат» buttons — kept live",
+                  to_him is not None and "Анна" in to_him.get("caption", "") and "gb_done" in str(to_him.get("reply_markup"))
+                  and str(PERSONAL) in live)
+            with get_conn(db_path) as conn:
+                conn.execute("UPDATE staff SET full_cards = 0 WHERE id = ?", (alex,))
+
             calls.clear()
             with get_conn(db_path) as conn:
                 repair_edit.apply(conn, order, "master", "эдик", mgr)

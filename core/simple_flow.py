@@ -252,6 +252,11 @@ def _post(notify, chat_id, text, photo, keyboard, thread=None) -> int | None:
 # правят вместе с главной карточкой (copy_edits), но своим текстом и с
 # кнопкой-ссылкой, а при смене мастера они переезжают (move_copies).
 COPY_KINDS_SQL = "(kind GLOB 'master_topic:*' OR kind GLOB 'master_chat:*')"
+# «master_full:<id>» — the whole live card in the master's own group, for a
+# master who isn't in the точка's group (staff.full_cards, 27.10): it is
+# kept up to date with the main card (buttons and all) and moves with the
+# master like the copies do.
+MOVABLE_KINDS_SQL = "(kind GLOB 'master_topic:*' OR kind GLOB 'master_chat:*' OR kind GLOB 'master_full:*')"
 
 
 def _link_kb(link: str | None) -> dict | None:
@@ -268,7 +273,13 @@ def _post_copies(store, order_id: int, repair, master, full_text: str, link: str
         sent = _post(_notify, store.staff_group_chat_id, full_text, photo, _link_kb(link), thread=master["topic_id"])
         if sent:
             copies.append((str(store.staff_group_chat_id), sent, f"master_topic:{master['id']}", bool(photo)))
-    if master and master["personal_chat_id"]:
+    if master and master["personal_chat_id"] and "full_cards" in master.keys() and master["full_cards"]:
+        with get_conn(store.db_path) as conn:
+            _text, keyboard = _repairs.card(conn, order_id)
+        sent = _post(_notify, master["personal_chat_id"], full_text, photo, keyboard)
+        if sent:
+            copies.append((str(master["personal_chat_id"]), sent, f"master_full:{master['id']}", bool(photo)))
+    elif master and master["personal_chat_id"]:
         with get_conn(store.db_path) as conn:
             path = _repairs.roadmap(conn, repair)
         sent = _post(_notify, master["personal_chat_id"], master_text(repair, path), photo, _link_kb(link))
@@ -331,9 +342,9 @@ def move_copies(store, order_id: int) -> None:
 
     with get_conn(store.db_path) as conn:
         old = conn.execute(
-            f"SELECT chat_id, message_id FROM repair_order_messages WHERE order_id = ? AND {COPY_KINDS_SQL}", (order_id,),
+            f"SELECT chat_id, message_id FROM repair_order_messages WHERE order_id = ? AND {MOVABLE_KINDS_SQL}", (order_id,),
         ).fetchall()
-        conn.execute(f"DELETE FROM repair_order_messages WHERE order_id = ? AND {COPY_KINDS_SQL}", (order_id,))
+        conn.execute(f"DELETE FROM repair_order_messages WHERE order_id = ? AND {MOVABLE_KINDS_SQL}", (order_id,))
         repair = _repairs.get_repair(conn, order_id)
         master = conn.execute("SELECT * FROM staff WHERE id = ?", (repair["master_id"],)).fetchone() if repair["master_id"] else None
         full_text, _keyboard = _repairs.card(conn, order_id)
