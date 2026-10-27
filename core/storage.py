@@ -205,6 +205,16 @@ CREATE TABLE IF NOT EXISTS gsheet_queue (
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Кто и когда был мастером ремонта (27.10) — для этапов «У мастера» /
+-- «Передан» в пути карточки (core.repairs.roadmap); пишут триггеры.
+CREATE TABLE IF NOT EXISTS repair_master_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id INTEGER NOT NULL REFERENCES repair_orders(id),
+    master_id INTEGER,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_repair_master_log_order ON repair_master_log(order_id);
+
 -- Движения кассы для рассылки владельцам (25.10, core.cash_watch) —
 -- заполняется триггерами на cash_transactions.
 CREATE TABLE IF NOT EXISTS cash_watch_queue (
@@ -1203,6 +1213,13 @@ def init_db(db_path: str = DB_PATH) -> None:
                     WHEN (SELECT COALESCE(gsheet_id, '') FROM locations WHERE id = NEW.location_id) != ''
                     BEGIN INSERT INTO gsheet_queue (repair_id) VALUES (NEW.id); END"""
             )
+        # Каждая смена мастера ремонта — в журнал (путь карточки, core.repairs.roadmap).
+        conn.execute("""CREATE TRIGGER IF NOT EXISTS repair_master_log_insert AFTER INSERT ON repair_orders
+                        WHEN NEW.master_id IS NOT NULL
+                        BEGIN INSERT INTO repair_master_log (order_id, master_id) VALUES (NEW.id, NEW.master_id); END""")
+        conn.execute("""CREATE TRIGGER IF NOT EXISTS repair_master_log_update AFTER UPDATE OF master_id ON repair_orders
+                        WHEN OLD.master_id IS NOT NEW.master_id
+                        BEGIN INSERT INTO repair_master_log (order_id, master_id) VALUES (NEW.id, NEW.master_id); END""")
         # Каждое движение кассы и его отмена — владельцам в личку (core.cash_watch).
         conn.execute("""CREATE TRIGGER IF NOT EXISTS cash_watch_insert AFTER INSERT ON cash_transactions
                         BEGIN INSERT INTO cash_watch_queue (tx_id, event) VALUES (NEW.id, 'new'); END""")

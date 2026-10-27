@@ -810,35 +810,38 @@ def _optional(repair, column: str):
 
 _CLOSED = ("issued", "cancelled")
 _STEP_RANK = {"new": 0, "in_progress": 1, "ready": 2, "issued": 3, "cancelled": 3}
+# «Взять в работу» sets the master and the status in one tap — the two are
+# one step on the path when they are this close.
+_SAME_STEP_SECONDS = 120
 
 
-def _when(value: str | None, previous_day: str | None) -> tuple[str, str | None]:
-    """«24.10 09:43» — or just «14:10» on the same day as the step before."""
+def _moment(value: str | None) -> str:
+    """«27.10 10:51» in Kyiv time, or "" when unknown."""
     shown = kyiv_datetime(value)
-    if len(shown) != 16:
-        return "", previous_day
-    day, clock = shown[:5], shown[11:]
-    return (clock if day == previous_day else f"{day} {clock}"), day
+    return f"{shown[:5]} {shown[11:]}" if len(shown) == 16 else ""
 
 
-def _masters_chain(conn: sqlite3.Connection, repair: sqlite3.Row) -> list[str]:
-    """Who the repair was with, in order — from the master changes made in
-    the chat (core.repair_edit), ending with the master it has now."""
-    chain = []
-    for row in conn.execute(
-        "SELECT old_value, new_value FROM repair_edits WHERE order_id = ? AND field = 'master' AND undone_at IS NULL ORDER BY id",
+def _apart(a: str | None, b: str | None) -> float:
+    from datetime import datetime
+
+    try:
+        return abs((datetime.strptime(a, "%Y-%m-%d %H:%M:%S") - datetime.strptime(b, "%Y-%m-%d %H:%M:%S")).total_seconds())
+    except (TypeError, ValueError):
+        return float("inf")
+
+
+def _masters_log(conn: sqlite3.Connection, repair: sqlite3.Row) -> list[tuple[str | None, str | None]]:
+    """(when, master's name) for every change of master (repair_master_log,
+    written by triggers since 27.10). An older repair has none — the master
+    it has, from when he took it into work, else from the intake."""
+    log = [(row["created_at"], row["name"]) for row in conn.execute(
+        """SELECT m.created_at, s.name FROM repair_master_log m LEFT JOIN staff s ON s.id = m.master_id
+           WHERE m.order_id = ? ORDER BY m.id""",
         (repair["id"],),
-    ):
-        old_id = json.loads(row["old_value"] or "{}").get("master_id")
-        if not chain and old_id:
-            old = conn.execute("SELECT name FROM staff WHERE id = ?", (old_id,)).fetchone()
-            if old:
-                chain.append(old["name"])
-        chain.append(row["new_value"])
-    current = repair["master_name"]
-    if current and (not chain or chain[-1] != current):
-        chain.append(current)
-    return chain if current else []
+    )]
+    if not log and repair["master_name"]:
+        log = [(repair["started_at"] or repair["created_at"], repair["master_name"])]
+    return log
 
 
 def accepted_by_name(conn: sqlite3.Connection, repair: sqlite3.Row) -> str | None:
@@ -855,11 +858,12 @@ def accepted_by_name(conn: sqlite3.Connection, repair: sqlite3.Row) -> str | Non
 
 
 def roadmap(conn: sqlite3.Connection, repair: sqlite3.Row) -> str:
-    """🗺 Путь ремонта одной строкой (25.10, Павел): точка приёма ➜ мастер ➜
-    готов ➜ выдан. Пройденное — со временем, текущий шаг жирным, что
-    осталось — кружком. Строится из истории статусов: повторы схлопнуты,
+    """📍 Где ремонт — столбиком, как трекинг посылки (27.10, Павел): каждый
+    этап — время, что и кто: принят (точка и кто принял), у мастера /
+    передан другому, в работе, готов, выдан. Пройденные — ✅, следующий — ⏳,
+    дальше — ○. Из истории статусов и журнала мастеров: повторы схлопнуты,
     закрытие, которое потом переиграли («Возврат» → «Изменить выбор»),
-    выпадает, а откат назад виден как «↩»."""
+    выпадает, откат назад виден как «↩»."""
     simple = _simple_flow.is_simple(conn, repair["location_id"])
     events = [(row["status"], row["changed_at"]) for row in conn.execute(
         "SELECT status, changed_at FROM repair_status_history WHERE order_id = ? ORDER BY id", (repair["id"],),
@@ -875,43 +879,46 @@ def roadmap(conn: sqlite3.Connection, repair: sqlite3.Row) -> str:
         kept.insert(0, ("new", repair["created_at"]))
 
     point = conn.execute("SELECT name FROM locations WHERE id = ?", (repair["location_id"],)).fetchone()
-    taker = accepted_by_name(conn, repair)
-    masters = [f"🔧 {html.escape(name)}" for name in _masters_chain(conn, repair)]
-    steps: list[str] = []
-    day = None
-    worked = False
-    for index, (status, at) in enumerate(kept):
-        when, day = _when(at, day)
-        back = index > 0 and _STEP_RANK[status] < _STEP_RANK[kept[index - 1][0]]
-        if index == 0:
-            who = f" · принял {html.escape(taker)}" if taker else ""
-            steps.append(f"🏪 {html.escape(point['name'] if point else 'Точка')}{who} {when}".strip())
-            if masters and not any(s == "in_progress" for s, _at in kept):
-                # The master named at intake (or later) without «Взять в работу» — at Гибрид that is every repair.
-                steps += masters
-                worked = True
+    taken_in = ", ".join(filter(None, [point["name"] if point else None, accepted_by_name(conn, repair)]))
+    master = repair["master_name"]
+    steps: list[tuple[str | None, str, str, str | None]] = [(kept[0][1], "✅", "Принят", taken_in)]
+    starts = [at for status, at in kept[1:] if status == "in_progress"]
+    merged_start = None
+    for index, (at, name) in enumerate(_masters_log(conn, repair)):
+        label = "У мастера" if index == 0 else "Передан"
+        if merged_start is None and starts and _apart(starts[0], at) <= _SAME_STEP_SECONDS:
+            label, merged_start = "В работе", starts[0]
+        steps.append((at, "✅", label, name or "без мастера"))
+    for index, (status, at) in enumerate(kept[1:], 1):
+        back = _STEP_RANK[status] < _STEP_RANK[kept[index - 1][0]]
+        if status == "in_progress" and at == merged_start and not back:
             continue
-        if status == "in_progress" and not worked and not back:
-            # The time he took it goes with the first master; changes after follow him.
-            first, *rest = masters or ["🔧 В работе"]
-            steps += [f"{first} {when}".strip(), *rest]
-            worked = True
-            continue
-        if status == "issued":
-            name = "✅ Готов" if simple else "📦 Выдан"
-        elif status == "cancelled":
-            name = "❌ Возврат" if simple else "❌ Отказ"
+        if status == "cancelled":
+            steps.append((at, "❌", "Возврат" if simple else "Отказ", None))
+        elif status == "issued":
+            steps.append((at, "✅", "Готов" if simple else "Выдан", master if simple else None))
+        elif status == "ready":
+            steps.append((at, "✅", "Готов", master))
+        elif status == "in_progress":
+            steps.append((at, "✅", "↩ В работе" if back else "В работе", master))
         else:
-            name = ("↩ " if back else "") + {"new": "Новый", "in_progress": "В работе", "ready": "✅ Готов"}[status]
-        steps.append(f"{name} {when}".strip())
-    steps[-1] = f"<b>{steps[-1]}</b>"
+            steps.append((at, "✅", "↩ Новый", None))
+    steps.sort(key=lambda step: step[0] or "")  # stable: «Принят» before a master named at the same moment
+
+    lines = ["📍 <b>Где ремонт</b>"]
+    for at, icon, label, who in steps:
+        when = _moment(at)
+        lines.append(f"{icon} {when + '  ' if when else ''}{label}" + (f" — {html.escape(who)}" if who else ""))
     status = repair["status"]
     if status not in _CLOSED:
-        ahead = ["Готов"] if simple else (["Готов", "Выдан"] if status != "ready" else ["Выдан"])
-        if not simple and status == "new" and not masters:
-            ahead.insert(0, "В работе")
-        steps += [f"○ {step}" for step in ahead]
-    return "🗺 " + " ➜ ".join(steps)
+        if simple:
+            ahead = ["Готов"]
+        elif status == "ready":
+            ahead = ["Выдан"]
+        else:
+            ahead = (["В работе"] if status == "new" and not master else []) + ["Готов", "Выдан"]
+        lines += [f"{'⏳' if n == 0 else '○'} {step}" for n, step in enumerate(ahead)]
+    return "\n".join(lines)
 
 
 def render_card_text(
