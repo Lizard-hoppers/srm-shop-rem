@@ -10724,7 +10724,7 @@ def scenario_supplier_opening() -> None:
             supplier_chat._say = orig
         check("«бот, возьми эту информацию» in reply to the report: 3 210 $ owed, 1 473 $ due today",
               usd_now == 3210 and "1473" in (due or "") and "Сверка" in said[0])
-        check("«бот, баланс» shows what is due today too", "к оплате 1473 USD" in said[-1])
+        check("«бот, баланс» shows the overdue part too", "просрочка 1473 USD" in said[-1])
 
 
 def scenario_master_pay_gibrid() -> None:

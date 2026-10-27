@@ -502,7 +502,7 @@ async def _report(message: Message, link, text: str | None, actor) -> bool:
         if "due" in report:
             amount, currency = report["due"]
             suppliers.set_due(conn, link["supplier_id"], amount, currency, report.get("as_of"))
-            lines.append(f"к оплате сегодня: {money(amount)} {_cur(currency)}")
+            lines.append(f"просрочка (оплатить сейчас): {money(amount)} {_cur(currency)}")
         total = suppliers.balance_text(conn, link["supplier_id"])
     when = f" на {report['as_of']}" if report.get("as_of") else ""
     await _say(message, f"✅ Сверка с отчётом поставщика{when}:\n• " + "\n• ".join(lines) + f"\nВзаиморасчёты: {total}")

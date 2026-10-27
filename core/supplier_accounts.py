@@ -137,7 +137,8 @@ def due_text(conn: sqlite3.Connection, supplier_id: int) -> str | None:
     row = conn.execute("SELECT due_amount, due_currency, due_as_of FROM suppliers WHERE id = ?", (supplier_id,)).fetchone()
     if not row or row["due_amount"] is None:
         return None
-    return f"к оплате {money(row['due_amount'])} {row['due_currency'] or 'UAH'}" + (f" (по их отчёту на {row['due_as_of']})" if row["due_as_of"] else "")
+    # «Оплата на сегодня» in their report is what is overdue (27.10, from the supplier): due now.
+    return f"просрочка {money(row['due_amount'])} {row['due_currency'] or 'UAH'} — оплатить сейчас" + (f" (по их отчёту на {row['due_as_of']})" if row["due_as_of"] else "")
 
 
 def balance_text(conn: sqlite3.Connection, supplier_id: int) -> str:
