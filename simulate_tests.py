@@ -10525,6 +10525,45 @@ def scenario_my_repairs() -> None:
               and qa.keyboard_for({"role": "manager"}) is qa.QUICK_ACTIONS_KEYBOARD)
 
 
+def scenario_fsm_storage() -> None:
+    """Шаги диалогов переживают перезапуск бота (27.10)."""
+    print("scenario: шаги диалога — в базе, перезапуск их не теряет")
+    import asyncio
+    import threading
+
+    from aiogram.fsm.storage.base import StorageKey
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
+    from bot import quick_actions as qa
+    from bot.fsm_storage import PersistentStorage
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "fsm.sqlite3")
+        key = StorageKey(bot_id=1, chat_id=5, user_id=5)
+        markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Без пароля ➡️", callback_data="repair_password_skip")]])
+
+        async def run():
+            first = PersistentStorage(path)
+            await first.set_state(key, qa.RepairIntake.password)
+            await first.update_data(key, {"photo_bytes": b"\xff\xd8\xff", "client_phone": "+380501234567", "prompt_markup": markup})
+            await first.close()
+            again = PersistentStorage(path)  # the bot restarted
+            state, data = await again.get_state(key), await again.get_data(key)
+            check("after a restart the dialog is where it was: the step, the photo, the screen's buttons",
+                  state == qa.RepairIntake.password.state and data["photo_bytes"] == b"\xff\xd8\xff"
+                  and data["prompt_markup"].inline_keyboard[0][0].callback_data == "repair_password_skip")
+            await again.set_state(key, None)
+            await again.set_data(key, {})
+            await again.close()
+            third = PersistentStorage(path)
+            check("a finished dialog leaves nothing behind", await third.get_state(key) is None and await third.get_data(key) == {})
+            await third.update_data(key, {"lock": threading.Lock()})
+            check("data that can't be saved stays in memory — the dialog goes on", "lock" in await third.get_data(key))
+            await third.close()
+
+        asyncio.run(run())
+
+
 def scenario_master_pay_gibrid() -> None:
     """Зарплата мастеров Гибрида в CRM (23.10, этап 3): ставка «ровно треть»,
     сводка по ремонтам за период = начисления, стартовый остаток, выплата
@@ -10933,6 +10972,7 @@ def main() -> None:
     scenario_services()
     scenario_cash_watch()
     scenario_my_repairs()
+    scenario_fsm_storage()
     scenario_master_pay_gibrid()
     scenario_gsheet_mirror()
     scenario_gibrit_cutover()

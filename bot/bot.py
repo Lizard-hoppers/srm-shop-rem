@@ -4,7 +4,6 @@ import logging
 from aiogram import BaseMiddleware, Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
     BotCommand,
     BotCommandScopeAllGroupChats,
@@ -30,6 +29,7 @@ from bot.repair_attachments import router as repair_attachments_router
 from bot.repairs_button import router as repairs_button_router
 from bot.sale_flow import router as sale_flow_router
 from bot.service_flow import router as service_flow_router
+from bot.fsm_storage import PersistentStorage
 from bot.my_repairs import router as my_repairs_router
 from bot.legacy_gibrit import router as legacy_gibrit_router
 from bot.simple_card import router as simple_card_router
@@ -105,12 +105,9 @@ def build_dispatcher() -> Dispatcher:
     whole thing can be exercised as it runs (simulate_tests feeds it real
     updates; calling handler functions directly skips the filters, which
     is exactly where a dead button hides)."""
-    # MemoryStorage: the quick-intake FSM (bot/quick_actions.py) only needs
-    # its state to survive between a staff member's own messages within one
-    # sitting — in-process is enough, and a restart just means an
-    # abandoned draft (nothing's written to the DB until the final
-    # confirm), no persistence needed across process restarts.
-    dp = Dispatcher(storage=MemoryStorage())
+    # 27.10: the dialogs' steps survive a restart (bot/fsm_storage.py) — a
+    # deploy in the middle of someone's intake used to drop it silently.
+    dp = Dispatcher(storage=PersistentStorage())
     # First: a group tied to a supplier belongs to this router whole — the
     # supplier sits there, so nothing of it may reach the assistant or the
     # repair handlers below (bot/supplier_chat.py).
