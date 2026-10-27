@@ -88,6 +88,69 @@ async def _send(message: Message, chunks: list[str], keyboard) -> None:
                              reply_markup=keyboard if index == len(chunks) - 1 else None)
 
 
+_ONLY_HERE = ("В этой группе бот знает ваши ремонты:\n"
+              "• «бот, мои ремонты» — все незакрытые\n"
+              "• «бот, РК-1189» или «бот, что с 15 про макс» — карточка ремонта\n"
+              "Остальное — в группе «РМТ».")
+
+
+def _group_master(message: Message):
+    """The master whose own group this is — or None (not a master's group)."""
+    if message.chat.type not in ("group", "supergroup") or store_for_chat_id(message.chat.id):
+        return None
+    with get_conn(_db()) as conn:
+        return conn.execute(
+            "SELECT * FROM staff WHERE personal_chat_id = ? AND role = 'master' AND active = 1", (message.chat.id,),
+        ).fetchone()
+
+
+def _asked_here(message: Message) -> bool:
+    from bot.assistant_chat import question_of
+
+    return question_of(message.text) is not None and _group_master(message) is not None
+
+
+def answer_in_group(master, question: str) -> list[str]:
+    """«бот, …» in a master's own group (27.10): only about HIS repairs — the
+    точка's are not his business, so no assistant here, just a lookup."""
+    import html
+    import re
+
+    from core import repairs as core_repairs
+    from core import simple_flow
+    from core.agent_tools import matches
+
+    text = question.strip()
+    if not text or re.search(r"мои|мой|у меня|ремонт|список|что есть|все", text, re.IGNORECASE) and not re.search(r"\d{3,}|рк", text, re.IGNORECASE):
+        return chunks_for(master)
+    with get_conn(_db()) as conn:
+        mine = [r for r in core_repairs.list_repairs(conn, master_id=master["id"]) if r["status"] in repair_digest.OPEN_STATUSES]
+        number = re.search(r"(?:рк|№|#)?\s*-?\s*(\d{2,6})", text, re.IGNORECASE)
+        found = [r for r in mine if number and r["id"] == int(number.group(1))]
+        if not found:
+            words = re.sub(r"^(?:что\s+с|найди|покажи|пришли|карточк\w*)\s+", "", text, flags=re.IGNORECASE)
+            found = [r for r in mine if matches(words, r["brand"], r["model"], r["device_type"])]
+        if len(found) == 1:
+            repair = core_repairs.get_repair(conn, found[0]["id"])
+            card = simple_flow.master_text(repair, core_repairs.roadmap(conn, repair))
+            link = simple_flow._main_link(conn, repair["id"])
+            return [card + (f'\n\n<a href="{link}">🔗 Карточка в группе</a>' if link else "")]
+    if len(found) > 1:
+        lines = [f"• {html.escape(' '.join(filter(None, [r['brand'], r['model']])) or r['device_type'] or 'устройство')} — "
+                 f"{core_repairs.STATUS_LABELS[r['status']]} · РК-{r['id']:03d}" for r in found[:10]]
+        return ["Подходят несколько ваших ремонтов — назовите номер РК:\n" + "\n".join(lines)]
+    return ["Среди ваших незакрытых ремонтов такого нет.\n\n" + _ONLY_HERE]
+
+
+@router.message(F.text, F.func(_asked_here))
+async def asked_in_master_group(message: Message) -> None:
+    from bot.assistant_chat import question_of
+
+    master = _group_master(message)
+    for chunk in answer_in_group(master, question_of(message.text) or ""):
+        await message.reply(chunk, link_preview_options=_NO_PREVIEW)
+
+
 @router.message(F.migrate_to_chat_id)
 async def group_upgraded(message: Message) -> None:
     """«Группа стала супергруппой» — the service message in the old group:

@@ -10460,6 +10460,13 @@ def scenario_my_repairs() -> None:
               "Ремонты — Алексей" in text and "Redmi 9C" in text and "Poco X3" not in text and "iPhone 11" not in text
               and "t.me/c/5590001/" in text)
         check("in his own group it is that group's master, whoever presses", my_repairs.master_for(PERSONAL, "group", None, 999)["id"] == oleg)
+        with get_conn(db_path) as conn:
+            oleg_row = auth.get_staff_by_id(conn, oleg)
+        check("«бот, мои ремонты» in his group: his list", "Ремонты — Олег Som" in my_repairs.answer_in_group(oleg_row, "мои ремонты")[0])
+        found = my_repairs.answer_in_group(oleg_row, "что с iPhone 11")[0]
+        check("«бот, что с iPhone 11»: the card of his repair — without the client", "iPhone 11" in found and "Анна" not in found and "Где ремонт" in found)
+        alien = my_repairs.answer_in_group(oleg_row, f"РК-{mine}")[0]
+        check("another master's repair is not shown in his group", "такого нет" in alien and "Redmi" not in alien)
         check("in his topic of the work group — his", my_repairs.master_for(GROUP, "supergroup", TOPIC, 999)["id"] == alex)
         check("in the work group's feed — whoever pressed, if he is linked; nobody else", my_repairs.master_for(GROUP, "supergroup", None, 559103)["id"] == alex
               and my_repairs.master_for(GROUP, "supergroup", None, 999) is None)
