@@ -10632,6 +10632,52 @@ def scenario_chat_migration() -> None:
               staff_chat == NEW and card_chat == str(NEW))
 
 
+def scenario_supplier_opening() -> None:
+    """«бот, остаток 3210» в группе поставщика (27.10, «Hybrid / U 22»)."""
+    print("scenario: начальный остаток поставщика из его группы")
+    import asyncio
+    from types import SimpleNamespace
+
+    from bot import supplier_chat
+    from core import supplier_accounts as suppliers
+
+    with tempfile.TemporaryDirectory() as tmp, _separate_base(tmp, "sup.sqlite3", ("Гибрид",)) as db_path:
+        with get_conn(db_path) as conn:
+            auth.create_staff(conn, "so-owner", "pass", "Павел", "owner")
+            auth.link_staff_telegram(conn, "so-owner", 562001)
+            link = suppliers.link_chat(conn, -1003726000001, "Hybrid / U 22", None)
+
+        class _Msg:
+            def __init__(self, reply_text=None):
+                self.chat = SimpleNamespace(id=-1003726000001, type="supergroup")
+                self.from_user = SimpleNamespace(id=562001)
+                self.reply_to_message = SimpleNamespace(text=reply_text, caption=None) if reply_text else None
+                self.said = []
+
+        said = []
+
+        async def fake_say(message, text, **kw):
+            said.append(text)
+
+        orig = supplier_chat._say
+        supplier_chat._say = fake_say
+        try:
+            asyncio.run(supplier_chat._command(_Msg("у тебя ноль\nа у них 3210"), link, "возьми эту информацию"))
+            with get_conn(db_path) as conn:
+                first = suppliers.balance(conn, link["supplier_id"], "UAH")
+            asyncio.run(supplier_chat._command(_Msg(), link, "остаток 3000"))
+            with get_conn(db_path) as conn:
+                second = suppliers.balance(conn, link["supplier_id"], "UAH")
+            asyncio.run(supplier_chat._command(_Msg(), link, "остаток: депозит 300 usd"))
+            with get_conn(db_path) as conn:
+                usd = suppliers.balance(conn, link["supplier_id"], "USD")
+        finally:
+            supplier_chat._say = orig
+        check("«бот, возьми эту информацию» in reply to «у них 3210»: we owe 3210", first == 3210 and "мы должны 3210" in said[0])
+        check("said again — set again, not added", second == 3000)
+        check("«остаток: депозит 300 usd» — our deposit in dollars", usd == -300)
+
+
 def scenario_master_pay_gibrid() -> None:
     """Зарплата мастеров Гибрида в CRM (23.10, этап 3): ставка «ровно треть»,
     сводка по ремонтам за период = начисления, стартовый остаток, выплата
@@ -11042,6 +11088,7 @@ def main() -> None:
     scenario_my_repairs()
     scenario_fsm_storage()
     scenario_chat_migration()
+    scenario_supplier_opening()
     scenario_master_pay_gibrid()
     scenario_gsheet_mirror()
     scenario_gibrit_cutover()

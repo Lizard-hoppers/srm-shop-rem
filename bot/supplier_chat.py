@@ -64,13 +64,18 @@ _HELP = (
     "Команды (владелец и администратор):\n"
     "• «бот, баланс» — сколько мы должны или какой у нас депозит\n"
     "• «бот, оплата 5000» · «бот, оплата 300 usd» — заплатили поставщику\n"
-    "• «бот, депозит 10000» — внесли деньги наперёд"
+    "• «бот, депозит 10000» — внесли деньги наперёд\n"
+    "• «бот, остаток 3210» · «бот, мы должны 3210» — сколько между нами сейчас (по сверке); "
+    "«бот, остаток: депозит 300 usd» — наш депозит у них. Можно ответом на сообщение с цифрой: «бот, возьми эту информацию»"
 )
 _NOT_YOURS = "Это решает владелец или администратор."
 
 _AMOUNT = re.compile(r"(\d[\d  ]*(?:[.,]\d+)?)")
 _PAY_WORDS = ("оплат", "заплат", "перев", "депозит", "внес", "внёс", "аванс", "предоплат", "отправил", "скинул")
 _BALANCE_WORDS = ("баланс", "долг", "должн", "взаиморасч", "депозит", "сальдо")
+# 27.10: «сейчас между нами столько» — the balance set to what the сверка says.
+_OPENING_WORDS = ("остат", "начальн", "стартов", "мы должны", "они должны", "у них", "сверк", "возьми", "запиши", "по их", "по ихн")
+_THEIR_DEBT_WORDS = ("они должны", "они нам", "наш депозит", "депозит", "переплат", "в плюсе")
 _CURRENCY_WORDS = (
     ("USDT", ("usdt", "юсдт", "тезер", "tether")), ("USD", ("usd", "$", "дол", "у.е", "бакс")), ("EUR", ("eur", "€", "евро")),
 )
@@ -380,8 +385,23 @@ def _money_said(text: str) -> tuple[float | int, str] | None:
 
 
 async def _command(message: Message, link, question: str) -> None:
+    replied = message.reply_to_message
+    if not _AMOUNT.search(question) and replied and (replied.text or replied.caption):
+        # «бот, возьми эту информацию» in reply to «у них 3210»: the number is there.
+        question = f"{question} {replied.text or replied.caption}"
     lowered = question.lower()
     said = _money_said(question)
+    if said and any(word in lowered for word in _OPENING_WORDS):
+        amount, currency = said
+        target = -amount if any(word in lowered for word in _THEIR_DEBT_WORDS) else amount
+        with get_conn(registry_db_path()) as conn:
+            staff = _staff(conn, message.from_user.id)
+            before, after = suppliers.set_opening(conn, link["supplier_id"], currency, target, staff["id"] if staff else None)
+            total = suppliers.balance_text(conn, link["supplier_id"])
+        what = f"мы должны {money(after)} {_cur(currency)}" if after > 0 else (f"наш депозит {money(-after)} {_cur(currency)}" if after < 0 else "0")
+        await _say(message, f"✅ Остаток записан: {what} (было {money(before)}).\nВзаиморасчёты: {total}\n"
+                            f"Ошиблись — напишите «бот, остаток …» с верной суммой.")
+        return
     if said and any(word in lowered for word in _PAY_WORDS):
         amount, currency = said
         with get_conn(registry_db_path()) as conn:

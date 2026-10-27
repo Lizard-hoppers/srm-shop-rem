@@ -149,6 +149,19 @@ def _post(conn, supplier_id, currency, amount, kind, *, ref_id, location_id, sta
     )
 
 
+def set_opening(conn: sqlite3.Connection, supplier_id: int, currency: str, target, staff_id: int | None) -> tuple:
+    """«Сейчас между нами столько» (27.10): the balance in this currency is
+    made exactly `target` (positive — we owe, negative — our deposit) by one
+    «остаток» line for the difference. Said again — set again, not added.
+    Returns (before, after)."""
+    before = balance(conn, supplier_id, currency)
+    difference = money(money(target) - before)
+    if difference:
+        _post(conn, supplier_id, currency, difference, "opening", ref_id=None, location_id=None, staff_id=staff_id,
+              comment=f"остаток: было {before}, стало {money(target)}")
+    return before, balance(conn, supplier_id, currency)
+
+
 # ---- смета / платёж: черновик и его шаги ----
 
 _SELECT = """SELECT supplier_invoices.*, suppliers.name AS supplier_name, locations.name AS location_name,
