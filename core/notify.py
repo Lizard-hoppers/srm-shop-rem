@@ -58,6 +58,25 @@ def _as_caption(text: str) -> str:
     return text[: _MAX_CAPTION_LEN - 1] + "…"
 
 
+def _moved(resp, chat_id) -> int | None:
+    """The group became a supergroup (it does when the bot is made its
+    admin): its new number, already written everywhere instead of the old
+    one (core.chat_migration) — the caller sends again there."""
+    try:
+        new = (resp.json().get("parameters") or {}).get("migrate_to_chat_id")
+    except ValueError:
+        return None
+    if not new or str(new) == str(chat_id):
+        return None
+    from core import chat_migration
+
+    try:
+        chat_migration.remap(chat_id, new)
+    except Exception:  # the send is retried there either way
+        logger.warning("chat %s -> %s not remapped", chat_id, new, exc_info=True)
+    return new
+
+
 def _send(
     chat_id: str | int | None,
     text: str,
@@ -82,6 +101,9 @@ def _send(
             timeout=5,
         )
         if resp.status_code != 200:
+            moved = _moved(resp, chat_id)
+            if moved:
+                return _send(moved, text, message_thread_id=message_thread_id, reply_markup=reply_markup)
             logger.warning("staff notify failed: %s %s", resp.status_code, resp.text)
             return None
         return resp.json()["result"]["message_id"]
@@ -126,6 +148,9 @@ def _send_photo(
             timeout=15,
         )
         if resp.status_code != 200:
+            moved = _moved(resp, chat_id)
+            if moved:
+                return _send_photo(moved, photo_bytes, filename, message_thread_id=message_thread_id, caption=caption, reply_markup=reply_markup)
             logger.warning("staff photo notify failed: %s %s", resp.status_code, resp.text)
             return None
         return resp.json()["result"]["message_id"]
@@ -154,6 +179,9 @@ def edit_message(chat_id: str | int, message_id: int, text: str, reply_markup: d
             timeout=5,
         )
         if resp.status_code != 200:
+            moved = _moved(resp, chat_id)
+            if moved:
+                return edit_message(moved, message_id, text, reply_markup=reply_markup)
             logger.warning("staff notify edit failed: %s %s", resp.status_code, resp.text)
             return False
         return True
@@ -185,6 +213,9 @@ def edit_message_caption(
             timeout=5,
         )
         if resp.status_code != 200:
+            moved = _moved(resp, chat_id)
+            if moved:
+                return edit_message_caption(moved, message_id, caption, reply_markup=reply_markup)
             logger.warning("staff notify caption edit failed: %s %s", resp.status_code, resp.text)
             return False
         return True

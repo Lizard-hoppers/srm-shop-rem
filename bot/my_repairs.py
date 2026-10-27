@@ -88,6 +88,15 @@ async def _send(message: Message, chunks: list[str], keyboard) -> None:
                              reply_markup=keyboard if index == len(chunks) - 1 else None)
 
 
+@router.message(F.migrate_to_chat_id)
+async def group_upgraded(message: Message) -> None:
+    """«Группа стала супергруппой» — the service message in the old group:
+    the new number goes everywhere the old one was (core.chat_migration)."""
+    from core import chat_migration
+
+    chat_migration.remap(message.chat.id, message.migrate_to_chat_id, _db())
+
+
 @router.callback_query(F.data.startswith("my_repairs:"))
 async def my_repairs_pinned(callback: CallbackQuery) -> None:
     """The pinned button in a master's topic: that master's list, into the topic."""

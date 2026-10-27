@@ -10564,6 +10564,51 @@ def scenario_fsm_storage() -> None:
         asyncio.run(run())
 
 
+def scenario_chat_migration() -> None:
+    """Группа стала супергруппой — новый номер везде (27.10, группа Олега)."""
+    print("scenario: группа стала супергруппой — бот переписывает её номер")
+    from core import notify
+
+    OLD, NEW = -4975000001, -1004347000001
+    with tempfile.TemporaryDirectory() as tmp, _separate_base(tmp, "migrate.sqlite3", ("Гибрид",)) as db_path:
+        with get_conn(db_path) as conn:
+            boss = auth.create_staff(conn, "cm-owner", "pass", "Павел", "owner")
+            oleg = auth.create_master(conn, "Олег Som", None, None, None, location_id=1, master_kind="outsource")
+            auth.set_master_chats(conn, oleg, 78, OLD)
+            client = clients.get_or_create_by_phone(conn, "Анна", "0671110077", source="offline")
+            order = repairs.create_repair(conn, client, "", None, "iPhone 11", None, "АКБ", "offline", oleg, 1500, boss, location_id=1)
+            repairs.save_order_messages(conn, order, [(str(OLD), 55, f"master_chat:{oleg}", False)])
+        calls = []
+
+        class _Resp:
+            def __init__(self, code, body):
+                self.status_code, self._body, self.text = code, body, str(body)
+
+            def json(self):
+                return self._body
+
+        def fake_post(url, **kw):
+            payload = kw.get("json") or kw.get("data") or {}
+            calls.append(str(payload.get("chat_id")))
+            if str(payload.get("chat_id")) == str(OLD):
+                return _Resp(400, {"ok": False, "description": "Bad Request: group chat was upgraded to a supergroup chat",
+                                   "parameters": {"migrate_to_chat_id": NEW}})
+            return _Resp(200, {"ok": True, "result": {"message_id": 900}})
+
+        orig_post, orig_token = httpx.post, notify._BOT_TOKEN
+        httpx.post, notify._BOT_TOKEN = fake_post, "123456:test"
+        try:
+            sent = notify._send(OLD, "копия мастеру")
+        finally:
+            httpx.post, notify._BOT_TOKEN = orig_post, orig_token
+        with get_conn(db_path) as conn:
+            staff_chat = auth.get_staff_by_id(conn, oleg)["personal_chat_id"]
+            card_chat = conn.execute("SELECT chat_id FROM repair_order_messages WHERE order_id = ?", (order,)).fetchone()["chat_id"]
+        check("Telegram says the group became a supergroup — sent again there, the message goes out", sent == 900 and calls == [str(OLD), str(NEW)])
+        check("…and the new number is written everywhere: the master's group, his card copies",
+              staff_chat == NEW and card_chat == str(NEW))
+
+
 def scenario_master_pay_gibrid() -> None:
     """Зарплата мастеров Гибрида в CRM (23.10, этап 3): ставка «ровно треть»,
     сводка по ремонтам за период = начисления, стартовый остаток, выплата
@@ -10973,6 +11018,7 @@ def main() -> None:
     scenario_cash_watch()
     scenario_my_repairs()
     scenario_fsm_storage()
+    scenario_chat_migration()
     scenario_master_pay_gibrid()
     scenario_gsheet_mirror()
     scenario_gibrit_cutover()
