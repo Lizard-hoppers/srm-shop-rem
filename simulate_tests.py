@@ -10421,6 +10421,9 @@ def scenario_my_repairs() -> None:
     """«📋 Мои ремонты» (26.10): у мастера в личке, в его группе и в его теме
     рабочей группы — его незакрытые ремонты."""
     print("scenario: «Мои ремонты» у мастера")
+    import asyncio
+    from types import SimpleNamespace
+
     from bot import my_repairs
     from bot import quick_actions as qa
     from core import repair_digest, store_settings
@@ -10450,6 +10453,33 @@ def scenario_my_repairs() -> None:
         check("in his topic of the work group — his", my_repairs.master_for(GROUP, "supergroup", TOPIC, 999)["id"] == alex)
         check("in the work group's feed — whoever pressed, if he is linked; nobody else", my_repairs.master_for(GROUP, "supergroup", None, 559103)["id"] == alex
               and my_repairs.master_for(GROUP, "supergroup", None, 999) is None)
+        button = my_repairs.topic_button(alex).inline_keyboard[0][0]
+        check("the pinned button of a master's topic asks for that master's list", button.callback_data == f"my_repairs:{alex}"
+              and button.text == qa.BTN_MY_REPAIRS)
+
+        class _TopicMsg:
+            chat = SimpleNamespace(id=GROUP, type="supergroup")
+            message_thread_id, is_topic_message = TOPIC, True
+            bot = SimpleNamespace(delete_message=None)
+
+            def __init__(self):
+                self.sent = []
+
+            async def answer(self, text, link_preview_options=None):
+                self.sent.append(text)
+                return SimpleNamespace(message_id=len(self.sent))
+
+        class _Tap:
+            def __init__(self, data):
+                self.data, self.message, self.answers = data, _TopicMsg(), []
+
+            async def answer(self, text=None, show_alert=False):
+                self.answers.append(text)
+
+        tap = _Tap(f"my_repairs:{alex}")
+        asyncio.run(my_repairs.my_repairs_pinned(tap))
+        check("pressing it puts his list into the topic", len(tap.message.sent) == 1 and "Ремонты — Алексей" in tap.message.sent[0]
+              and "Redmi 9C" in tap.message.sent[0] and "iPhone 11" not in tap.message.sent[0])
         with get_conn(db_path) as conn:
             nothing = repair_digest.build(conn, None, master_id=boss, heading="Ремонты — Павел")
         check("nothing open — said so", "незакрытых нет" in nothing[0])

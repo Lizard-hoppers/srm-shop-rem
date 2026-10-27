@@ -14,7 +14,9 @@ from __future__ import annotations
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramAPIError
-from aiogram.types import KeyboardButton, LinkPreviewOptions, Message, ReplyKeyboardMarkup
+from aiogram.types import (
+    CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, LinkPreviewOptions, Message, ReplyKeyboardMarkup,
+)
 
 from bot import quick_actions as qa
 from core import auth as core_auth
@@ -28,6 +30,18 @@ PERSONAL_KEYBOARD = ReplyKeyboardMarkup(
     keyboard=[[KeyboardButton(text=qa.BTN_MY_REPAIRS)]], resize_keyboard=True, is_persistent=True,
 )
 _NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
+# The list last sent into each topic by its pinned button — taken away when
+# the next one comes. In memory: after a restart one old list stays.
+_last_in_topic: dict[tuple[int, int | None], list[int]] = {}
+
+
+def topic_button(master_id: int) -> InlineKeyboardMarkup:
+    """27.10 (Павел): a group has one keyboard for all its topics, so a
+    master's topic gets its own «📋 Мои ремонты» as a pinned message with
+    this button under it."""
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text=qa.BTN_MY_REPAIRS, callback_data=f"my_repairs:{master_id}"),
+    ]])
 
 
 def _db() -> str:
@@ -72,6 +86,31 @@ async def _send(message: Message, chunks: list[str], keyboard) -> None:
     for index, chunk in enumerate(chunks):
         await message.answer(chunk, link_preview_options=_NO_PREVIEW,
                              reply_markup=keyboard if index == len(chunks) - 1 else None)
+
+
+@router.callback_query(F.data.startswith("my_repairs:"))
+async def my_repairs_pinned(callback: CallbackQuery) -> None:
+    """The pinned button in a master's topic: that master's list, into the topic."""
+    with get_conn(_db()) as conn:
+        master = conn.execute(
+            "SELECT * FROM staff WHERE id = ? AND role = 'master' AND active = 1", (int(callback.data.split(":", 1)[1]),),
+        ).fetchone()
+    if not master or not callback.message:
+        await callback.answer("Этого мастера больше нет.", show_alert=True)
+        return
+    message = callback.message
+    place = (message.chat.id, message.message_thread_id if message.is_topic_message else None)
+    for old in _last_in_topic.pop(place, []):
+        try:
+            await message.bot.delete_message(message.chat.id, old)
+        except TelegramAPIError:
+            pass
+    sent = []
+    for chunk in chunks_for(master):
+        reply = await message.answer(chunk, link_preview_options=_NO_PREVIEW)
+        sent.append(reply.message_id)
+    _last_in_topic[place] = sent
+    await callback.answer()
 
 
 @router.message(F.text == qa.BTN_MY_REPAIRS, F.chat.type == "private")
