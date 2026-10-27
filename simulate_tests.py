@@ -10677,6 +10677,34 @@ def scenario_supplier_opening() -> None:
         check("said again — set again, not added", second == 3000)
         check("«остаток: депозит 300 usd» — our deposit in dollars", usd == -300)
 
+        # ---- белый список: «бот, дай доступ» ответом на сообщение человека
+        dima = SimpleNamespace(id=562777, full_name="Дима", is_bot=False)
+        with get_conn(db_path) as conn:
+            check("someone not in the CRM has no say here", supplier_chat._actor(conn, -1003726000001, dima) is None)
+            owner = supplier_chat._actor(conn, -1003726000001, SimpleNamespace(id=562001))
+        said.clear()
+        supplier_chat._say = fake_say
+        try:
+            reply = _Msg()
+            reply.reply_to_message = SimpleNamespace(from_user=dima, text="Бот ошибся запиши долг 33210 $", caption=None)
+            asyncio.run(supplier_chat._command(reply, link, "дай доступ", owner))
+            with get_conn(db_path) as conn:
+                let_in = supplier_chat._actor(conn, -1003726000001, dima)
+                elsewhere = supplier_chat._actor(conn, -1003999999999, dima)
+            asyncio.run(supplier_chat._command(_Msg(), link, "остаток 500", let_in))
+            with get_conn(db_path) as conn:
+                by_dima = suppliers.balance(conn, link["supplier_id"], "UAH")
+            asyncio.run(supplier_chat._command(reply, link, "дай доступ", let_in))
+            refused = said[-1]
+            asyncio.run(supplier_chat._command(reply, link, "убери доступ", owner))
+            with get_conn(db_path) as conn:
+                gone = supplier_chat._actor(conn, -1003726000001, dima)
+        finally:
+            supplier_chat._say = orig
+        check("«бот, дай доступ» in reply to Дима: his commands work in this group — and only here",
+              let_in is not None and elsewhere is None and by_dima == 500)
+        check("only the owner/admin gives access, and «убери доступ» takes it back", "владелец" in refused and gone is None)
+
 
 def scenario_master_pay_gibrid() -> None:
     """Зарплата мастеров Гибрида в CRM (23.10, этап 3): ставка «ровно треть»,

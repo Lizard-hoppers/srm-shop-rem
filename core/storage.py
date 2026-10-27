@@ -215,6 +215,17 @@ CREATE TABLE IF NOT EXISTS repair_master_log (
 );
 CREATE INDEX IF NOT EXISTS idx_repair_master_log_order ON repair_master_log(order_id);
 
+-- Кто ещё, кроме владельца и админа, командует ботом в группе поставщика
+-- (27.10, «Hybrid / U 22»: Дима) — «бот, дай доступ» ответом на его сообщение.
+CREATE TABLE IF NOT EXISTS supplier_chat_people (
+    chat_id TEXT NOT NULL,
+    user_id INTEGER NOT NULL,
+    name TEXT,
+    added_by INTEGER,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (chat_id, user_id)
+);
+
 -- Движения кассы для рассылки владельцам (25.10, core.cash_watch) —
 -- заполняется триггерами на cash_transactions.
 CREATE TABLE IF NOT EXISTS cash_watch_queue (

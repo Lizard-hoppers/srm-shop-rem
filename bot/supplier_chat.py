@@ -66,7 +66,8 @@ _HELP = (
     "• «бот, оплата 5000» · «бот, оплата 300 usd» — заплатили поставщику\n"
     "• «бот, депозит 10000» — внесли деньги наперёд\n"
     "• «бот, остаток 3210» · «бот, мы должны 3210» — сколько между нами сейчас (по сверке); "
-    "«бот, остаток: депозит 300 usd» — наш депозит у них. Можно ответом на сообщение с цифрой: «бот, возьми эту информацию»"
+    "«бот, остаток: депозит 300 usd» — наш депозит у них. Можно ответом на сообщение с цифрой: «бот, возьми эту информацию»\n"
+    "• «бот, дай доступ» / «бот, убери доступ» — ответом на сообщение человека: может ли он давать мне команды здесь; «бот, кто с доступом»"
 )
 _NOT_YOURS = "Это решает владелец или администратор."
 
@@ -91,6 +92,61 @@ def _staff(conn, telegram_id: int):
 
 def _may_decide(staff) -> bool:
     return bool(staff) and staff["role"] in _ROLES
+
+
+def _actor(conn, chat_id, user):
+    """Who may give this group's bot commands and press its buttons: the
+    owner/admin, or someone they let in here (27.10: «бот, дай доступ» in
+    reply to him) — only in this group, nothing in the CRM."""
+    if not user:
+        return None
+    staff = _staff(conn, user.id)
+    if _may_decide(staff):
+        return staff
+    row = conn.execute(
+        "SELECT name FROM supplier_chat_people WHERE chat_id = ? AND user_id = ?", (str(chat_id), user.id),
+    ).fetchone()
+    return {"id": None, "role": "guest", "name": row["name"]} if row else None
+
+
+_ACCESS_GIVE = ("дай доступ", "дать доступ", "разреши", "добавь в белый", "в белый список", "доступ дай")
+_ACCESS_TAKE = ("убери доступ", "забери доступ", "запрети", "убери из белого", "без доступа")
+_ACCESS_LIST = ("кто с доступом", "у кого доступ", "белый список", "список доступа")
+
+
+async def _access(message: Message, question: str, actor) -> bool:
+    """«бот, дай доступ» / «убери доступ» (in reply to the person) and «кто с
+    доступом» — by the owner/admin only. True if the message was one."""
+    lowered = question.lower()
+    give, take = any(w in lowered for w in _ACCESS_GIVE), any(w in lowered for w in _ACCESS_TAKE)
+    listing = any(w in lowered for w in _ACCESS_LIST) and not give and not take
+    if not (give or take or listing):
+        return False
+    if not _may_decide(actor):
+        await _say(message, _NOT_YOURS)
+        return True
+    chat = str(message.chat.id)
+    with get_conn(registry_db_path()) as conn:
+        if listing:
+            people = conn.execute("SELECT name, user_id FROM supplier_chat_people WHERE chat_id = ? ORDER BY created_at", (chat,)).fetchall()
+            await _say(message, "С доступом к командам здесь, кроме владельца и админа: "
+                       + (", ".join(html.escape(p["name"] or str(p["user_id"])) for p in people) or "никого") + ".")
+            return True
+        person = message.reply_to_message.from_user if message.reply_to_message else None
+        if not person or person.is_bot:
+            await _say(message, "Ответьте этой командой на сообщение того человека.")
+            return True
+        if give:
+            conn.execute(
+                """INSERT INTO supplier_chat_people (chat_id, user_id, name, added_by) VALUES (?, ?, ?, ?)
+                   ON CONFLICT(chat_id, user_id) DO UPDATE SET name = excluded.name""",
+                (chat, person.id, person.full_name, actor["id"]),
+            )
+            await _say(message, f"✅ <b>{html.escape(person.full_name)}</b> теперь может давать мне команды и нажимать кнопки в этой группе.")
+        else:
+            gone = conn.execute("DELETE FROM supplier_chat_people WHERE chat_id = ? AND user_id = ?", (chat, person.id)).rowcount
+            await _say(message, f"Доступ <b>{html.escape(person.full_name)}</b> убран." if gone else "У него и не было доступа.")
+    return True
 
 
 class InSupplierChat(Filter):
@@ -384,7 +440,9 @@ def _money_said(text: str) -> tuple[float | int, str] | None:
     return amount, currency
 
 
-async def _command(message: Message, link, question: str) -> None:
+async def _command(message: Message, link, question: str, actor=None) -> None:
+    if await _access(message, question, actor):
+        return
     replied = message.reply_to_message
     if not _AMOUNT.search(question) and replied and (replied.text or replied.caption):
         # «бот, возьми эту информацию» in reply to «у них 3210»: the number is there.
@@ -395,8 +453,7 @@ async def _command(message: Message, link, question: str) -> None:
         amount, currency = said
         target = -amount if any(word in lowered for word in _THEIR_DEBT_WORDS) else amount
         with get_conn(registry_db_path()) as conn:
-            staff = _staff(conn, message.from_user.id)
-            before, after = suppliers.set_opening(conn, link["supplier_id"], currency, target, staff["id"] if staff else None)
+            before, after = suppliers.set_opening(conn, link["supplier_id"], currency, target, actor["id"] if actor else None)
             total = suppliers.balance_text(conn, link["supplier_id"])
         what = f"мы должны {money(after)} {_cur(currency)}" if after > 0 else (f"наш депозит {money(-after)} {_cur(currency)}" if after < 0 else "0")
         await _say(message, f"✅ Остаток записан: {what} (было {money(before)}).\nВзаиморасчёты: {total}\n"
@@ -448,6 +505,7 @@ async def in_chat(message: Message, link) -> None:
     text = message.text or message.caption
     with get_conn(registry_db_path()) as conn:
         staff = _staff(conn, author.id) if author else None
+        actor = _actor(conn, message.chat.id, author)
         suppliers.log_message(conn, message.chat.id, message.message_id, author.id if author else None,
                               author.full_name if author else None, bool(staff), text,
                               document.file_name if document else ("фото" if photo else None))
@@ -455,16 +513,16 @@ async def in_chat(message: Message, link) -> None:
         await _read_file(message, link, document.file_id, document.file_name or "", document.file_size, is_document=True)
     elif photo:
         await _read_file(message, link, photo.file_id, "photo.jpg", photo.file_size, is_document=False)
-    elif message.text and _may_decide(staff):
+    elif message.text and actor:
         replied = message.reply_to_message
         if replied:
             with get_conn(registry_db_path()) as conn:
                 invoice = suppliers.by_card(conn, message.chat.id, replied.message_id)
-            if invoice and await _number_answered(message, invoice, message.text, staff):
+            if invoice and await _number_answered(message, invoice, message.text, actor):
                 return
         question = question_of(message.text)
         if question is not None:
-            await _command(message, link, question)
+            await _command(message, link, question, actor)
 
 
 class OnDeskCard(Filter):
@@ -499,8 +557,8 @@ async def pressed(callback: CallbackQuery) -> None:
     argument = rest[0] if rest else None
     try:
         with get_conn(registry_db_path()) as conn:
-            staff = _staff(conn, callback.from_user.id)
-            if not _may_decide(staff):
+            staff = _actor(conn, callback.message.chat.id, callback.from_user)
+            if not staff:
                 await callback.answer(_NOT_YOURS, show_alert=True)
                 return
             invoice = suppliers.get(conn, int(invoice_id))
