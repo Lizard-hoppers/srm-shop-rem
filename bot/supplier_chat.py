@@ -37,7 +37,7 @@ import re
 from aiogram import F, Router
 from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command, CommandObject, Filter
-from aiogram.types import CallbackQuery, ChatMemberUpdated, InlineKeyboardButton, InlineKeyboardMarkup, Message, ReplyParameters
+from aiogram.types import CallbackQuery, ChatMemberUpdated, InlineKeyboardButton, InlineKeyboardMarkup, Message, ReplyParameters, ForceReply, KeyboardButton, ReplyKeyboardMarkup
 
 from bot.assistant_chat import question_of
 from core import accounts as core_accounts
@@ -71,6 +71,18 @@ _HELP = (
     "• «бот, дай доступ» / «бот, убери доступ» — ответом на сообщение человека: может ли он давать мне команды здесь; «бот, кто с доступом»"
 )
 _NOT_YOURS = "Это решает владелец или администратор."
+
+# 27.10 (Павел): кнопки внизу группы поставщика — те же команды одним нажатием.
+# Видят их все в группе, срабатывают — у тех, кто может командовать (_actor).
+BTN_BALANCE, BTN_PAYMENT, BTN_RECONCILE, BTN_HELP = "💰 Баланс", "💸 Оплата", "📋 Сверка", "❓ Помощь"
+SUPPLIER_KEYBOARD = ReplyKeyboardMarkup(
+    keyboard=[[KeyboardButton(text=BTN_BALANCE), KeyboardButton(text=BTN_PAYMENT)],
+              [KeyboardButton(text=BTN_RECONCILE), KeyboardButton(text=BTN_HELP)]],
+    resize_keyboard=True, is_persistent=True,
+)
+_PAY_ASK = "💸 Сколько заплатили поставщику? Ответьте на это сообщение суммой: «500 $» или «12000»."
+_RECONCILE_HOW = ("📋 Сверка с их ботом: перешлите сюда его «Баланс по взаиморасчётам» "
+                  "или ответьте на него «бот, сверка» — возьму долг и просрочку.")
 
 _AMOUNT = re.compile(r"(\d[\d  ]*(?:[.,]\d+)?)")
 _PAY_WORDS = ("оплат", "заплат", "перев", "депозит", "внес", "внёс", "аванс", "предоплат", "отправил", "скинул")
@@ -339,7 +351,7 @@ async def link_command(message: Message, command: CommandObject) -> None:
             return
         text = (f"Готово: это группа поставщика <b>{html.escape(link['supplier_name'])}</b>.\n"
                 f"Взаиморасчёты: {suppliers.balance_text(conn, link['supplier_id'])}\n\n{_HELP}")
-    await _say(message, text)
+    await _say(message, text, reply_markup=SUPPLIER_KEYBOARD)
 
 
 @router.my_chat_member(F.chat.type.in_(_GROUPS))
@@ -509,6 +521,22 @@ async def _report(message: Message, link, text: str | None, actor) -> bool:
     return True
 
 
+async def _keyboard_pressed(message: Message, link, actor) -> bool:
+    """A press of the group's keyboard (SUPPLIER_KEYBOARD). True if it was one."""
+    text = (message.text or "").replace("\ufe0f", "").strip()
+    if text not in (BTN_BALANCE, BTN_PAYMENT, BTN_RECONCILE, BTN_HELP):
+        return False
+    if text == BTN_BALANCE:
+        await _command(message, link, "баланс", actor)
+    elif text == BTN_PAYMENT:
+        await _say(message, _PAY_ASK, reply_markup=ForceReply(selective=True))
+    elif text == BTN_RECONCILE:
+        await _say(message, _RECONCILE_HOW)
+    else:
+        await _say(message, _HELP, reply_markup=SUPPLIER_KEYBOARD)
+    return True
+
+
 async def _number_answered(message: Message, invoice, value: str, staff) -> bool:
     """A number sent in reply to a card that is waiting for one (сумма or
     курс). The card moves to the bottom of the chat: the question was
@@ -546,7 +574,13 @@ async def in_chat(message: Message, link) -> None:
     elif photo:
         await _read_file(message, link, photo.file_id, "photo.jpg", photo.file_size, is_document=False)
     elif message.text and actor:
+        if await _keyboard_pressed(message, link, actor):
+            return
         replied = message.reply_to_message
+        if replied and replied.from_user and replied.from_user.is_bot and (replied.text or "").startswith("💸 Сколько заплатили"):
+            # The answer to «💸 Оплата»: the sum goes the same way as «бот, оплата …».
+            await _command(message, link, f"оплата {message.text}", actor)
+            return
         if replied:
             with get_conn(registry_db_path()) as conn:
                 invoice = suppliers.by_card(conn, message.chat.id, replied.message_id)

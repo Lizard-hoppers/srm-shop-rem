@@ -10726,6 +10726,23 @@ def scenario_supplier_opening() -> None:
               usd_now == 3210 and "1473" in (due or "") and "Сверка" in said[0])
         check("«бот, баланс» shows the overdue part too", "просрочка 1473 USD" in said[-1])
 
+        # ---- кнопки внизу группы поставщика
+        said.clear()
+        supplier_chat._say = fake_say
+        try:
+            press = _Msg()
+            press.text = "💰 Баланс"
+            asyncio.run(supplier_chat._keyboard_pressed(press, link, owner))
+            balance_said = said[-1]
+            press.text = "💸 Оплата"
+            asyncio.run(supplier_chat._keyboard_pressed(press, link, owner))
+            pay_ask = said[-1]
+        finally:
+            supplier_chat._say = orig
+        check("the group's keyboard: «💰 Баланс» answers with the balance, «💸 Оплата» asks for the sum",
+              "Hybrid / U 22" in balance_said and "мы должны" in balance_said and pay_ask.startswith("💸 Сколько заплатили")
+              and [b.text for row in supplier_chat.SUPPLIER_KEYBOARD.keyboard for b in row] == ["💰 Баланс", "💸 Оплата", "📋 Сверка", "❓ Помощь"])
+
 
 def scenario_master_pay_gibrid() -> None:
     """Зарплата мастеров Гибрида в CRM (23.10, этап 3): ставка «ровно треть»,
