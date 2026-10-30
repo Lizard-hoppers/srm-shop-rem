@@ -44,6 +44,14 @@ _LABEL_PROMPT = (
     "нужна и будет неверной (обычно китайская закупочная, не наша)."
 )
 
+_BARCODE_PROMPT = (
+    "На фото — штрихкод на товаре или упаковке. Под штрихкодом (или рядом) "
+    "обычно напечатаны его цифры. Перепиши эти цифры ровно как напечатаны, "
+    "без пробелов и дефисов. Если цифр под штрихкодом нет или хоть одна "
+    "читается нечётко — null, не угадывай и не дописывай. Верни СТРОГО JSON "
+    'вида {"digits": "..." или null}.'
+)
+
 
 _DEVICE_PROMPT = (
     "На фото — устройство, которое сдают в ремонт (телефон, ноутбук, "
@@ -185,6 +193,21 @@ def extract_product_label(photo_bytes: bytes) -> dict:
         "name": name.strip() if isinstance(name, str) and name.strip() else None,
         "sku": sku.strip() if isinstance(sku, str) and sku.strip() else None,
     }
+
+
+def extract_barcode_digits(photo_bytes: bytes) -> str | None:
+    """The digits printed under a barcode, as the model reads them — the
+    fallback when zbar can't decode the bars themselves. Only 6–14 digits
+    count; anything else is None. A guess: callers trust it outright only
+    with a valid EAN/UPC check digit (core.barcode_scan.ean_checksum_ok)."""
+    data = _call_vision_json(_BARCODE_PROMPT, photo_bytes)
+    digits = data.get("digits") if isinstance(data, dict) else None
+    if isinstance(digits, (int, float)):
+        digits = str(int(digits))
+    if not isinstance(digits, str):
+        return None
+    digits = "".join(ch for ch in digits if not ch.isspace() and ch != "-")
+    return digits if digits.isdigit() and 6 <= len(digits) <= 14 else None
 
 
 def extract_device_info(photo_bytes: bytes) -> dict:

@@ -2,9 +2,12 @@
 по одному, как в CRM — фото штрихкода, фото товара, цена продажи,
 количество — и сразу на склад отдельным ПХ (core.purchases.receive_one).
 
-Штрихкод читает zbar на сервере; знакомый штрихкод сразу называет товар,
-и фото с названием уже не нужны. Не считался — можно ввести цифры или
-завести товар без штрихкода. Название берётся с фото товара
+Штрихкод читает zbar на сервере (с увеличением, порогами, поворотами);
+не вышло — модель читает цифры под штрихкодом: верная контрольная цифра
+EAN/UPC — принимаем, иначе сотрудник подтверждает. Знакомый штрихкод сразу
+называет товар, и фото с названием уже не нужны. Не считался — можно ввести
+цифры или завести товар без штрихкода. Фото можно прислать и файлом (без
+сжатия Telegram — так штрихкод читается надёжнее). Название берётся с фото товара
 (core.vision_ocr.extract_product_label — только название, цену с этикетки
 никогда), не прочиталось — сотрудник пишет сам.
 
@@ -46,6 +49,9 @@ _QTY_RE = re.compile(r"^\s*(\d{1,4})\s*(?:шт\.?)?\s*$", re.IGNORECASE)
 _UNDO_ROLES = ("owner", "admin")
 
 _ASK_BARCODE = "📷 Сфотографируйте <b>штрихкод</b> товара."
+_FILE_HINT = "Совет: пришлите фото <b>файлом</b> (📎 → Файл) — без сжатия штрихкод читается надёжнее."
+_IMAGE = F.photo | F.document.mime_type.startswith("image/")
+_AI_MAX_SIDE = 2000
 _ASK_DIGITS = "🔢 Напишите цифры штрихкода (6–14 цифр):"
 _ASK_PHOTO = "📷 Теперь сфотографируйте <b>сам товар</b> — фото пойдёт в карточку, название прочитаю с него."
 _ASK_NAME = "✏️ Напишите название товара:"
@@ -99,6 +105,7 @@ def _btn(text: str, data: str) -> InlineKeyboardButton:
     return InlineKeyboardButton(text=text, callback_data=data)
 
 
+_ASK_BARCODE_FIRST = _ASK_BARCODE + "\n<i>Плохо читается — пришлите фото файлом (📎 → Файл), без сжатия.</i>"
 _BARCODE_KB = _kb([_btn("🔢 Ввести цифры", "rcv_digits")], [_btn("✏️ Товар без штрихкода", "rcv_nocode")])
 _PHOTO_KB = _kb([_btn("⏭ Без фото — напишу название", "rcv_skipphoto")])
 _QTY_KB = _kb([_btn(str(n), f"rcv_qty:{n}") for n in (1, 2, 3, 5, 10)])
@@ -208,54 +215,126 @@ async def _start(callback: CallbackQuery, state: FSMContext, warehouse, *, edit:
     data = await state.get_data()
     if edit:
         await state.update_data(prompt_message_id=callback.message.message_id)
-        await _edit(callback, state, _ASK_BARCODE, _BARCODE_KB)
+        await _edit(callback, state, _ASK_BARCODE_FIRST, _BARCODE_KB)
     else:
-        text = _screen(data, _ASK_BARCODE)
+        text = _screen(data, _ASK_BARCODE_FIRST)
         sent = await callback.message.answer(text, reply_markup=_BARCODE_KB)
         await state.update_data(prompt_message_id=sent.message_id, prompt_text=text, prompt_markup=_BARCODE_KB)
 
 
 # ---- штрихкод ----
 
-async def _by_sku(message: Message, state: FSMContext, store, sku: str) -> None:
-    """Штрихкод известен (прочитан или введён): знакомый товар — сразу к
-    цене, новый — к фото товара."""
+async def _apply_sku(state: FSMContext, store, sku: str):
+    """Штрихкод известен: запомнить товар и шаг. (вопрос, кнопки) —
+    знакомый товар сразу к цене, новый к фото товара; или (None, почему
+    нельзя) для товара с IMEI."""
     with get_conn(store.db_path) as conn:
         product = core_inventory.get_product_by_sku(conn, sku)
     if product and product["is_serial"]:
-        await qa._nudge(message, state, f"«{product['name']}» — товар с IMEI, его приходуют в приложении.")
-        return
+        return None, f"«{product['name']}» — товар с IMEI, его приходуют в приложении."
     if product:
-        await state.update_data(sku=sku, product_id=product["id"], name=product["name"], current_price=product["price"])
+        await state.update_data(sku=sku, product_id=product["id"], name=product["name"],
+                                current_price=product["price"], guess=None)
         await state.set_state(ReceiveAdd.price)
-        await _show(message, state, _ASK_PRICE, _price_kb(await state.get_data()))
-    else:
-        await state.update_data(sku=sku, product_id=None, name=None, current_price=None)
-        await state.set_state(ReceiveAdd.photo)
-        await _show(message, state, "🆕 Новый товар.\n" + _ASK_PHOTO, _PHOTO_KB)
+        return _ASK_PRICE, _price_kb(await state.get_data())
+    await state.update_data(sku=sku, product_id=None, name=None, current_price=None, guess=None)
+    await state.set_state(ReceiveAdd.photo)
+    return "🆕 Новый товар.\n" + _ASK_PHOTO, _PHOTO_KB
 
 
-@router.message(ReceiveAdd.barcode, F.photo)
+async def _by_sku(message: Message, state: FSMContext, store, sku: str) -> None:
+    question, markup = await _apply_sku(state, store, sku)
+    if question is None:
+        await qa._nudge(message, state, markup)
+        return
+    await _show(message, state, question, markup)
+
+
+async def _image_bytes(message: Message) -> tuple[str, bytes]:
+    """(file_id, bytes) of a photo or of an image sent as a file."""
+    file_id = message.photo[-1].file_id if message.photo else message.document.file_id
+    file = await message.bot.get_file(file_id)
+    return file_id, (await message.bot.download_file(file.file_path)).read()
+
+
+def _for_model(photo_bytes: bytes) -> bytes:
+    """A photo sent as a file can be 12 MP — the model needs far less."""
+    try:
+        from PIL import Image, ImageOps
+        import io
+
+        im = ImageOps.exif_transpose(Image.open(io.BytesIO(photo_bytes))).convert("RGB")
+        if max(im.size) <= _AI_MAX_SIDE:
+            return photo_bytes
+        im.thumbnail((_AI_MAX_SIDE, _AI_MAX_SIDE))
+        out = io.BytesIO()
+        im.save(out, format="JPEG", quality=90)
+        return out.getvalue()
+    except Exception:  # noqa: BLE001 — не картинка для PIL: пусть модель скажет
+        return photo_bytes
+
+
+@router.message(ReceiveAdd.barcode, _IMAGE)
 async def receive_barcode_photo(message: Message, state: FSMContext) -> None:
     resolved = _actor(message.from_user.id)
     if not resolved:
         return
     store, _staff = resolved
     data = await state.get_data()
-    if data.get("prompt_message_id"):
-        await qa._safe_edit(message.bot, message.chat.id, data["prompt_message_id"], _screen(data, "⏳ Читаю штрихкод…"))
-    file = await message.bot.get_file(message.photo[-1].file_id)
-    photo_bytes = (await message.bot.download_file(file.file_path)).read()
+
+    async def status(text: str) -> None:
+        if data.get("prompt_message_id"):
+            await qa._safe_edit(message.bot, message.chat.id, data["prompt_message_id"], _screen(data, text))
+
+    await status("⏳ Читаю штрихкод…")
+    _file_id, photo_bytes = await _image_bytes(message)
     sku = await asyncio.to_thread(barcode_scan.decode_barcode, photo_bytes)
     if sku:
         await _by_sku(message, state, store, sku)
         return
+
+    # Полоски не разобрал — пусть модель прочитает цифры под ними.
+    await status("⏳ Полоски не разобрал — читаю цифры под штрихкодом…")
+    digits = None
+    try:
+        digits = await asyncio.to_thread(vision_ocr.extract_barcode_digits, _for_model(photo_bytes))
+    except vision_ocr.VisionOcrError:
+        logger.info("receive_add: barcode digits not read", exc_info=True)
+    if digits and barcode_scan.ean_checksum_ok(digits):
+        await _by_sku(message, state, store, digits)
+        return
     await qa._consume(state, message)
+    if digits:
+        # Прочитано, но проверить нечем — спросить, прежде чем заводить.
+        await state.update_data(guess=digits)
+        await qa._repost(message, state, _screen(data, f"🔎 Прочитал с фото: <code>{digits}</code>\nВерно?"), _kb(
+            [_btn("✅ Да, это он", "rcv_guess_ok")],
+            [_btn("🔢 Ввести вручную", "rcv_digits")], [_btn("✏️ Товар без штрихкода", "rcv_nocode")],
+        ))
+        return
     await qa._repost(
         message, state,
-        _screen(data, "⚠️ Не считал штрихкод. Снимите ближе и ровнее — или введите цифры вручную.\n\n" + _ASK_BARCODE),
+        _screen(data, "⚠️ Не считал штрихкод. Снимите ближе и ровнее — или введите цифры вручную.\n"
+                + _FILE_HINT + "\n\n" + _ASK_BARCODE),
         _BARCODE_KB, remember=_screen(data, _ASK_BARCODE),
     )
+
+
+@router.callback_query(F.data == "rcv_guess_ok", ReceiveAdd.barcode)
+async def receive_guess_ok(callback: CallbackQuery, state: FSMContext) -> None:
+    resolved = await _actor_or_alert(callback)
+    if not resolved:
+        return
+    guess = (await state.get_data()).get("guess")
+    if not guess:
+        await callback.answer("Нечего подтверждать — пришлите фото штрихкода.", show_alert=True)
+        return
+    question, markup = await _apply_sku(state, resolved[0], guess)
+    if question is None:
+        await callback.answer(markup, show_alert=True)
+        return
+    await _edit(callback, state, question, markup)
+    await callback.answer()
 
 
 @router.message(ReceiveAdd.barcode, F.text, ~F.text.in_(qa._ENTRY_BUTTONS))
@@ -293,7 +372,7 @@ async def receive_no_code(callback: CallbackQuery, state: FSMContext) -> None:
 
 # ---- фото товара и название ----
 
-@router.message(ReceiveAdd.photo, F.photo)
+@router.message(ReceiveAdd.photo, _IMAGE)
 async def receive_product_photo(message: Message, state: FSMContext) -> None:
     resolved = _actor(message.from_user.id)
     if not resolved:
@@ -302,13 +381,11 @@ async def receive_product_photo(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     if data.get("prompt_message_id"):
         await qa._safe_edit(message.bot, message.chat.id, data["prompt_message_id"], _screen(data, "⏳ Читаю название с фото…"))
-    file_id = message.photo[-1].file_id
-    file = await message.bot.get_file(file_id)
-    photo_bytes = (await message.bot.download_file(file.file_path)).read()
+    file_id, photo_bytes = await _image_bytes(message)
     await state.update_data(photo_file_id=file_id)
     name = None
     try:
-        read = await asyncio.to_thread(vision_ocr.extract_product_label, photo_bytes)
+        read = await asyncio.to_thread(vision_ocr.extract_product_label, _for_model(photo_bytes))
         name = " ".join((read.get("name") or "").split()) or None
     except vision_ocr.VisionOcrError:
         logger.info("receive_add: label not read", exc_info=True)

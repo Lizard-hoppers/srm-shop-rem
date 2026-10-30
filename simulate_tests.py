@@ -7207,7 +7207,7 @@ def scenario_receive_add_chat() -> None:
 
     from aiogram import Bot
     from aiogram.fsm.storage.base import StorageKey
-    from aiogram.types import CallbackQuery, Chat, File, Message, PhotoSize, Update, User
+    from aiogram.types import CallbackQuery, Chat, Document, File, Message, PhotoSize, Update, User
 
     from bot import receive_add_flow  # noqa: F401 — the router under test
     from core import barcode_scan, product_photos, vision_ocr, warehouses
@@ -7270,10 +7270,37 @@ def scenario_receive_add_chat() -> None:
                 buf.seek(0)
                 return buf
 
-        read = {"barcode": None, "label": {"name": None, "sku": None}}
+        # zbar on a real barcode squeezed the way Telegram squeezes a photo:
+        # a small Code128 label in a big frame (the new upscale/threshold passes)
+        from core import barcode_label
+        label = Image.open(io.BytesIO(barcode_label.generate_label_png("4820000000017", "Чехол", 450, compact=True))).convert("L")
+        label = label.resize((label.width // 2, label.height // 2), Image.LANCZOS)
+        frame = Image.new("L", (1280, 960), 255)
+        frame.paste(label, (900, 700))
+        shot = io.BytesIO()
+        frame.save(shot, format="JPEG", quality=80)
+        from pyzbar.pyzbar import decode as _plain_zbar
+        check("a plain zbar pass misses a small barcode in a big Telegram-sized photo…",
+              not _plain_zbar(Image.open(io.BytesIO(shot.getvalue())).convert("L")))
+        check("…the upscaled/thresholded passes read it", barcode_scan.decode_barcode(shot.getvalue()) == "4820000000017")
+        check("a blank photo reads as nothing", barcode_scan.decode_barcode(b"not an image") is None)
+        check("EAN/UPC check digit: right ones pass, a typo does not",
+              barcode_scan.ean_checksum_ok("4006381333931") and barcode_scan.ean_checksum_ok("73513537")
+              and barcode_scan.ean_checksum_ok("036000291452") and not barcode_scan.ean_checksum_ok("4006381333932")
+              and not barcode_scan.ean_checksum_ok("12345") and not barcode_scan.ean_checksum_ok("40063813339a1"))
+        orig_call = vision_ocr._call_vision_json
+        for reply, want in (({"digits": "4006 3813-33931"}, "4006381333931"), ({"digits": None}, None),
+                            ({"digits": "12ab5678"}, None), ({"digits": 1234}, None), ([], None)):
+            vision_ocr._call_vision_json = lambda _p, _b, model=None, r=reply: r
+            check(f"model's barcode digits {reply!r} → {want!r}", vision_ocr.extract_barcode_digits(b"x") == want)
+        vision_ocr._call_vision_json = orig_call
+
+        read = {"barcode": None, "label": {"name": None, "sku": None}, "digits": None}
         orig_decode, orig_label, orig_dir = barcode_scan.decode_barcode, vision_ocr.extract_product_label, product_photos.PHOTO_DIR
+        orig_digits = vision_ocr.extract_barcode_digits
         barcode_scan.decode_barcode = lambda _b: read["barcode"]
         vision_ocr.extract_product_label = lambda _b: dict(read["label"])
+        vision_ocr.extract_barcode_digits = lambda _b: read["digits"]
         product_photos.PHOTO_DIR = os.path.join(tmp, "product_photos")
 
         def an_qty(product_id):
@@ -7297,11 +7324,14 @@ def scenario_receive_add_chat() -> None:
                     id=str(counter), from_user=user(uid), chat_instance="ci", data=data,
                     message=Message(message_id=message_id, date=datetime.datetime.now(), chat=chat(uid), text="экран"))))
 
-            async def say(text: str | None = None, photo: bool = False, uid: int = KEEPER_TG):
+            async def say(text: str | None = None, photo: bool = False, uid: int = KEEPER_TG, as_file: bool = False):
                 nonlocal counter
                 counter += 1
                 log.clear()
-                extra = {"photo": [PhotoSize(file_id=f"p{counter}", file_unique_id="pu", width=40, height=40)]} if photo else {"text": text}
+                if as_file:
+                    extra = {"document": Document(file_id=f"d{counter}", file_unique_id="du", mime_type="image/jpeg", file_name="IMG.jpg")}
+                else:
+                    extra = {"photo": [PhotoSize(file_id=f"p{counter}", file_unique_id="pu", width=40, height=40)]} if photo else {"text": text}
                 await dp.feed_update(bot, Update(update_id=counter, message=Message(
                     message_id=counter, date=datetime.datetime.now(), chat=chat(uid), from_user=user(uid), **extra)))
 
@@ -7331,11 +7361,30 @@ def scenario_receive_add_chat() -> None:
                   and {"rcv_digits", "rcv_nocode"} <= set(last()["buttons"]))
 
             await say(photo=True)
-            check("barcode not read → said so, with «Ввести цифры» / «Товар без штрихкода»",
-                  "Не считал штрихкод" in last()["text"] and {"rcv_digits", "rcv_nocode"} <= set(last()["buttons"]))
+            check("barcode not read (nor its digits) → said so, «send as a file» hint, «Ввести цифры» / «Товар без штрихкода»",
+                  "Не считал штрихкод" in last()["text"] and "файлом" in last()["text"]
+                  and {"rcv_digits", "rcv_nocode"} <= set(last()["buttons"]))
 
-            read["barcode"] = "4820000000017"
+            # zbar fails, the model reads digits that don't check out → asked to confirm
+            read["digits"] = "12345678"
+            await say(as_file=True)
+            check("a photo sent as a FILE is taken on the barcode step too", "12345678" in last()["text"])
+            check("digits read by the model without a valid check digit → «Верно?» before using them",
+                  "Верно?" in last()["text"] and "rcv_guess_ok" in last()["buttons"] and "rcv_digits" in last()["buttons"]
+                  and await state() == "ReceiveAdd:barcode")
+            await tap("rcv_guess_ok")
+            check("«Да, это он» takes the digits → new item, photo of the item next",
+                  "сам товар" in last()["text"] and "12345678" in last()["text"] and await state() == "ReceiveAdd:photo")
+            await say("❌ Отмена")
+            await tap("rcv_add")
+            await tap(f"rcv_wh:{an_wh}")
+            check("the first barcode screen says a file photo reads better", "файлом" in last()["text"])
+            read["digits"] = None
+
+            # the model reads a valid EAN-13 → taken without asking
+            read["digits"] = "4820000000017"
             await say(photo=True)
+            read["digits"] = None
             check("a new barcode → asks for a photo of the item itself",
                   "Новый товар" in last()["text"] and "сам товар" in last()["text"] and "4820000000017" in last()["text"])
             read["label"] = {"name": "Чехол iPhone 13 силикон", "sku": None}
