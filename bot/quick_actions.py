@@ -306,6 +306,19 @@ class PartAdd(StatesGroup):
     cost = State()
 
 
+class ReceiveAdd(StatesGroup):
+    """«📦 Приход → ➕ Добавить товар» — handlers live in
+    bot/receive_add_flow.py; declared here so the shared cancel/fallback
+    handlers at the bottom of this module cover it like every other flow."""
+    warehouse = State()
+    barcode = State()
+    digits = State()
+    photo = State()
+    name = State()
+    price = State()
+    qty = State()
+
+
 class ShiftOpen(StatesGroup):
     """«Есть расхождение» — one text step: what exactly doesn't match."""
     note = State()
@@ -930,12 +943,10 @@ async def client_menu_search(callback: CallbackQuery, state: FSMContext) -> None
 
 @router.message(F.text == BTN_PURCHASE, F.chat.type == "private")
 async def purchase_start(message: Message, state: FSMContext) -> None:
-    """No FSM state of its own — just a discoverable prompt for an
-    already-working, photo-triggered flow (bot/purchase_photo.py's
-    photo_invoice handler already fires on any DM photo from receiving
-    staff, OCRs it via OpenAI vision, and offers a draft to confirm — that
-    handler already edits its own status message in place, Clean-Chat
-    style, from "📷 Распознаю…" straight to the draft preview). state.clear()
+    """A choice (30.10): «🧾 Накладная (фото)» — the photo-triggered flow
+    of bot/purchase_photo.py (fires on any DM photo from receiving staff
+    with no dialog open, OCRs it, offers a draft) — or «➕ Добавить товар»,
+    one item at a time (bot/receive_add_flow.py). state.clear() (_reset)
     matters here: without it, a photo sent right after this while some
     OTHER flow's own .photo state was still active (forgot to cancel)
     would get grabbed by that flow's photo handler instead of ever
@@ -952,7 +963,10 @@ async def purchase_start(message: Message, state: FSMContext) -> None:
         return
     await _reset(message, state)
     await _consume(state, message)
-    await message.answer("📦 Пришлите фото накладной — распознаю позиции и предложу оприходовать.")
+    # 30.10: накладная или товар по одному (bot/receive_add_flow.py).
+    from bot.receive_add_flow import purchase_menu
+
+    await _repost(message, state, "📦 <b>Приход</b>\nЧто оформляем?", purchase_menu())
 
 
 @router.message(F.text.in_({BTN_OUR_REPAIR, OLD_BOT_OWN}), F.chat.type == "private")

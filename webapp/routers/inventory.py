@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import os
-import uuid
-
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, RedirectResponse, Response
@@ -12,8 +9,8 @@ from core import barcode_scan
 from core import channel_posts
 from core import documents as core_documents
 from core import inventory as core_inventory
-from core import photos as core_photos
 from core import print_queue
+from core import product_photos as core_product_photos
 from core import purchases as core_purchases
 from core import store_settings as core_store_settings
 from core import vision_ocr
@@ -27,7 +24,6 @@ router = APIRouter(prefix="/inventory")
 
 _STOCK_WRITE_ROLES = ("owner", "admin", "storekeeper", "manager")
 
-_PHOTO_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", "product_photos")
 _PHOTO_EXT_BY_CONTENT_TYPE = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
 _MAX_PHOTO_BYTES = 15 * 1024 * 1024  # comfortably under nginx's client_max_body_size (20M)
 
@@ -374,23 +370,11 @@ async def product_photo_view(
     if len(data) > _MAX_PHOTO_BYTES:
         return JSONResponse({"ok": False, "error": "Фото слишком большое (максимум 15 МБ)."}, status_code=413)
 
-    compressed = await run_in_threadpool(core_photos.compress_photo, data)
-    if compressed is not None:
-        data, ext = compressed, ".jpg"
+    def _save() -> str:
+        with get_conn() as conn:
+            return core_product_photos.save(conn, product_id, data, ext)
 
-    os.makedirs(_PHOTO_DIR, exist_ok=True)
-    filename = f"{product_id}_{uuid.uuid4().hex}{ext}"
-    with open(os.path.join(_PHOTO_DIR, filename), "wb") as f:
-        f.write(data)
-
-    with get_conn() as conn:
-        old = core_inventory.get_product(conn, product_id)
-        core_inventory.set_product_photo(conn, product_id, filename)
-    if old and old["photo_path"]:
-        old_path = os.path.join(_PHOTO_DIR, old["photo_path"])
-        if os.path.exists(old_path):
-            os.remove(old_path)
-
+    filename = await run_in_threadpool(_save)
     return JSONResponse({"ok": True, "photo_url": f"/static/product_photos/{filename}"})
 
 

@@ -13,6 +13,11 @@ from core import storage as _storage
 
 KIND_LABELS = {"point": "Точка", "master": "Мастер", "transit": "В пути"}
 
+# Имя склада, который ensure_warehouses заводит каждой точке. Остальные
+# склады точки (30.10: «Андрей/Никита» на 007 — товар владельцев) идут со
+# своим именем рядом с названием точки.
+MAIN_POINT_NAME = "Основной склад"
+
 # Who may send from / receive into a точка's склад.
 STOCK_ROLES = ("owner", "admin", "storekeeper", "manager")
 _EVERYWHERE_ROLES = ("owner", "admin")
@@ -25,8 +30,11 @@ _SELECT = """SELECT warehouses.*, locations.name AS location_name, staff.name AS
 
 
 def display_name(warehouse) -> str:
-    """«007» for a точка's склад, «Мастер: Сергей» for a master's, «В пути»."""
+    """«007» for a точка's main склад, «007 · Андрей/Никита» for its other
+    склад, «Мастер: Сергей» for a master's, «В пути»."""
     if warehouse["kind"] == "point":
+        if warehouse["location_name"] and warehouse["name"] and warehouse["name"] != MAIN_POINT_NAME:
+            return f"{warehouse['location_name']} · {warehouse['name']}"
         return warehouse["location_name"] or warehouse["name"]
     if warehouse["kind"] == "master":
         return f"Мастер: {warehouse['staff_name'] or warehouse['name']}"
@@ -60,9 +68,50 @@ def get_warehouse(conn: sqlite3.Connection, warehouse_id: int | None) -> sqlite3
 
 
 def point_warehouse(conn: sqlite3.Connection, location_id: int) -> sqlite3.Row | None:
+    """The точка's main склад — the first one it got. A точка may have more
+    (point_warehouses); everything that doesn't ask which goes here."""
     return conn.execute(
-        _SELECT + " WHERE warehouses.kind = 'point' AND warehouses.location_id = ?", (location_id,)
+        _SELECT + " WHERE warehouses.kind = 'point' AND warehouses.location_id = ? ORDER BY warehouses.id LIMIT 1",
+        (location_id,),
     ).fetchone()
+
+
+def point_warehouses(conn: sqlite3.Connection, location_id: int) -> list[sqlite3.Row]:
+    """Every active склад of a точка, the main one first."""
+    return conn.execute(
+        _SELECT + """ WHERE warehouses.kind = 'point' AND warehouses.location_id = ? AND warehouses.active = 1
+                      ORDER BY warehouses.id""",
+        (location_id,),
+    ).fetchall()
+
+
+def add_point_warehouse(conn: sqlite3.Connection, location_id: int, name: str, cell_code: str) -> int:
+    """A second (third…) склад at a точка — e.g. the owners' own goods kept
+    apart from the shop's. Gets one cell, since stock always lives in a
+    cell. Idempotent by name: running it again returns the same склад."""
+    name = name.strip()
+    row = conn.execute(
+        "SELECT id FROM warehouses WHERE kind = 'point' AND location_id = ? AND name = ?", (location_id, name)
+    ).fetchone()
+    if row:
+        warehouse_id = row["id"]
+    else:
+        warehouse_id = conn.execute(
+            "INSERT INTO warehouses (kind, location_id, name) VALUES ('point', ?, ?)", (location_id, name)
+        ).lastrowid
+    if not conn.execute("SELECT 1 FROM storage_cells WHERE warehouse_id = ?", (warehouse_id,)).fetchone():
+        conn.execute(
+            "INSERT INTO storage_cells (code, note, warehouse_id) VALUES (?, ?, ?)", (cell_code, name, warehouse_id)
+        )
+    return warehouse_id
+
+
+def receive_cell_id(conn: sqlite3.Connection, warehouse_id: int) -> int | None:
+    """Where goods taken into this склад land: its first cell."""
+    row = conn.execute(
+        "SELECT id FROM storage_cells WHERE warehouse_id = ? ORDER BY id LIMIT 1", (warehouse_id,)
+    ).fetchone()
+    return row["id"] if row else None
 
 
 def master_warehouse(conn: sqlite3.Connection, staff_id: int) -> sqlite3.Row | None:
@@ -139,8 +188,7 @@ def sendable_from(conn: sqlite3.Connection, staff: sqlite3.Row, location_id: int
     if staff["role"] in _EVERYWHERE_ROLES:
         return [w for w in list_warehouses(conn) if w["kind"] != "transit"]
     if staff["role"] in STOCK_ROLES:
-        own = point_warehouse(conn, location_id)
-        return [own] if own else []
+        return point_warehouses(conn, location_id)
     return []
 
 

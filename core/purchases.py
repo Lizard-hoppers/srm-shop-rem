@@ -10,6 +10,7 @@ import sqlite3
 from core import documents as _documents
 from core import locations as _locations
 from core import inventory as _inventory
+from core import warehouses as _warehouses
 from core.inventory import cell_location_id, record_movement
 
 
@@ -178,6 +179,88 @@ def list_receipts_for_product(conn: sqlite3.Connection, product_id: int) -> list
            ORDER BY goods_receipts.created_at DESC, goods_receipts.id DESC""",
         (product_id,),
     ).fetchall()
+
+
+# ---- один товар из бота (30.10) ----
+
+def receive_one(
+    conn: sqlite3.Connection,
+    *,
+    staff_id: int,
+    location_id: int,
+    warehouse_id: int,
+    qty: int,
+    price: int,
+    product_id: int | None = None,
+    name: str | None = None,
+    sku: str | None = None,
+    key: str | None = None,
+) -> dict:
+    """«📦 Приход → ➕ Добавить товар» в боте: один товар — один ПХ.
+
+    `price` — цена ПРОДАЖИ за штуку (её спрашивает бот), она становится
+    ценой товара. Закупка неизвестна — партия без себестоимости. Товар
+    находится по product_id или штрихкоду, иначе заводится новый (на
+    продажу, «шт»). Ложится в первую ячейку выбранного склада точки.
+    Повтор с тем же `key` ничего не проводит и возвращает уже сделанное.
+    ReceiptError (текст для сотрудника) — до записи чего-либо."""
+    done = _documents.find_by_key(conn, key)
+    if done:
+        return _receive_one_result(conn, done)
+    if not isinstance(qty, int) or not 1 <= qty <= 9999:
+        raise ReceiptError("Количество — целое число от 1 до 9999.")
+    if not price or price <= 0:
+        raise ReceiptError("Укажите цену продажи больше нуля.")
+    warehouse = _warehouses.get_warehouse(conn, warehouse_id)
+    if not warehouse or warehouse["kind"] != "point" or warehouse["location_id"] != location_id:
+        raise ReceiptError("Этот склад не относится к вашей точке.")
+    cell_id = _warehouses.receive_cell_id(conn, warehouse_id)
+    if not cell_id:
+        raise ReceiptError("У склада нет ячейки — заведите её в приложении.")
+
+    sku = (sku or "").strip() or None
+    product = _inventory.get_product(conn, product_id) if product_id else None
+    if not product and sku:
+        product = _inventory.get_product_by_sku(conn, sku)
+    if product and product["is_serial"]:
+        raise ReceiptError(f"«{product['name']}» — товар с IMEI, его приходуют в приложении.")
+    if product:
+        conn.execute("UPDATE products SET price = ? WHERE id = ?", (price, product["id"]))
+        product_id = product["id"]
+    else:
+        name = " ".join((name or "").split())
+        if not name:
+            raise ReceiptError("Нужно название товара.")
+        product_id = _inventory.create_product(
+            conn, name=name, sku=sku, category=None, unit="шт",
+            is_repair_part=False, is_sellable=True, min_qty=0, price=price,
+        )
+
+    receipt_id = create_receipt(conn, None, None, staff_id, [(product_id, cell_id, qty, None)],
+                                location_id=location_id, key=key)
+    return _receive_one_result(conn, _documents.get_for(conn, "receipt", receipt_id), created=product is None)
+
+
+def _receive_one_result(conn: sqlite3.Connection, doc: sqlite3.Row, created: bool = False) -> dict:
+    item = conn.execute(
+        """SELECT goods_receipt_items.*, products.name, products.price, storage_cells.warehouse_id
+           FROM goods_receipt_items
+           JOIN products ON products.id = goods_receipt_items.product_id
+           JOIN storage_cells ON storage_cells.id = goods_receipt_items.cell_id
+           WHERE goods_receipt_items.receipt_id = ? ORDER BY goods_receipt_items.id LIMIT 1""",
+        (doc["ref_id"],),
+    ).fetchone()
+    in_warehouse = conn.execute(
+        """SELECT COALESCE(SUM(stock.qty), 0) AS n FROM stock
+           JOIN storage_cells ON storage_cells.id = stock.cell_id
+           WHERE stock.product_id = ? AND storage_cells.warehouse_id = ?""",
+        (item["product_id"], item["warehouse_id"]),
+    ).fetchone()["n"]
+    return {
+        "doc_id": doc["id"], "label": _documents.doc_label(doc), "receipt_id": doc["ref_id"],
+        "product_id": item["product_id"], "name": item["name"], "qty": item["qty"], "price": item["price"],
+        "warehouse_id": item["warehouse_id"], "in_warehouse": in_warehouse, "created": created,
+    }
 
 
 # ---- returns to a supplier (брак) ----

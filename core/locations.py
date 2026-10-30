@@ -48,9 +48,10 @@ def create_location(conn: sqlite3.Connection, name: str) -> int:
 
 
 def point_warehouse_id(conn: sqlite3.Connection, location_id: int | None) -> int:
-    """The точка's own склад — where a new cell goes unless told otherwise."""
+    """The точка's main склад — where a new cell goes unless told otherwise."""
     row = conn.execute(
-        "SELECT id FROM warehouses WHERE kind = 'point' AND location_id = ?", (resolve(conn, location_id),)
+        "SELECT id FROM warehouses WHERE kind = 'point' AND location_id = ? ORDER BY id LIMIT 1",
+        (resolve(conn, location_id),),
     ).fetchone()
     return row["id"]
 

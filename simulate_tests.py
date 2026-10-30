@@ -7195,6 +7195,273 @@ def scenario_part_add_chat() -> None:
             ra._sync_after_change = orig_sync
 
 
+def scenario_receive_add_chat() -> None:
+    """30.10 (Павел): «📦 Приход → ➕ Добавить товар» — товар по одному, как
+    в CRM: фото штрихкода → фото товара → цена ПРОДАЖИ → количество, и сразу
+    отдельный ПХ на выбранный склад точки. На 007 два склада: основной и
+    «Андрей/Никита» (товар владельцев). Всё через настоящий диспетчер."""
+    print("scenario: приход товара по одному в боте — штрихкод, фото, цена продажи, склад Андрей/Никита")
+    os.environ.setdefault("CRM_MINIAPP_URL", "https://example.invalid/miniapp")
+    import asyncio
+    import datetime
+
+    from aiogram import Bot
+    from aiogram.fsm.storage.base import StorageKey
+    from aiogram.types import CallbackQuery, Chat, File, Message, PhotoSize, Update, User
+
+    from bot import receive_add_flow  # noqa: F401 — the router under test
+    from core import barcode_scan, product_photos, vision_ocr, warehouses
+
+    KEEPER_TG, OTHER_TG, MASTER_TG = 887001, 887002, 887003
+
+    with tempfile.TemporaryDirectory() as tmp, _separate_base(tmp, "receive-add.sqlite3", ("007",)) as db_path:
+        with get_conn(db_path) as conn:
+            keeper = auth.create_staff(conn, "ra-keeper", "pass", "Макс", "manager", location_id=1)
+            auth.link_staff_telegram(conn, "ra-keeper", KEEPER_TG)
+            other = auth.create_staff(conn, "ra-other", "pass", "София", "manager", location_id=1)
+            auth.link_staff_telegram(conn, "ra-other", OTHER_TG)
+            auth.create_master(conn, "Эдик", MASTER_TG, "percent", 33)
+            inventory.create_cell(conn, "007-1", None, None, location_id=1)
+            main_wh = warehouses.point_warehouse(conn, 1)["id"]
+            an_wh = warehouses.add_point_warehouse(conn, 1, "Андрей/Никита", "АН-1")
+            check("adding the owners' склад again returns the same one (idempotent)",
+                  warehouses.add_point_warehouse(conn, 1, "Андрей/Никита", "АН-1") == an_wh)
+            check("the точка's main склад is still the default one",
+                  warehouses.point_warehouse(conn, 1)["id"] == main_wh and an_wh != main_wh
+                  and locations.point_warehouse_id(conn, 1) == main_wh)
+            check("a точка lists both its склады, the main one first",
+                  [w["id"] for w in warehouses.point_warehouses(conn, 1)] == [main_wh, an_wh])
+            check("the second склад is named after the точка and itself; the main one just by the точка",
+                  warehouses.display_name(warehouses.get_warehouse(conn, an_wh)) == "007 · Андрей/Никита"
+                  and warehouses.display_name(warehouses.get_warehouse(conn, main_wh)) == "007")
+            check("staff of the точка may send from either of its склады",
+                  {w["id"] for w in warehouses.sendable_from(conn, conn.execute("SELECT * FROM staff WHERE id = ?", (keeper,)).fetchone(), 1)} == {main_wh, an_wh})
+            check("a new cell still goes to the main склад",
+                  conn.execute("SELECT warehouse_id FROM storage_cells WHERE id = ?",
+                               (inventory.create_cell(conn, "007-2", None, None, location_id=1),)).fetchone()[0] == main_wh)
+            phone = inventory.create_product(conn, "iPhone 12", "4820000000099", None, "шт", False, True, 0, 9000, is_serial=True)
+            shifts.open_shift(conn, keeper, 1)
+            shifts.open_shift(conn, other, 1)
+
+        log: list[dict] = []
+        sent_ids: list[int] = []
+
+        class _FakeBot(Bot):
+            async def __call__(self, method, request_timeout=None):
+                name = type(method).__name__
+                markup = getattr(method, "reply_markup", None)
+                buttons = [b.callback_data for row in markup.inline_keyboard for b in row] if markup and hasattr(markup, "inline_keyboard") else []
+                if name == "AnswerCallbackQuery":
+                    log.append({"kind": "answer", "text": method.text or "", "alert": bool(method.show_alert)})
+                    return True
+                if name == "GetFile":
+                    return File(file_id=method.file_id, file_unique_id="u", file_path="photos/item.jpg")
+                if name in ("SendMessage", "EditMessageText"):
+                    log.append({"kind": name, "text": method.text, "buttons": buttons})
+                if name == "SendMessage":
+                    # unique ids, as in a real chat — the double-tap key is the screen message id
+                    sent_ids.append(9000 + len(sent_ids))
+                    return Message(message_id=sent_ids[-1], date=datetime.datetime.now(), chat=Chat(id=method.chat_id, type="private"), text="x")
+                return True
+
+            async def download_file(self, file_path, destination=None, timeout=30, chunk_size=65536, seek=True):
+                buf = io.BytesIO()
+                Image.new("RGB", (40, 40), "white").save(buf, format="JPEG")
+                buf.seek(0)
+                return buf
+
+        read = {"barcode": None, "label": {"name": None, "sku": None}}
+        orig_decode, orig_label, orig_dir = barcode_scan.decode_barcode, vision_ocr.extract_product_label, product_photos.PHOTO_DIR
+        barcode_scan.decode_barcode = lambda _b: read["barcode"]
+        vision_ocr.extract_product_label = lambda _b: dict(read["label"])
+        product_photos.PHOTO_DIR = os.path.join(tmp, "product_photos")
+
+        def an_qty(product_id):
+            with get_conn(db_path) as conn:
+                return conn.execute(
+                    """SELECT COALESCE(SUM(stock.qty), 0) FROM stock JOIN storage_cells ON storage_cells.id = stock.cell_id
+                       WHERE stock.product_id = ? AND storage_cells.warehouse_id = ?""", (product_id, an_wh)).fetchone()[0]
+
+        async def run() -> None:
+            bot = _FakeBot(token="123456:test-bot-token-not-real")
+            dp = _the_dispatcher()
+            counter = 60000
+            user = lambda uid: User(id=uid, is_bot=False, first_name="M")
+            chat = lambda uid: Chat(id=uid, type="private")
+
+            async def tap(data: str, uid: int = KEEPER_TG, message_id: int = 4343):
+                nonlocal counter
+                counter += 1
+                log.clear()
+                await dp.feed_update(bot, Update(update_id=counter, callback_query=CallbackQuery(
+                    id=str(counter), from_user=user(uid), chat_instance="ci", data=data,
+                    message=Message(message_id=message_id, date=datetime.datetime.now(), chat=chat(uid), text="экран"))))
+
+            async def say(text: str | None = None, photo: bool = False, uid: int = KEEPER_TG):
+                nonlocal counter
+                counter += 1
+                log.clear()
+                extra = {"photo": [PhotoSize(file_id=f"p{counter}", file_unique_id="pu", width=40, height=40)]} if photo else {"text": text}
+                await dp.feed_update(bot, Update(update_id=counter, message=Message(
+                    message_id=counter, date=datetime.datetime.now(), chat=chat(uid), from_user=user(uid), **extra)))
+
+            screens = lambda: [e for e in log if e["kind"] in ("SendMessage", "EditMessageText")]
+            last = lambda: screens()[-1] if screens() else {"text": "", "buttons": [], "kind": ""}
+            alert = lambda: next((e for e in log if e["kind"] == "answer" and e["alert"]), None)
+            key = StorageKey(bot_id=123456, chat_id=KEEPER_TG, user_id=KEEPER_TG)
+            state = lambda: dp.storage.get_state(key=key)
+            await dp.storage.set_state(key=key, state=None)
+
+            await say("📦 Приход")
+            check("«📦 Приход» now asks: накладная or товар по одному",
+                  "Что оформляем" in last()["text"] and {"rcv_inv", "rcv_add"} <= set(last()["buttons"]))
+            await tap("rcv_inv")
+            check("«🧾 Накладная» is the old prompt — photo of the invoice, no dialog left open",
+                  "фото накладной" in last()["text"] and await state() is None)
+
+            await tap("rcv_add", MASTER_TG)
+            check("a master may not do приход", alert() is not None and "Недостаточно прав" in alert()["text"])
+
+            await tap("rcv_add")
+            check("two склады at the точка → asked which one first",
+                  "На какой склад" in last()["text"] and f"rcv_wh:{main_wh}" in last()["buttons"] and f"rcv_wh:{an_wh}" in last()["buttons"])
+            await tap(f"rcv_wh:{an_wh}")
+            check("the склад is chosen → photo of the barcode, the склад in the header",
+                  "штрихкод" in last()["text"] and "Андрей/Никита" in last()["text"]
+                  and {"rcv_digits", "rcv_nocode"} <= set(last()["buttons"]))
+
+            await say(photo=True)
+            check("barcode not read → said so, with «Ввести цифры» / «Товар без штрихкода»",
+                  "Не считал штрихкод" in last()["text"] and {"rcv_digits", "rcv_nocode"} <= set(last()["buttons"]))
+
+            read["barcode"] = "4820000000017"
+            await say(photo=True)
+            check("a new barcode → asks for a photo of the item itself",
+                  "Новый товар" in last()["text"] and "сам товар" in last()["text"] and "4820000000017" in last()["text"])
+            read["label"] = {"name": "Чехол iPhone 13 силикон", "sku": None}
+            await say(photo=True)
+            check("the name is read off the item photo → asks the SALE price",
+                  "Чехол iPhone 13 силикон" in last()["text"] and "Цена продажи" in last()["text"] and "rcv_rename" in last()["buttons"])
+            await say("дорого")
+            check("a price that isn't a number is asked again", "числом" in last()["text"] and "Цена продажи" in last()["text"])
+            await say("450 грн")
+            check("price → how many, with quick buttons", "Сколько штук" in last()["text"] and "rcv_qty:2" in last()["buttons"])
+            await tap("rcv_qty:2", message_id=sent_ids[-1])
+            done = last()
+            check("done at once: ПХ card with qty, sale price, склад and «Следующий»/«Вернуть»",
+                  "ПХ-" in done["text"] and "2 шт" in done["text"] and "450 грн" in done["text"] and "Андрей/Никита" in done["text"]
+                  and f"rcv_next:{an_wh}" in done["buttons"] and any(b.startswith("rcv_undo:") for b in done["buttons"]))
+            check("…and the dialog is closed", await state() is None)
+            first_doc = int(next(b for b in done["buttons"] if b.startswith("rcv_undo:")).split(":")[1])
+            with get_conn(db_path) as conn:
+                product = inventory.get_product_by_sku(conn, "4820000000017")
+                check("a new sellable product card: the barcode as SKU, the sale price as its price",
+                      product is not None and product["name"] == "Чехол iPhone 13 силикон" and product["price"] == 450
+                      and product["is_sellable"] == 1 and product["unit"] == "шт")
+                check("the item photo became the card's photo",
+                      product["photo_path"] and os.path.exists(os.path.join(product_photos.PHOTO_DIR, product["photo_path"])))
+                doc = documents.get(conn, first_doc)
+                batch = conn.execute("SELECT * FROM batches WHERE receipt_id = ?", (doc["ref_id"],)).fetchone()
+                check("it is a posted ПХ in the journal, the партия without a purchase cost",
+                      doc["doc_type"] == "receipt" and doc["status"] == "posted" and batch["unit_cost"] is None)
+            check("2 pcs are on the «Андрей/Никита» склад", an_qty(product["id"]) == 2)
+            with get_conn(db_path) as conn:
+                check("the main склад got nothing", warehouses.total_qty(conn, main_wh) == 0)
+
+            # the same item again — typed barcode, the current price in one tap
+            await tap(f"rcv_next:{an_wh}", message_id=sent_ids[-1])
+            check("«Следующий товар» opens a new screen below, the ПХ card stays",
+                  last()["kind"] == "SendMessage" and "штрихкод" in last()["text"])
+            await say("4820000000017")
+            check("a known barcode → the item by name, its current price offered",
+                  "уже есть в базе" in last()["text"] and "Чехол iPhone 13 силикон" in last()["text"] and "rcv_price_keep" in last()["buttons"])
+            await tap("rcv_price_keep")
+            await say("3")
+            second = last()
+            check("typed quantity posts a second ПХ", "ПХ-" in second["text"] and "3 шт" in second["text"] and "На складе теперь: 5 шт" in second["text"])
+            second_doc = int(next(b for b in second["buttons"] if b.startswith("rcv_undo:")).split(":")[1])
+            with get_conn(db_path) as conn:
+                check("no duplicate card for the same barcode; each item its own ПХ",
+                      conn.execute("SELECT COUNT(*) FROM products WHERE sku = '4820000000017'").fetchone()[0] == 1
+                      and conn.execute("SELECT COUNT(*) FROM documents WHERE doc_type = 'receipt'").fetchone()[0] == 2)
+                again = purchases.receive_one(conn, staff_id=keeper, location_id=1, warehouse_id=an_wh, qty=3, price=450,
+                                              product_id=product["id"], key=documents.get(conn, second_doc)["idempotency_key"])
+                check("the same key twice (double tap) posts nothing new",
+                      again["doc_id"] == second_doc and conn.execute("SELECT COUNT(*) FROM documents WHERE doc_type = 'receipt'").fetchone()[0] == 2)
+            check("5 pcs on the owners' склад now", an_qty(product["id"]) == 5)
+
+            # «↩️ Вернуть»: not someone else's, but your own
+            await tap(f"rcv_undo:{second_doc}", OTHER_TG)
+            check("another manager can't undo someone else's ПХ", alert() is not None and "Вернуть может" in alert()["text"])
+            await tap(f"rcv_undo:{second_doc}")
+            check("«Вернуть» cancels the ПХ and says so", "отменён" in last()["text"] and f"rcv_next:{an_wh}" in last()["buttons"])
+            with get_conn(db_path) as conn:
+                check("…the document stays in the journal, cancelled", documents.get(conn, second_doc)["status"] == "cancelled")
+            check("…and the 3 pcs left the склад", an_qty(product["id"]) == 2)
+            await tap(f"rcv_undo:{second_doc}")
+            check("a second «Вернуть» changes nothing", alert() is not None and "уже отменён" in alert()["text"] and an_qty(product["id"]) == 2)
+
+            # no barcode at all: skip the photo, type the name
+            await tap(f"rcv_next:{an_wh}")
+            await tap("rcv_nocode")
+            check("«Товар без штрихкода» → photo of the item, or skip it", "сам товар" in last()["text"] and "rcv_skipphoto" in last()["buttons"])
+            await tap("rcv_skipphoto")
+            check("no photo → the name is asked", "Напишите название" in last()["text"])
+            await say("Защитное стекло 9D")
+            await say("150")
+            await say("1 шт")
+            with get_conn(db_path) as conn:
+                glass = conn.execute("SELECT * FROM products WHERE name = 'Защитное стекло 9D'").fetchone()
+            check("a product without a barcode is posted too (no SKU, no photo)",
+                  glass is not None and glass["sku"] is None and glass["photo_path"] is None and glass["price"] == 150
+                  and an_qty(glass["id"]) == 1 and "ПХ-" in last()["text"])
+
+            # typed digits, a serial product refused
+            await tap(f"rcv_next:{an_wh}")
+            await tap("rcv_digits")
+            check("«Ввести цифры» asks for the digits", "Напишите цифры" in last()["text"])
+            await say("12ab")
+            check("not digits → asked again", "6–14 цифр" in last()["text"])
+            await say("4820000000099")
+            check("a товар с IMEI is not taken here", "IMEI" in last()["text"] and await state() is not None)
+
+            # ❌ Отмена ends it at any step
+            await say("❌ Отмена")
+            check("❌ Отмена ends the dialog", await state() is None)
+            for step in ("barcode", "digits", "photo", "name", "price", "qty"):
+                await dp.storage.set_state(key=key, state=f"ReceiveAdd:{step}")
+                await dp.storage.set_data(key=key, data={"warehouse_id": an_wh, "prompt_message_id": 777})
+                await say("❌ Отмена")
+                if await state() is not None:
+                    check(f"❌ Отмена at step {step}", False)
+
+            # one склад only → no question which
+            with get_conn(db_path) as conn:
+                conn.execute("UPDATE warehouses SET active = 0 WHERE id = ?", (an_wh,))
+            await tap("rcv_add")
+            check("a точка with one склад goes straight to the barcode", "штрихкод" in last()["text"] and "На какой склад" not in last()["text"])
+            await say("❌ Отмена")
+            with get_conn(db_path) as conn:
+                conn.execute("UPDATE warehouses SET active = 1 WHERE id = ?", (an_wh,))
+
+            with get_conn(db_path) as conn:
+                for bad, why in ((dict(qty=0, price=10), "Количество"), (dict(qty=1, price=0), "цену продажи"),
+                                 (dict(qty=1, price=10, warehouse_id=99999), "склад")):
+                    args = dict(staff_id=keeper, location_id=1, warehouse_id=an_wh, name="Х")
+                    args.update(bad)
+                    try:
+                        purchases.receive_one(conn, **args)
+                        check(f"receive_one refuses: {why}", False)
+                    except purchases.ReceiptError as exc:
+                        check(f"receive_one refuses: {why}", why.lower() in str(exc).lower())
+
+        try:
+            asyncio.run(run())
+        finally:
+            barcode_scan.decode_barcode, vision_ocr.extract_product_label = orig_decode, orig_label
+            product_photos.PHOTO_DIR = orig_dir
+
+
 def scenario_repair_notes() -> None:
     """Заметки по ремонту: ответ на карточку в рабочей группе — текстом или
     голосом — остаётся в ремонте, коротко, с оригиналом рядом."""
@@ -11138,6 +11405,7 @@ def main() -> None:
     scenario_overview()
     scenario_bot_dispatch()
     scenario_part_add_chat()
+    scenario_receive_add_chat()
     scenario_repair_notes()
     scenario_bot_questions()
     scenario_reminders()

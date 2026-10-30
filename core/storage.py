@@ -1035,7 +1035,7 @@ def _backfill_locations(conn: sqlite3.Connection) -> None:
     for table in _LOCATION_SCOPED_TABLES:
         conn.execute(f"UPDATE {table} SET location_id = ? WHERE location_id IS NULL", (first,))
     first_warehouse = conn.execute(
-        "SELECT id FROM warehouses WHERE kind = 'point' AND location_id = ?", (first,)
+        "SELECT id FROM warehouses WHERE kind = 'point' AND location_id = ? ORDER BY id LIMIT 1", (first,)
     ).fetchone()["id"]
     conn.execute("UPDATE storage_cells SET warehouse_id = ? WHERE warehouse_id IS NULL", (first_warehouse,))
 
